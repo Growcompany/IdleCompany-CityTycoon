@@ -71,6 +71,33 @@ Screen 좌표를 ViewportScale로 나누는 가정을 제거하고, Viewport Loc
 - [모바일·쿠킹 규칙](../AGENTS.md#모바일쿠킹-규칙)
 - [런타임 문자열 진입 에셋 로드 구현](../Source/CompanyGrowthRenewal/Private/UI/HUD/MissionGuideOverlayWidget.cpp)
 
+<a id="camera-framing"></a>
+
+## 6. 건물 포커스 프레이밍 — 요구가 네 번 바뀐 카메라
+
+<div align="center">
+  <img src="images/camera-framing-geometry.png" alt="Camera framing geometry: pitch, arm length, FOV and building height" width="720">
+  <br>
+  <sub>줌값 하나가 팔길이·피치·FOV를 동시에 바꾸므로 "화면 점유율 → 줌값" 역산이 순환한다</sub>
+</div>
+
+### 문제
+
+건물 관리 패널을 열 때 건물이 화면의 일정 비율을 차지하도록 카메라를 맞춰야 했습니다. 그런데 이 프로젝트의 카메라는 <code>ZoomValue</code> 하나가 SpringArm 길이·피치(-40°→-55°)·FOV(30°→20°)를 동시에 결정하는 단일 진실 소스 설계라, 필요한 거리 ← FOV·피치 ← 줌값 ← 필요한 거리로 역산이 순환하고, 팔길이는 비선형 <code>ZoomCurve</code>라 닫힌 식이 없습니다.
+
+### 접근과 결과
+
+1. **높이 비례 프레이밍** — 외부 5회 수렴 × 내부 15회 이진탐색으로 <code>ZoomValue</code>를 역산하고, <code>cos(pitch)</code>로 수직 압축을 보정했습니다. 첫 구현은 보정 방향이 반대였고 로그(줌값 0.079, 거리 7,258cm)로 발견해 수정했습니다. 계산 중 바꾼 줌 상태는 항상 복원하고 실제 이동은 Tick 보간으로만 합니다.
+2. **층수 증축과 초고층** — 높이→점유율 보간에 상한이 없어 초고층에서 카메라가 너무 멀어졌습니다. 화면 위치를 직접 지정하고, 높이 20,000cm 이상은 바닥을 하단 10%에 고정하고 꼭대기는 포기합니다. 증축 성공 이벤트에서 재프레이밍합니다.
+3. **시야 가림 고스트** — 포커스가 Yaw를 고려하지 않아 앞줄 건물이 타깃을 가렸습니다. 카메라 회전(밀집 지역엔 빈 각도가 없음)과 메시 반투명화(층별 ISM 정렬 붕괴·창문 발광 손실)를 기각하고, 라인트레이스 5발로 가림 건물을 찾아 본체를 숨기고 볼록 큐브 1개를 반투명 골조로 띄웁니다. 판정(<code>UFocusOcclusionHandler</code>)과 표현(건물 액터)을 분리해 순수 수학층만 유닛 테스트로 덮습니다.
+4. **오피스 고층 외관 프레이밍** — 로드 완료 후 1회, 열린 코너와 파사드 첫 4m를 hero box로 잡고 8모서리를 실제 피치·팔길이·FOV·종횡비로 투영해 정규화 화면 안에 드는 가장 가까운 줌을 32구간 순차 탐색 + 8회 정제로 찾습니다. 단조성을 가정하지 않으며, 확장 이벤트에는 바인딩하지 않아 플레이어 시점을 보존합니다.
+
+- [카메라 SOT](01_Systems/Player/CAMERA_MOVEMENT_SYSTEM.md)
+- [PlayerCamera.cpp](../Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.cpp) · [MovementInputHandler.cpp](../Source/CompanyGrowthRenewal/Private/Player/Components/MovementInputHandler.cpp)
+- [FocusOcclusionHandler.cpp](../Source/CompanyGrowthRenewal/Private/Player/Components/FocusOcclusionHandler.cpp) · [FocusOcclusionTests.cpp](../Source/CompanyGrowthRenewal/Private/Tests/FocusOcclusionTests.cpp)
+- [OfficeCameraFraming.cpp](../Source/CompanyGrowthRenewal/Private/Player/OfficeCameraFraming.cpp)
+- [4막 전체 기록 (Notion)](https://cookie-roquefort-35d.notion.site/4-3c76907ae0ce81d2ab67e774ca6e714e)
+
 ## 검증 원칙
 
 문제를 고쳤다는 표현은 원래 현상을 재현하는 증거가 사라졌을 때만 사용합니다. 빌드 성공은 런타임·실기기 성공을 대신하지 않으며, 정지 이미지도 시간축 문제 해결을 대신하지 않습니다.
