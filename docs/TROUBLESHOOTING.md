@@ -56,6 +56,21 @@ Screen 좌표를 ViewportScale로 나누는 가정을 제거하고, Viewport Loc
 
 - [직렬화된 MID를 판별해 재생성하는 구현](../Source/CompanyGrowthRenewal/Private/Entity/Officeworker/StickOfficeworker.cpp)
 
+<a id="android-cooking"></a>
+
+## 5. Android 쿠킹 도달성
+
+### 문제
+
+에디터에서는 정상 표시되던 UI 머티리얼·텍스처가 Android 패키지에서만 누락됐습니다. C++ 런타임 문자열로 시작되는 진입 에셋은 쿠커가 정적으로 발견할 수 없었고, 그 아래의 직렬화된 참조까지 함께 도달하지 못했습니다.
+
+### 접근과 결과
+
+하드·소프트 참조라는 분류보다 **쿠커가 최초 참조를 볼 수 있는지**를 기준으로 의존성 경로를 추적했습니다. 런타임 문자열이 첫 진입점인 폴더만 수동 쿠킹 대상으로 등록하고, 이후 DataAsset·DataTable에 직렬화된 참조는 의존성 그래프가 따라가도록 구성했습니다. 직렬화된 <code>TSoftObjectPtr</code> 필드는 <code>IsNull()</code>로 경로 존재를 확인하고, 문자열 진입점은 <code>FSoftObjectPath</code>로 포인터를 구성해 <code>LoadSynchronous()</code>의 실패를 로그로 드러냅니다. 마지막으로 패키징 결과물과 실기기 화면에서 포함 여부를 확인합니다.
+
+- [모바일·쿠킹 규칙](../AGENTS.md#모바일쿠킹-규칙)
+- [런타임 문자열 진입 에셋 로드 구현](../Source/CompanyGrowthRenewal/Private/UI/HUD/MissionGuideOverlayWidget.cpp)
+
 ## 검증 원칙
 
 문제를 고쳤다는 표현은 원래 현상을 재현하는 증거가 사라졌을 때만 사용합니다. 빌드 성공은 런타임·실기기 성공을 대신하지 않으며, 정지 이미지도 시간축 문제 해결을 대신하지 않습니다.

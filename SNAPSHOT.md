@@ -8,4 +8,4 @@
 - Public C++ automation test declarations: `148`
 - Working-tree changes excluded from export: `yes`
 
-The private Azure repository remains the source of truth. This GitHub repository is a one-way, sanitized portfolio snapshot.
+The private Azure repository remains the source of truth. This GitHub repository is a one-way, sanitized source snapshot.

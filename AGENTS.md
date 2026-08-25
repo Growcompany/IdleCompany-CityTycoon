@@ -1,12 +1,12 @@
-# AGENTS.md — Public Portfolio Edition
+# AGENTS.md — Engineering Rules
 
-이 문서는 CompanyGrowthRenewal의 실제 AI 협업 규칙을 공개용으로 정제한 버전입니다. 개인 경로, 배포 설정, 원격 저장소 정보와 비공개 기획 문서는 제거했습니다.
+CompanyGrowthRenewal에서 Codex 계열 에이전트가 따르는 공통 엔지니어링 기준입니다. 개발자 결정권, UE5.4 규칙, 검증 게이트와 저장소 안전 원칙을 정의합니다.
 
 ## 프로젝트 경계
 
 - Unreal Engine 5.4 C++ 개인 클라이언트 프로젝트
 - Azure DevOps 비공개 저장소가 전체 프로젝트의 단일 진실 원천
-- 이 GitHub 저장소는 에셋과 실제 설정을 제외한 단방향 공개 스냅샷
+- 이 GitHub 저장소는 에셋과 실제 설정을 제외한 단방향 소스 스냅샷
 - 기본 아키텍처, 제약, 완료 조건과 최종 채택·기각은 개발자가 결정
 - AI 출력은 코드·빌드·테스트·PIE·실기기 증거를 통과해야 반영
 
@@ -95,18 +95,18 @@
 - `Tools/CheatDoc/verify_cheat_docs.py`: Exec 치트 선언과 문서 동기화
 - `Source/CompanyGrowthRenewal/Private/Tests/`: UE Automation Test 선언
 
-## 공개 저장소 안전 규칙
+## 저장소 안전 규칙
 
 - `Content`, `Plugins`, 실제 `Config`, `Saved`, `node_modules`, 인증정보를 추가하지 않는다.
 - `${PROJECT_ROOT}`와 `${UE_ROOT}`를 사용하고 개인 절대 경로를 기록하지 않는다.
 - 원격 Push는 현재 브랜치와 변경 범위를 확인하고 명시적 승인 뒤 수행한다.
 - 외부 에셋이나 엔진 코드를 복제하지 않는다.
-- 공개본은 전체 게임 실행 빌드가 아니라 기술 검토용 소스 스냅샷임을 유지한다.
+- 이 저장소는 전체 게임 실행 빌드가 아니라 기술 구조를 확인할 수 있는 소스 스냅샷으로 유지한다.
 
 ## 환경 변수 예시
 
 ```text
-PROJECT_ROOT=<public repository root>
+PROJECT_ROOT=<repository root>
 UE_ROOT=<Unreal Engine 5.4 installation root>
 ```
 

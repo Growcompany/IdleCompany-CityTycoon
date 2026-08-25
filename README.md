@@ -1,173 +1,269 @@
+<div align="center">
+
 # 회사키우기 : 방치형 도시 타이쿤
 
-> Unreal Engine 5.4 C++ client architecture portfolio · 개인 개발 · 2025.11 – 진행 중
+**Unreal Engine 5.4 C++ client architecture for a cross-platform idle city tycoon**
 
-Epic Games의 Cropout Sample Project가 보여주는 Blueprint 기반 크로스 플랫폼 구조를 학습 기준선으로 삼고, 회사 성장·도시 운영 도메인에 맞는 C++ 클라이언트 구조로 재설계한 개인 프로젝트입니다. 기본 아키텍처, 시스템 경계, 데이터 흐름과 최종 기술 판단은 직접 설계했습니다.
+<p>
+  <img src="https://img.shields.io/badge/Unreal%20Engine-5.4-0E1128?style=for-the-badge&logo=unrealengine&logoColor=white" alt="Unreal Engine 5.4">
+  <img src="https://img.shields.io/badge/C++-Client-00599C?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++ Client">
+  <img src="https://img.shields.io/badge/UI-CommonUI-7B61FF?style=for-the-badge" alt="CommonUI">
+  <img src="https://img.shields.io/badge/Validated-Windows%20%7C%20Android-2E7D32?style=for-the-badge" alt="Validated on Windows and Android">
+  <img src="https://img.shields.io/badge/Status-In%20Development-F59E0B?style=for-the-badge" alt="In Development">
+</p>
 
-> **Source-only portfolio snapshot.** Licensed assets, levels, WBP/DataTable assets, production configuration, and third-party plugin binaries are intentionally excluded. This repository is not a standalone runnable game build.
+<img src="docs/images/company-growth-android-city.jpg" alt="CompanyGrowthRenewal Android Vulkan in-engine city rendering preview" width="960">
 
-## 공개 범위
+<sub>Android Vulkan ES3.1 in-engine rendering preview · 도시 전체 전경</sub><br>
+<sub>자체 클라이언트 시스템·라이팅·모바일 검증을 보여주는 화면이며, 라이선스된 제3자 시각 에셋의 원저작권을 주장하지 않습니다.</sub>
 
-- 기준 스냅샷: `7df820f2` · 2026-08-25
-- 프로젝트 `Source` 전체: 878개 추적 파일
-- C++ Automation Test 소스: 62개 파일 · 148개 테스트 선언
-- 선별한 DataTable CSV, 제작·검증 도구, 기술 문서
-- 정제한 `AGENTS.md`, `CLAUDE.md`, 역할별 Agent·Skill·Hook
-- 제외: `Content`, 외부 에셋, 실제 Config, 인증정보, Firebase 서버 구현, Azure 히스토리
+<p>
+  <a href="https://cookie-roquefort-35d.notion.site/2626907ae0ce8030b6edd2bdb5ae4931"><b>Project Overview</b></a>
+  &nbsp;·&nbsp;
+  <a href="docs/ARCHITECTURE.md"><b>Architecture</b></a>
+  &nbsp;·&nbsp;
+  <a href="#code-tour"><b>Code Tour</b></a>
+  &nbsp;·&nbsp;
+  <a href="docs/TROUBLESHOOTING.md"><b>Troubleshooting</b></a>
+</p>
 
-테스트 수는 선언·소스 기준이며 전체 통과를 과장하지 않습니다. 공개 저장소에서 독립 실행 가능한 도구 테스트는 아래 결과만 표기하고, 정적 공개 안전성 검사는 별도로 수행했습니다.
+<code>2025.11 – Present</code> · <code>Individual Development</code> · <code>UE5.4 / C++</code>
 
-## 전체 구조
+</div>
 
-```mermaid
-flowchart TD
-    GI[UCGGameInstance] --> LEVELS[Main · Office · LootBox · Recruitment · WorldMap]
-    GI --> SERVICES[GameInstanceSubsystem 도메인 서비스]
-    SERVICES --> TABLE[TableManager · DataTable Cache]
-    SERVICES --> UI[UIManager · CommonUI Stack]
-    SERVICES --> SAVE[SaveLoad · Offline Settlement]
-    SERVICES --> GAME[Employee · Building · Mission · Production]
-    SERVICES --> NET[PlayFab · Ranking · Firebase Chat Client]
-    LEVELS --> ACTORS[GameMode · Controller · ActorComponent]
-    TABLE --> CSV[CSV Import Pipeline]
-    UI --> STACKS[Main · Prompt · Bottom Stack]
-```
+> [!NOTE]
+> 라이선스 에셋, 레벨, WBP·DataTable 에셋, 운영 설정과 외부 플러그인 바이너리를 제외한 **source-only snapshot**입니다. 이 저장소만으로 완성 게임을 실행하거나 전체 UE 빌드를 재현할 수는 없습니다.
 
-레벨 전환 뒤에도 유지돼야 하는 도메인 상태는 `GameInstanceSubsystem`에 두고, 월드에 종속되는 입력·표현·배치는 GameMode, Controller, ActorComponent로 분리했습니다. 자세한 설명은 [아키텍처 개요](docs/ARCHITECTURE.md)에서 볼 수 있습니다.
+<table>
+  <tr>
+    <td align="center"><strong>878</strong><br>Source files</td>
+    <td align="center"><strong>62</strong><br>C++ test files</td>
+    <td align="center"><strong>148</strong><br>Test declarations</td>
+    <td align="center"><strong>239</strong><br>Runnable tool checks passed</td>
+  </tr>
+</table>
 
-## Code Tour
+<div align="center">
 
-### 1. Subsystem 중심 아키텍처
+[Cropout → C++](#cropout-redesign) · [Highlights](#engineering-highlights) · [Architecture](#system-architecture) · [Validation](#visual-validation) · [Code](#code-tour) · [Problems](#troubleshooting) · [AI Workflow](#ai-workflow) · [Verification](#verification)
 
-| 파일 | 확인할 내용 |
+</div>
+
+---
+
+<a id="cropout-redesign"></a>
+
+## 1. Cropout Reference → C++ Redesign
+
+<div align="center">
+  <a href="https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project">
+    <img src="docs/images/cropout-to-cpp.svg" alt="Cropout reference to CompanyGrowthRenewal C++ redesign" width="960">
+  </a>
+  <br>
+  <sub>Official architecture study reference · <a href="https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project">Epic Games — Cropout Sample Project</a></sub>
+</div>
+
+[Cropout](https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project)은 Epic Games가 Blueprint로 제작한 크로스플랫폼 예시 프로젝트입니다. Common UI, Enhanced Input, Save/Load, Blueprint Interface와 모바일·PC 패키징 구성을 학습 기준선으로 삼았습니다.
+
+단순 포팅이나 기능 복제가 아니라, 회사키우기의 규모와 수명주기에 맞춰 책임 경계·데이터 흐름·저장·UI 라우팅을 C++ 중심으로 다시 설계했습니다.
+
+| Cropout에서 학습한 기준 | CompanyGrowthRenewal에서 직접 재설계한 구조 | Evidence |
+|---|---|---|
+| 크로스플랫폼 탑다운 구조 | 장기 수명 서비스와 월드 객체를 <code>GameInstanceSubsystem · Manager · ActorComponent</code>로 분리 | [CGGameInstance.cpp](Source/CompanyGrowthRenewal/Private/Core/CGGameInstance.cpp), [Architecture](docs/ARCHITECTURE.md) |
+| Common UI 활용 | Main·Prompt·Bottom 3-Stack 라우터와 입력 모드 수명주기 중앙화 | [UIBase.cpp](Source/CompanyGrowthRenewal/Private/UI/UIBase.cpp), [UIManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/UIManagerSubsystem.cpp) |
+| Enhanced Input | PC 가속 이동과 모바일 터치 드래그를 분리하고 카메라 도메인 API는 공유 | [MovementInputHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/MovementInputHandler.cpp), [PlayerCamera.cpp](Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.cpp) |
+| Blueprint 데이터 흐름 | 명시적 C++ 타입과 DataTable SOT·캐시·Loud Failure 파이프라인 구축 | [TableManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.cpp), [CSV sample](DataImport/Samples/DT_WidgetClass_Import.csv) |
+| 공식 sample의 Save/Load·패키징 기준선 | 서버 시간 기반 오프라인 정산, 지연 저장, 백엔드 경계와 자동 검증까지 확장 | [SaveLoadManager.cpp](Source/CompanyGrowthRenewal/Private/Manager/SaveLoadManager.cpp), [Tests](Source/CompanyGrowthRenewal/Private/Tests) |
+
+> Cropout은 구조 학습 기준이며 이 저장소는 독립 프로젝트입니다. Epic Games와 제휴하거나 공식 승인을 받은 저장소가 아니며, Cropout 프로젝트 파일의 코드와 게임 콘텐츠는 포함하지 않습니다.
+
+<a id="engineering-highlights"></a>
+
+## 2. Engineering Highlights
+
+| Engineering decision | 구조적 가치 | Evidence |
+|---|---|---|
+| **Subsystem lifecycle boundaries** | 레벨 전환 후 유지할 도메인 상태와 월드 종속 표현을 분리 | [Architecture](docs/ARCHITECTURE.md) |
+| **Data-driven content pipeline** | 위젯 클래스·표시 문자열·밸런스를 코드 수정 없이 CSV Reimport로 교체 | [TableManager](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.cpp), [Widget row](Source/CompanyGrowthRenewal/Public/Table/WidgetDataTable.h) |
+| **CommonUI stack routing** | 화면·모달·하단 시트의 생성, 활성화와 입력 모드를 하나의 경로로 관리 | [UIBase](Source/CompanyGrowthRenewal/Public/UI/UIBase.h), [Animated widget](Source/CompanyGrowthRenewal/Private/UI/AnimatedActivatableWidget.cpp) |
+| **Save & offline settlement** | 로드 완료 가드, 저장 스로틀과 서버 시간 기반 경과 계산으로 상태 안전성 확보 | [SaveLoadManager](Source/CompanyGrowthRenewal/Public/Manager/SaveLoadManager.h), [Offline report](Source/CompanyGrowthRenewal/Private/UI/Panel/OfflineReportModalWidget.cpp) |
+| **PC / mobile input split** | 플랫폼별 체감은 별도 경로로 튜닝하고 게임 도메인 동작은 공유 | [Camera movement](docs/01_Systems/Player/CAMERA_MOVEMENT_SYSTEM.md) |
+| **Backend contract boundaries** | PlayFab 인증·서버시간·랭킹과 Firebase HTTP/JSON 클라이언트의 권위·오류 경계 분리 | [Backend architecture](docs/01_Systems/Backend/BACKEND_ARCHITECTURE.md) |
+
+<a id="system-architecture"></a>
+
+## 3. System Architecture
+
+~~~mermaid
+flowchart TB
+    INPUT["Enhanced Input<br/>PC · Mobile"] --> PC["PlayerController"]
+    PC --> COMPONENTS["Input · Camera · Placement Components"]
+
+    GI["UCGGameInstance<br/>Level transition · cross-map state"] --> SERVICES
+
+    subgraph SERVICES["GameInstanceSubsystem domain services"]
+        TABLE["TableManager"]
+        SAVE["SaveLoad"]
+        UI["UIManager"]
+        GAME["Employee · Building · Mission · Production"]
+        NET["PlayFab · Ranking · Firebase Chat"]
+    end
+
+    CSV["CSV · DataTables"] --> TABLE
+    TABLE --> GAME
+    COMPONENTS --> GAME
+    GAME --> SAVE
+    NET --> SAVE
+    GAME --> UI
+    UI --> STACK["CommonUI<br/>Main · Prompt · Bottom"]
+~~~
+
+- <code>CSV → Table cache → Domain/UI</code>: 콘텐츠와 표시 데이터를 코드 분기에서 분리합니다.
+- <code>Input → Controller/Component → Domain</code>: 플랫폼 입력과 게임 규칙의 책임을 나눕니다.
+- <code>Server time → Offline settlement → Pending report → CommonUI</code>: 계산과 표현의 소비 시점을 분리합니다.
+
+<a id="visual-validation"></a>
+
+## 4. Visual Validation
+
+<div align="center">
+  <img src="docs/images/night-readability-ab.jpg" alt="Android Vulkan night readability A/B comparison" width="960">
+  <br>
+  <sub>p50 = 이미지 픽셀 선형 휘도의 중앙값 · OLD 0.013(과도하게 어두움) · N1 0.058(휴리스틱 0.045–0.065 범위) · N2 0.104(과도하게 밝은 비교 후보)</sub><br>
+  <sub>스크린샷의 제3자 시각 에셋은 검증 장면에만 사용되며 저장소에 포함하거나 직접 제작한 아트로 주장하지 않습니다.</sub>
+</div>
+
+야간 화면 문제를 감각적인 수동 튜닝으로 처리하지 않고 노출·AA·Tonemapper·해상도를 독립 변수로 분리했습니다. OLD·N1·N2는 최종 설정으로 저장한 값이 아니라, 동일 구도에서 휴리스틱의 통과 구간과 과보정 경계를 확인한 A/B 후보입니다. 캡처와 밝기 시계열로 가설을 기각한 뒤 설정과 판정 스크립트를 재사용 가능한 검증 도구로 남겼습니다.
+
+- [모바일 렌더링 기록](docs/08_Optimization/MOBILE_RENDERING.md)
+- [Flickering·Shimmer 진단](docs/07_Reference/TROUBLESHOOTING_FLICKERING.md)
+- [Night readability validator](Tools/MainMapPreview/validate_night_readability_ab.py)
+
+<a id="code-tour"></a>
+
+## 5. Code Tour
+
+| Area | 핵심 설계 | Starting points |
+|---|---|---|
+| **Subsystem Architecture** | 레벨을 넘어 유지되는 서비스와 월드 객체의 수명주기 분리 | [CGGameInstance.cpp](Source/CompanyGrowthRenewal/Private/Core/CGGameInstance.cpp)<br>[SoundManagerSubsystem.h](Source/CompanyGrowthRenewal/Public/Manager/SoundManagerSubsystem.h) |
+| **DataTable Pipeline** | 생성자 로드 → 초기화 캐시 → 타입별 Getter → 빈 값과 경고 | [TableManagerSubsystem.h](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.h)<br>[TableManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.cpp)<br>[CSV samples](DataImport/Samples) |
+| **CommonUI Stack** | <code>EWidgetType → DT_WidgetClass → TableManager → Stack Push</code> | [UIBase.cpp](Source/CompanyGrowthRenewal/Private/UI/UIBase.cpp)<br>[UIManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/UIManagerSubsystem.cpp) |
+| **Save & Offline** | 로드 가드, 지연 저장, SaveData 집계와 오프라인 결과 전달 | [SaveLoadManager.cpp](Source/CompanyGrowthRenewal/Private/Manager/SaveLoadManager.cpp)<br>[GameSaveData.h](Source/CompanyGrowthRenewal/Public/Data/GameSaveData.h)<br>[Round-trip test](Source/CompanyGrowthRenewal/Private/Tests/OfficeExteriorSaveRoundTripTests.cpp) |
+| **Input & Camera** | PC 가속 이동·모바일 드래그·줌·회전·포커싱 상태 전이 | [PlayerCamera.cpp](Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.cpp)<br>[MovementInputHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/MovementInputHandler.cpp)<br>[InputTypeManager.cpp](Source/CompanyGrowthRenewal/Private/Player/InputTypeManager.cpp) |
+| **PlayFab & Firebase** | 인증·플레이어 데이터·서버시간·랭킹·채팅 계약과 오류 경계 | [PlayFabManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/PlayFabManagerSubsystem.cpp)<br>[RankingManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/RankingManagerSubsystem.cpp)<br>[ChatManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/ChatManagerSubsystem.cpp) |
+| **Tests & Tools** | 상태 불변식, 밸런스, 렌더링 A/B와 C++·문서 동기화 자동화 | [Atomic commit rules](Source/CompanyGrowthRenewal/Private/Tests/TutorialMissionAtomicCommitRulesTests.cpp)<br>[Balance assertions](Tools/Balance/verify/assertions.js)<br>[Cheat doc guard](Tools/CheatDoc/verify_cheat_docs.py) |
+| **Engineering Playbooks** | 반복 실패를 코드 수정으로 끝내지 않고 재발 방지 규칙으로 전환 | [Capabilities map](docs/07_Reference/CAPABILITIES_MAP.md)<br>[UI playbook](docs/05_UI/UI_CREATION_PLAYBOOK.md)<br>[Backend playbook](docs/01_Systems/Backend/BACKEND_PLAYBOOK.md) |
+
+<a id="troubleshooting"></a>
+
+## 6. Troubleshooting
+
+| Case | Root cause & approach | Prevention | Evidence |
+|---|---|---|---|
+| **Android 야간 Shimmer** | 정지 화질 문제가 아니라 오토 노출의 시간축 진동으로 분리. AA·노출·Tonemapper를 동일 조건 A/B로 검증 | 플랫폼 노출 정책, 자동 캡처와 정량 validator | [진단 기록](docs/07_Reference/TROUBLESHOOTING_FLICKERING.md), [validator](Tools/MainMapPreview/validate_night_readability_ab.py) |
+| **UMG 좌표 오차** | Screen·Viewport·Canvas 좌표를 혼용해 SafeZone·DPI에서 위치가 어긋남 | <code>LocalToAbsolute → AbsoluteToLocal</code> 변환을 공통 규칙으로 고정 | [UI playbook](docs/05_UI/UI_CREATION_PLAYBOOK.md), [적용 코드](Source/CompanyGrowthRenewal/Private/UI/Panel/InGameLayerWidget.cpp) |
+| **Android 에셋 누락** | Soft Reference 자체가 아니라 C++ 문자열 진입점을 쿠커가 발견하지 못한 문제 | 쿠킹 도달성을 기준으로 첫 문자열 경로만 수동 등록 | [원인과 검증](docs/TROUBLESHOOTING.md#android-cooking), [적용 코드](Source/CompanyGrowthRenewal/Private/UI/HUD/MissionGuideOverlayWidget.cpp) |
+| **저장 초기화·연타 히칭** | 로드 전 저장과 고빈도 동기 쓰기가 데이터 손상·프레임 끊김을 유발 | 로드 완료 가드와 첫 요청 기준 3초 저장 스로틀 | [SaveLoadManager](Source/CompanyGrowthRenewal/Private/Manager/SaveLoadManager.cpp), [Round-trip test](Source/CompanyGrowthRenewal/Private/Tests/OfficeExteriorSaveRoundTripTests.cpp) |
+
+[문제 해결 과정과 코드 근거 자세히 보기 →](docs/TROUBLESHOOTING.md)
+
+<a id="ai-workflow"></a>
+
+## 7. AI-Assisted Engineering Workflow
+
+기본 아키텍처, 시스템 경계, 데이터 흐름, 완료 조건과 최종 채택·기각은 직접 결정했습니다. AI는 기존 API 탐색, 영향 범위 분석, 복수 가설 생성, 반복 구현과 독립 리뷰의 처리량을 높이는 도구로 사용했습니다.
+
+~~~text
+직접 정의한 제약·SOT·완료 조건
+→ 역할별 탐색 · 설계 · 구현 · 리뷰
+→ 로그와 측정값으로 가설 기각·채택
+→ UBT · Automation Test · PIE · Android 실기기 검증
+→ Test · Skill · Hook · Playbook으로 재발 방지
+~~~
+
+| 실제 문제 | AI로 확장한 처리량 | 직접 내린 판단과 검증 |
+|---|---|---|
+| **Android 야간 가독성·Shimmer** | 관련 CVar와 설정 영향 범위 탐색, A/B 캡처·지표 스크립트 작성, 독립 리뷰 병렬화 | 시간축 문제와 정지 화질을 분리하고 변수·허용 구간을 정의. Android Vulkan 동일 조건 결과로 후보를 채택·기각 |
+| **Save/Load 수명주기** | 호출부·직렬화 필드의 교차 탐색, Round-trip 테스트 골격과 누락 경로 검토 | 저장 책임 경계, 로드 완료 가드와 스로틀 정책을 결정하고 코드·테스트 대칭성 확인 |
+| **반복되는 구현 실수** | 기존 사고를 규칙·Hook·테스트·문서 동기화 도구로 전환하는 반복 작업 가속 | SOT와 실패 조건을 직접 정의하고, 자동 검사가 실제 누락을 차단하는지 회귀 테스트 |
+
+측정하지 않은 시간 절감률을 주장하지 않고, 저장소에 남은 코드·테스트·검증 도구로 확인할 수 있는 활용만 기술합니다.
+
+| 운영 증거 | 확인 위치 |
 |---|---|
-| [CGGameInstance.cpp](Source/CompanyGrowthRenewal/Private/Core/CGGameInstance.cpp) | 레벨 전환과 GameInstance 수명주기의 진입점 |
-| [SoundManagerSubsystem.h](Source/CompanyGrowthRenewal/Public/Manager/SoundManagerSubsystem.h) / [cpp](Source/CompanyGrowthRenewal/Private/Manager/SoundManagerSubsystem.cpp) | 전역 서비스의 초기화·공개 API 경계 |
-| [BuildingTraitManagerSubsystem.h](Source/CompanyGrowthRenewal/Public/Manager/BuildingTraitManagerSubsystem.h) / [cpp](Source/CompanyGrowthRenewal/Private/Manager/BuildingTraitManagerSubsystem.cpp) | 독립 도메인 규칙과 저장 상태의 분리 |
+| Codex 프로젝트 엔지니어링 규칙 | [AGENTS.md](AGENTS.md) |
+| Claude Code 역할·Hook·작업 원칙 | [CLAUDE.md](CLAUDE.md), [.claude/agents](.claude/agents), [.claude/hooks](.claude/hooks) |
+| 반복 가능한 분석·리뷰 Skill | [.agents/skills](.agents/skills) |
+| 개발자와 AI의 책임 경계 | [AI_WORKFLOW.md](docs/AI_WORKFLOW.md) |
 
-### 2. DataTable 콘텐츠 파이프라인
+<a id="verification"></a>
 
-| 파일 | 확인할 내용 |
+## 8. Verification
+
+| 검증 | 현재 revision에서 확인한 결과 |
 |---|---|
-| [TableManagerSubsystem.h](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.h) / [cpp](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.cpp) | 생성자 로드 → 초기화 캐시 → 타입별 Getter 경로 |
-| [WidgetDataTable.h](Source/CompanyGrowthRenewal/Public/Table/WidgetDataTable.h) | `FTableRowBase` 기반 위젯 클래스 매핑 |
-| [DT_WidgetClass 샘플](DataImport/Samples/DT_WidgetClass_Import.csv) | `EWidgetType`과 WBP 클래스의 데이터 주도 연결 |
-| [DT_StepDisplayName 샘플](DataImport/Samples/DT_StepDisplayName_Import.csv) | 표시 문자열을 코드 분기에서 분리한 예시 |
+| Node balance simulator | 135개 중 129개 통과 · 6개 조건부 스킵 · 실패 0 |
+| Python rendering contracts | 110개 통과 · 실패 0 |
+| Cheat command documentation | C++ <code>Exec</code> 명령 85개와 Markdown·HTML 문서 일치 |
+| C++ Automation Test | 62개 소스 · 148개 선언 포함. 제외된 맵·에셋·플러그인이 필요하므로 전체 통과를 주장하지 않음 |
 
-Row가 없을 때 코드 폴백으로 오류를 숨기지 않고 빈 결과와 경고로 드러내며, 콘텐츠 수정은 CSV 편집과 Reimport로 끝나도록 구성했습니다.
+수치 기준은 [SNAPSHOT.md](SNAPSHOT.md)에 고정했습니다. 빌드 성공과 런타임 성공, Editor와 Android 실기기 성공을 서로 대신하는 증거로 사용하지 않습니다.
 
-### 3. CommonUI Stack 라우팅
+<details>
+<summary><strong>Runnable checks 재현 명령 보기</strong></summary>
 
-| 파일 | 확인할 내용 |
-|---|---|
-| [UIBase.h](Source/CompanyGrowthRenewal/Public/UI/UIBase.h) / [cpp](Source/CompanyGrowthRenewal/Private/UI/UIBase.cpp) | Main·Prompt·Bottom Stack의 역할 분리 |
-| [UIManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/UIManagerSubsystem.cpp) | 위젯 타입 조회와 Stack Push 중앙화 |
-| [AnimatedActivatableWidget.h](Source/CompanyGrowthRenewal/Public/UI/AnimatedActivatableWidget.h) / [cpp](Source/CompanyGrowthRenewal/Private/UI/AnimatedActivatableWidget.cpp) | CommonActivatableWidget 수명주기와 전환 연출 |
+~~~powershell
+node --test "Tools/Balance/test/*.test.js"
+py -3 -m unittest discover -s Tools/MainMapPreview -p "test_*.py"
+py -3 Tools/CheatDoc/verify_cheat_docs.py
+~~~
 
-화면을 여는 코드가 특정 WBP 경로를 직접 알지 않게 하고, `EWidgetType → DT_WidgetClass → TableManager → CommonUI Stack` 경로로 통일했습니다.
+Python 렌더링 검증은 <code>NumPy</code>와 <code>Pillow</code>가 필요합니다.
 
-### 4. 저장·오프라인 정산
+</details>
 
-| 파일 | 확인할 내용 |
-|---|---|
-| [SaveLoadManager.h](Source/CompanyGrowthRenewal/Public/Manager/SaveLoadManager.h) / [cpp](Source/CompanyGrowthRenewal/Private/Manager/SaveLoadManager.cpp) | 로드 완료 가드, 지연 저장, 저장·로드 대칭성 |
-| [GameSaveData.h](Source/CompanyGrowthRenewal/Public/Data/GameSaveData.h) | 도메인별 SaveData 집계 구조 |
-| [OfflineReportModalWidget.cpp](Source/CompanyGrowthRenewal/Private/UI/Panel/OfflineReportModalWidget.cpp) | 오프라인 정산 결과의 UI 전달 |
-| [OfficeExteriorSaveRoundTripTests.cpp](Source/CompanyGrowthRenewal/Private/Tests/OfficeExteriorSaveRoundTripTests.cpp) | 저장 후 복원 불변식 검증 사례 |
+<a id="repository-scope"></a>
 
-클릭·홀드 같은 고빈도 변경은 즉시 디스크에 쓰지 않고 지연 저장하며, 최초 로드가 끝나기 전 빈 메모리가 기존 세이브를 덮지 못하게 막았습니다.
+## 9. Repository Scope
 
-### 5. PC·모바일 입력과 카메라
+<details>
+<summary><strong>포함·제외 범위와 빌드 제한 보기</strong></summary>
 
-| 파일 | 확인할 내용 |
-|---|---|
-| [PlayerCamera.h](Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.h) / [cpp](Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.cpp) | 이동·줌·회전·포커싱 API |
-| [MovementInputHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/MovementInputHandler.cpp) | PC 가속 이동과 모바일 드래그 입력 분리 |
-| [InputTypeManager.cpp](Source/CompanyGrowthRenewal/Private/Player/InputTypeManager.cpp) | KeyMouse·Touch·GamePad 모드 전환 |
-| [MainMapPlayerController.cpp](Source/CompanyGrowthRenewal/Private/Player/MainMapPlayerController.cpp) | 월드 인터랙션과 UI 입력 모드 경계 |
+### Included
 
-PC와 모바일을 동일한 입력 함수에 억지로 맞추지 않고 체감과 상태 전이를 플랫폼별 경로로 나눴습니다.
+- 프로젝트 <code>Source</code> 전체
+- C++ Automation Test 소스
+- 선별한 DataTable CSV 샘플
+- 밸런스·렌더링·문서 동기화 도구
+- 아키텍처·UI·입력·백엔드·최적화 기술 문서
+- Agent·Skill·Hook과 AI 협업 규칙
 
-### 6. PlayFab·Firebase 연동 구조
+### Excluded
 
-| 파일 | 확인할 내용 |
-|---|---|
-| [PlayFabManagerSubsystem.h](Source/CompanyGrowthRenewal/Public/Manager/PlayFabManagerSubsystem.h) / [cpp](Source/CompanyGrowthRenewal/Private/Manager/PlayFabManagerSubsystem.cpp) | 인증·플레이어 데이터·서버시간 API 경계 |
-| [RankingManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/RankingManagerSubsystem.cpp) | 랭킹 요청과 화면 데이터 분리 |
-| [ChatManagerSubsystem.h](Source/CompanyGrowthRenewal/Public/Manager/ChatManagerSubsystem.h) / [cpp](Source/CompanyGrowthRenewal/Private/Manager/ChatManagerSubsystem.cpp) | Firebase HTTP/JSON 채팅 클라이언트와 폴링 수명주기 |
-| [BACKEND_ARCHITECTURE.md](docs/01_Systems/Backend/BACKEND_ARCHITECTURE.md) | 클라이언트·서버 계약과 권위 경계 |
+- <code>Content</code>, 맵, WBP·DataTable 에셋과 외부/Fab/Marketplace 에셋
+- 실제 <code>Config</code>, PlayFab·Firebase 값과 운영 배포 주소
+- Firebase 서버 구현, <code>Plugins</code>, 바이너리와 빌드·캐시 결과
+- 비공개 게임 기획과 Azure Git 히스토리
 
-실제 배포 주소와 서버 구현은 공개본에서 제외했습니다. 클라이언트가 서버 계약을 소비하는 구조와 오류 처리만 확인할 수 있습니다.
+<code>CompanyGrowthRenewal.uproject</code>는 UE5.4와 의존성을 설명하기 위해 포함했습니다. 실제 실행에는 공개하지 않은 콘텐츠와 <code>AsyncLoadingScreen</code>, <code>NiagaraUIRenderer</code>, <code>PlayFab</code> 등의 외부 플러그인이 필요합니다.
 
-### 7. Automation Test와 제작·검증 도구
+</details>
 
-| 파일 | 확인할 내용 |
-|---|---|
-| [TutorialMissionAtomicCommitRulesTests.cpp](Source/CompanyGrowthRenewal/Private/Tests/TutorialMissionAtomicCommitRulesTests.cpp) | 다단계 상태 변경의 원자성 규칙 |
-| [OfficeExteriorSaveRoundTripTests.cpp](Source/CompanyGrowthRenewal/Private/Tests/OfficeExteriorSaveRoundTripTests.cpp) | 직렬화 Round Trip 검증 |
-| [Balance assertions.js](Tools/Balance/verify/assertions.js) | 데이터 기반 밸런스 검증 규칙 |
-| [Night readability validator](Tools/MainMapPreview/validate_night_readability_ab.py) | 동일 조건 캡처의 정량 비교 |
-| [Cheat command doc guard](Tools/CheatDoc/verify_cheat_docs.py) | C++ Exec 선언과 문서의 자동 동기화 |
+## Technical Documents
 
-공개본에서 외부 에셋 없이 독립 실행 가능한 검증은 다음 결과를 확인했습니다.
+- [Architecture overview](docs/ARCHITECTURE.md)
+- [Level & lifecycle architecture](docs/00_Core/ARCHITECTURE.md)
+- [UI creation playbook](docs/05_UI/UI_CREATION_PLAYBOOK.md)
+- [UI style catalog](docs/05_UI/UI_STYLE_CATALOG.md)
+- [Typography rules](docs/05_UI/UI_TYPOGRAPHY.md)
+- [Reusable API map](docs/07_Reference/CAPABILITIES_MAP.md)
+- [Performance optimization](docs/08_Optimization/PERFORMANCE_OPTIMIZATION.md)
 
-| 검증 | 결과 |
-|---|---|
-| Node Balance 시뮬레이터 | 135개 중 129개 통과 · 6개 조건부 스킵 · 실패 0 |
-| Python 렌더링 계약 | 110개 통과 · 실패 0 |
-| Cheat 문서 동기화 | C++ `Exec` 명령 85개와 Markdown·HTML 문서 일치 |
+## Links & Notice
 
-C++ Automation Test는 테스트 소스와 선언을 공개하지만, 맵·WBP·DataTable·외부 플러그인이 제외된 이 저장소에서 전체 실행 통과를 주장하지 않습니다.
+- [Notion project overview](https://cookie-roquefort-35d.notion.site/2626907ae0ce8030b6edd2bdb5ae4931)
+- Developer: **Jinhwan Lee (이진환)**
+- Third-party names and images remain the property of their respective owners.
+- Project-specific source and documentation: Copyright © 2025–2026 Jinhwan Lee. All rights reserved.
 
-### 8. 대표 트러블슈팅
-
-- [모바일 Flickering·Shimmer 진단](docs/07_Reference/TROUBLESHOOTING_FLICKERING.md)
-- [Android 렌더링 측정과 A/B 기준](docs/08_Optimization/MOBILE_RENDERING.md)
-- [성능 최적화 플레이북](docs/08_Optimization/PERFORMANCE_OPTIMIZATION.md)
-- [카메라·입력 상태 전이](docs/01_Systems/Player/CAMERA_MOVEMENT_SYSTEM.md)
-- [백엔드 연동 함정과 검증](docs/01_Systems/Backend/BACKEND_PLAYBOOK.md)
-- [포트폴리오용 문제 해결 요약](docs/TROUBLESHOOTING.md)
-
-## AI 활용 방식
-
-기본 구조와 최종 판단은 개발자가 소유하고, AI는 탐색 범위 확장·구현 초안·독립 리뷰·반복 검증을 가속하는 도구로 사용했습니다.
-
-```text
-현상 수집
-→ 기존 구조·의존성 탐색
-→ 복수 가설 생성
-→ 최소 재현과 측정
-→ 가설 기각·채택
-→ 구현과 독립 리뷰
-→ UBT·Automation Test·PIE·Android 실기기 검증
-→ Skill·Hook·문서로 재발 방지
-```
-
-- [AI 협업 워크플로](docs/AI_WORKFLOW.md)
-- [Codex 프로젝트 규칙](AGENTS.md)
-- [Claude Code 프로젝트 규칙](CLAUDE.md)
-- [프로젝트 Skill](.agents/skills/)
-- [역할별 Claude Agent](.claude/agents/)
-- [자동 가드 Hook](.claude/hooks/)
-
-## 기술 문서
-
-- [레벨·수명주기 아키텍처](docs/00_Core/ARCHITECTURE.md)
-- [UI 생성 플레이북](docs/05_UI/UI_CREATION_PLAYBOOK.md)
-- [UI 스타일 카탈로그](docs/05_UI/UI_STYLE_CATALOG.md)
-- [타이포그래피 규칙](docs/05_UI/UI_TYPOGRAPHY.md)
-- [재사용 API 지도](docs/07_Reference/CAPABILITIES_MAP.md)
-- [공개 스냅샷 정책](docs/PUBLICATION_NOTES.md)
-
-## 빌드와 의존성
-
-`CompanyGrowthRenewal.uproject`는 UE5.4와 플러그인 의존성을 설명하기 위해 포함했습니다. 실제 실행에는 공개하지 않은 맵·WBP·DataTable 에셋과 `AsyncLoadingScreen`, `NiagaraUIRenderer`, `PlayFab` 등의 외부 플러그인이 필요합니다. 따라서 이 저장소에는 전체 게임 빌드 성공을 의미하는 CI 배지를 붙이지 않습니다.
-
-## 포트폴리오
-
-- [Notion 기술 포트폴리오](https://cookie-roquefort-35d.notion.site/2626907ae0ce8030b6edd2bdb5ae4931)
-- 개발자: 이진환
-
-## 저작권
-
-외부 에셋과 Unreal Engine 엔진 소스는 포함하지 않습니다. 이 저장소의 프로젝트 고유 코드와 문서는 포트폴리오 열람 목적으로 공개되며, 별도 허가 없는 복제·재배포 권한을 부여하지 않습니다. 자세한 내용은 [NOTICE.md](NOTICE.md)를 확인해 주세요.
+See [NOTICE.md](NOTICE.md) for third-party attribution and repository terms.

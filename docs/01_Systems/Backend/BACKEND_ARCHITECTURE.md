@@ -311,7 +311,7 @@
 
 | 항목 | 값 | 위치 |
 |---|---|---|
-| PlayFab TitleId | `<PLAYFAB_TITLE_ID>` | 공개본에서 제외한 런타임 `Config`에 주입 |
+| PlayFab TitleId | `<PLAYFAB_TITLE_ID>` | 저장소에 포함하지 않은 런타임 `Config`에 주입 |
 | Firebase Base URL | `https://YOUR_SERVICE_URL.example.com` | `Config/DefaultGame.ini` `[/Script/CompanyGrowthRenewal.ChatManagerSubsystem]` `FirebaseBaseUrl` — **단일 진실 원천** (코드 하드코딩 제거 완료 2026-06-21) |
 | 오프라인 보상 캡 | 12시간 (43200초) | `PlayFabManagerSubsystem.cpp` L14 `OfflineCapSeconds = 12 * 60 * 60` |
 | 하트비트 주기 | 600초 (10분) | `PlayFabManagerSubsystem.h` L224 `static constexpr float HeartbeatIntervalSeconds = 600.0f` — 헤더에 static constexpr로 정의(유일 정의 위치, .cpp에 별도 할당 없음) |
@@ -320,7 +320,7 @@
 | 업로드 쓰로틀 | 60초 | `RankingManagerSubsystem.h` `UploadThrottleSeconds = 60.0` |
 | 로컬 세이브 슬롯 | `"GameSlot"` | `SaveLoadManager.h` L148 + `GameSaveData.h` L250 |
 
-**공개본 주의**: 실제 Firebase Base URL과 런타임 `Config`는 제외했습니다. 소스의 URL은 설정 누락을 드러내는 비동작 플레이스홀더이며, 배포 환경에서는 외부 설정으로 주입합니다.
+**설정 주의**: 실제 Firebase Base URL과 런타임 `Config`는 저장소에 포함하지 않습니다. 소스의 URL은 설정 누락을 드러내는 비동작 플레이스홀더이며, 배포 환경에서는 외부 설정으로 주입합니다.
 
 ---
 

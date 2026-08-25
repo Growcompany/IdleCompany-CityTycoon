@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="620" viewBox="0 0 1400 620" role="img" aria-labelledby="title desc">
+  <title id="title">Cropout reference to CompanyGrowthRenewal C++ redesign</title>
+  <desc id="desc">A comparison between the Epic Games Cropout Blueprint sample and the independent CompanyGrowthRenewal C++ architecture.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#111b2e"/>
+    </linearGradient>
+    <linearGradient id="leftCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#272f42"/>
+      <stop offset="1" stop-color="#1b2233"/>
+    </linearGradient>
+    <linearGradient id="rightCard" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123d54"/>
+      <stop offset="1" stop-color="#102a43"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#55d7ff"/>
+    </marker>
+  </defs>
+
+  <rect width="1400" height="620" rx="28" fill="url(#background)"/>
+
+  <text x="700" y="64" text-anchor="middle" fill="#f0f6fc" font-family="Segoe UI, Arial, sans-serif" font-size="30" font-weight="700">
+    Architecture study reference → project-specific C++ redesign
+  </text>
+  <text x="700" y="98" text-anchor="middle" fill="#8b949e" font-family="Segoe UI, Arial, sans-serif" font-size="18">
+    What was studied, what was independently designed, and where the evidence lives
+  </text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="145" width="500" height="360" rx="24" fill="url(#leftCard)" stroke="#596579" stroke-width="2"/>
+    <rect x="830" y="145" width="500" height="360" rx="24" fill="url(#rightCard)" stroke="#36b8e0" stroke-width="2"/>
+  </g>
+
+  <rect x="105" y="178" width="214" height="34" rx="17" fill="#3b4458"/>
+  <text x="212" y="201" text-anchor="middle" fill="#d0d7de" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="1">
+    OFFICIAL REFERENCE
+  </text>
+  <text x="105" y="260" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="38" font-weight="750">
+    Cropout Sample Project
+  </text>
+  <text x="105" y="295" fill="#aab4c3" font-family="Segoe UI, Arial, sans-serif" font-size="19">
+    Epic Games · cross-platform UE sample
+  </text>
+
+  <g fill="#d0d7de" font-family="Segoe UI, Arial, sans-serif" font-size="21">
+    <circle cx="119" cy="344" r="5" fill="#9fa9bc"/><text x="138" y="351">Blueprint architecture</text>
+    <circle cx="119" cy="386" r="5" fill="#9fa9bc"/><text x="138" y="393">Common UI · Enhanced Input</text>
+    <circle cx="119" cy="428" r="5" fill="#9fa9bc"/><text x="138" y="435">Save/Load · Interfaces</text>
+    <circle cx="119" cy="470" r="5" fill="#9fa9bc"/><text x="138" y="477">Mobile and PC structure</text>
+  </g>
+
+  <rect x="865" y="178" width="246" height="34" rx="17" fill="#155b78"/>
+  <text x="988" y="201" text-anchor="middle" fill="#b9efff" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="1">
+    INDEPENDENT REDESIGN
+  </text>
+  <text x="865" y="260" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="38" font-weight="750">
+    CompanyGrowthRenewal
+  </text>
+  <text x="865" y="295" fill="#9ddff3" font-family="Segoe UI, Arial, sans-serif" font-size="19">
+    UE5.4 C++ client architecture
+  </text>
+
+  <g fill="#d8f4fc" font-family="Segoe UI, Arial, sans-serif" font-size="21">
+    <circle cx="879" cy="344" r="5" fill="#55d7ff"/><text x="898" y="351">Subsystem · Manager · Component</text>
+    <circle cx="879" cy="386" r="5" fill="#55d7ff"/><text x="898" y="393">DataTable SOT · CommonUI 3-Stack</text>
+    <circle cx="879" cy="428" r="5" fill="#55d7ff"/><text x="898" y="435">Deferred save · offline settlement</text>
+    <circle cx="879" cy="470" r="5" fill="#55d7ff"/><text x="898" y="477">PlayFab · Firebase · tests · tools</text>
+  </g>
+
+  <line x1="618" y1="325" x2="780" y2="325" stroke="#55d7ff" stroke-width="8" stroke-linecap="round" marker-end="url(#arrow)"/>
+  <text x="700" y="294" text-anchor="middle" fill="#8be4ff" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">
+    ANALYZE
+  </text>
+  <text x="700" y="366" text-anchor="middle" fill="#8be4ff" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">
+    RE-DESIGN
+  </text>
+
+  <text x="700" y="558" text-anchor="middle" fill="#c9d1d9" font-family="Segoe UI, Arial, sans-serif" font-size="18">
+    Official Cropout page linked as the reference source · Independent project · No Epic affiliation or endorsement
+  </text>
+</svg>

@@ -1,6 +1,6 @@
-# CLAUDE.md — Public Portfolio Edition
+# CLAUDE.md — Claude Code Workflow
 
-이 파일은 CompanyGrowthRenewal에서 Claude Code를 역할별 생산성 도구로 운영한 규칙의 공개용 버전입니다. 공통 엔지니어링 기준은 [AGENTS.md](AGENTS.md)를 우선합니다.
+CompanyGrowthRenewal에서 Claude Code를 역할별 탐색·구현·리뷰·검증 도구로 운영하는 규칙입니다. 공통 엔지니어링 기준은 [AGENTS.md](AGENTS.md)를 우선합니다.
 
 ## 책임 경계
 
@@ -23,7 +23,7 @@ Claude의 높은 확신은 증거를 대체하지 않습니다. 로그나 측정
 - `.claude/skills/`: UE5 클래스, 컴포넌트, DataTable, Subsystem, Widget 제작 체크리스트
 - `.agents/skills/`: Codex와 공유하는 분석·리뷰 워크플로
 
-자동 Push 명령과 개인 세션 상태는 공개본에서 제외했습니다.
+자동 Push는 기본 작업 흐름에 포함하지 않으며, 개인 세션 상태는 저장소 데이터로 취급하지 않습니다.
 
 ## Hook 기반 가드
 
@@ -42,7 +42,7 @@ Claude의 높은 확신은 증거를 대체하지 않습니다. 로그나 측정
 5. 빌드·테스트·PIE·실기기 중 필요한 증거가 없으면 완료로 보고하지 않는다.
 6. 반복 실패는 테스트, Skill, Hook, 플레이북으로 전환한다.
 
-## 공개 안전
+## Repository Safety
 
 - `${PROJECT_ROOT}`와 `${UE_ROOT}` 외의 개인 절대 경로를 사용하지 않는다.
 - 실제 Firebase URL, PlayFab 설정, 서비스 계정과 인증정보를 출력하지 않는다.
