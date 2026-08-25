@@ -14,8 +14,8 @@
 
 오토 노출 진동을 확인해 모바일 고정 노출 정책으로 전환하고, 정량 검증 스크립트를 재사용 가능한 도구로 남겼습니다.
 
-- [진단 플레이북](07_Reference/TROUBLESHOOTING_FLICKERING.md)
-- [모바일 렌더링 기록](08_Optimization/MOBILE_RENDERING.md)
+- [모바일 렌더링 기록 (Shimmer 전면 조사)](08_Optimization/MOBILE_RENDERING.md)
+- [건물 파츠 깜빡임 — Hardware Occlusion Query (별개 사례)](07_Reference/TROUBLESHOOTING_FLICKERING.md)
 - [검증 스크립트](../Tools/MainMapPreview/validate_night_readability_ab.py)
 
 ## 2. UMG 좌표 공간 불일치
