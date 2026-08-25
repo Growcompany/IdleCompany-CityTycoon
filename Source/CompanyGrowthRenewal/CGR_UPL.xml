@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root xmlns:android="http://schemas.android.com/apk/res/android">
+	<!--
+		Android 13+(API 33+) 에서 레거시 WRITE_EXTERNAL_STORAGE 는 런타임으로 승인 불가(scoped storage).
+		Development 빌드(=비-Shipping)는 UE 가 이 권한을 매니페스트와 StartupPermissions 메타에 넣어
+		부팅 시 SplashActivity 가 권한 게이트("Permissions Required: approve in App Settings")로 진입을 막는다.
+		해결: WRITE_EXTERNAL_STORAGE 에 maxSdkVersion=32 를 부여 → API 33+ 기기에서 비활성화 →
+		SplashActivity 의 (StartupPermissions ∩ 활성 dangerous 권한) 교집합이 비어 게이트가 사라진다.
+		게임 파일은 bUseExternalFilesDir(앱 전용 외부 디렉터리)로 저장하므로 이 권한 자체가 불필요하다.
+	-->
+	<init>
+		<log text="CGR_UPL: WRITE_EXTERNAL_STORAGE capped at maxSdkVersion=32 to bypass startup storage-permission gate"/>
+	</init>
+
+	<androidManifestUpdates>
+		<removePermission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+		<addPermission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+	</androidManifestUpdates>
+</root>

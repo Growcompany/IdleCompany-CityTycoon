@@ -1,0 +1,17 @@
+﻿Name,ResourceType,DisplayName,Description,Icon,UIColor,InitialAmount,MaxAmount,bIsPremium,BasePrice
+Brick,Brick,"벽돌","건물을 짓고 강화하는 데 사용되는 기본 건축 자재","/Game/CompanyGrowth/UI/Textures/UIIcon/BrickIcon.BrickIcon","(R=0.475000,G=0.141000,B=0.047000,A=1.000000)",0,-1,false,20
+Money,Money,"자금","회사를 운영하는 기본 자금. 급여와 시설 유지에 사용","/Game/CompanyGrowth/UI/Textures/UIIcon/MoneyIcon.MoneyIcon","(R=0.067000,G=0.471000,B=0.098000,A=1.000000)",20000,-1,false,0
+Diamond,Diamond,"다이아","뽑기와 프리미엄 상품 구매에 쓰이는 고급 재화","/Game/CompanyGrowth/UI/Textures/UIIcon/DiamondIcon.DiamondIcon","(R=0.450000,G=0.720000,B=1.000000,A=1.000000)",10,-1,true,0
+Employee,Employee,"직원","회사를 움직이는 핵심 인력","/Game/CompanyGrowth/UI/Textures/UIIcon/EmployeeIcon.EmployeeIcon","(R=0.200000,G=0.500000,B=0.900000,A=1.000000)",0,-1,false,0
+Building,Building,"부지","사업 확장의 기반이 되는 부지","/Game/CompanyGrowth/UI/Textures/UIIcon/Resource_BuildingIcon2.Resource_BuildingIcon2","(R=1.000000,G=1.000000,B=1.000000,A=1.000000)",0,-1,false,0
+Box,Box,"박스","보상과 아이템을 받기 위한 묶음","/Game/CompanyGrowth/UI/Textures/UIIcon/ship.ship","(R=0.950000,G=0.700000,B=0.100000,A=1.000000)",0,-1,false,0
+IronOre,IronOre,"철광석","자동차와 기계류 제조의 핵심 원자재","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_IronOre.T_Resource_IronOre","(R=0.450000,G=0.300000,B=0.250000,A=1.000000)",0,-1,false,100
+Copper,Copper,"구리","전선과 전자 부품 제조에 필수적인 금속","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_Copper.T_Resource_Copper","(R=0.800000,G=0.450000,B=0.200000,A=1.000000)",0,-1,false,240
+Silicon,Silicon,"실리콘","반도체 제조의 핵심 원료","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_Silicon.T_Resource_Silicon","(R=0.550000,G=0.600000,B=0.700000,A=1.000000)",0,-1,false,700
+Lithium,Lithium,"리튬","배터리 산업의 핵심 자원","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_Lithium.T_Resource_Lithium","(R=0.850000,G=0.900000,B=0.950000,A=1.000000)",0,-1,false,1000
+Oil,Oil,"석유","화학 산업과 동력원으로 두루 활용되는 자원","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_Oil.T_Resource_Oil","(R=0.150000,G=0.150000,B=0.180000,A=1.000000)",0,-1,false,500
+RareEarth,RareEarth,"희토류","반도체와 첨단 부품에 필요한 희귀 광물","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_RareEarth.T_Resource_RareEarth","(R=0.600000,G=0.300000,B=0.750000,A=1.000000)",0,-1,false,1600
+Aluminum,Aluminum,"알루미늄","경량 금속. 가전과 차체 생산에 활용","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_Aluminum.T_Resource_Aluminum","(R=0.750000,G=0.780000,B=0.820000,A=1.000000)",0,-1,false,300
+Wood,Wood,"목재","가구와 친환경 소재로 활용되는 자원","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_Wood.T_Resource_Wood","(R=0.500000,G=0.350000,B=0.150000,A=1.000000)",0,-1,false,100
+Gold,Gold,"금","고급 회로와 장식 제품에 쓰이는 귀금속","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_GoldOre.T_Resource_GoldOre","(R=1.000000,G=0.840000,B=0.100000,A=1.000000)",0,-1,false,4000
+DiamondOre,DiamondOre,"다이아몬드 원석","가공해 다이아몬드로 만들 수 있는 원광","/Game/CompanyGrowth/UI/Textures/WorldMap/Resources/T_Resource_DiamondOre.T_Resource_DiamondOre","(R=0.850000,G=0.950000,B=1.000000,A=1.000000)",0,-1,false,16000

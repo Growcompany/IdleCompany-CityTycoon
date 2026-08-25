@@ -1,0 +1,50 @@
+# Unreal generated output
+Binaries/
+Build/
+DerivedDataCache/
+Intermediate/
+Saved/
+.vs/
+
+# Licensed and binary project content
+Content/
+Plugins/
+RawAssets/
+*.uasset
+*.umap
+*.pak
+*.dll
+*.exe
+
+# Production configuration and credentials
+Config/
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*service-account*.json
+*service_account*.json
+
+# Dependencies and generated server output
+node_modules/
+lib/
+*.js.map
+__pycache__/
+*.py[cod]
+
+# Local AI state and machine configuration
+.claude/STATE.md
+.claude/settings.json
+.codex/config.toml
+.codex/hooks.json
+*.bak
+*.backup
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

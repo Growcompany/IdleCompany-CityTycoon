@@ -1,0 +1,48 @@
+{
+  "permissions": {
+    "allow": [
+      "Write(Source/**/*.cpp)",
+      "Write(Source/**/*.h)",
+      "Write(DataImport/**)",
+      "Write(docs/**)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/prompt-hint.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/pre-csv-guard.js",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/post-edit.js",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

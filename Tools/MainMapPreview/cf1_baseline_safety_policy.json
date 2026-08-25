@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "authority": "preview_non_authoritative",
+  "policy_id": "CF1_BASELINE_SAFETY_V1",
+  "algorithm": "linear_rec709_v1",
+  "png_decode": "RGBA_to_linear_RGB",
+  "resolution": [
+    1600,
+    900
+  ],
+  "safety_roi": [
+    0,
+    0,
+    1600,
+    900
+  ],
+  "building_roi": [
+    160,
+    25,
+    1400,
+    760
+  ],
+  "limits": {
+    "1800": {
+      "p50": [
+        0.09,
+        0.16
+      ],
+      "under_0p02_max": 20.0,
+      "over_0p8_max": 0.5
+    },
+    "1930": {
+      "p50": [
+        0.035,
+        0.07
+      ],
+      "under_0p02_max": 40.0,
+      "over_0p8_max": 1.5
+    },
+    "0000": {
+      "p50": [
+        0.04,
+        0.08
+      ],
+      "under_0p02_max": 40.0,
+      "over_0p8_max": 1.5
+    },
+    "0530": {
+      "p50": [
+        0.07,
+        0.13
+      ],
+      "under_0p02_max": 30.0,
+      "over_0p8_max": 1.0
+    }
+  },
+  "a_a_mean_abs_rgb_max": 0.001
+}

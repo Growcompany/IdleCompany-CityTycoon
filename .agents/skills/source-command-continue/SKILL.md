@@ -1,0 +1,18 @@
+---
+name: "source-command-continue"
+description: "지난 세션 이어서 작업하기"
+---
+
+# source-command-continue
+
+Use this skill when the user asks to run the migrated source command `continue`.
+
+## Command Template
+
+지난 세션 이어서 작업을 시작할게. 아래 순서로 현재 상태를 파악해줘:
+
+1. `git status --short`로 현재 미커밋 파일 확인
+2. `git log -5 --oneline`으로 최근 커밋 확인
+3. 활성 구현 계획이나 핸드오프 문서가 있으면 읽기
+4. 미커밋 C++ 파일이 있으면 변경 내용 요약
+5. 증거로 확인되는 다음 단계만 제안

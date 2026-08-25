@@ -1,0 +1,16 @@
+---
+name: "source-command-analyze"
+description: "현재 파일 또는 클래스 분석"
+---
+
+# source-command-analyze
+
+Use this skill when the user asks to run the migrated source command `analyze`.
+
+## Command Template
+
+선택한 파일이나 클래스를 분석해줘:
+- 클래스 구조 및 상속 관계
+- 주요 함수 및 프로퍼티 목록
+- 다른 클래스와의 의존성
+- 개선 가능한 포인트
