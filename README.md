@@ -17,8 +17,19 @@
 <sub>Android Vulkan ES3.1 in-engine rendering preview · 야간 도시 + 미션 HUD + 회사 스킨·조명 UI</sub><br>
 <sub>자체 클라이언트 시스템·라이팅·모바일 검증을 보여주는 화면이며, 라이선스된 제3자 시각 에셋의 원저작권을 주장하지 않습니다.</sub>
 
+<br>
+
+<a href="https://www.youtube.com/watch?v=lzwi1ru7XzU">
+  <img src="docs/images/demo-trailer-thumb.jpg" alt="회사키우기 데모 트레일러 재생 — 31초 인게임 영상" width="480">
+</a>
+
+<sub><b>Demo Trailer</b> · 31s · 전 구간 인게임 촬영 · 2026 Q4 출시예정</sub><br>
+<sub>건물 성장 · 외관/조명 스킨 · 직원 채용 · 프로젝트 시뮬레이션 · 방치 수익 · 도시 인수</sub>
+
 <p>
   <a href="https://cookie-roquefort-35d.notion.site/2626907ae0ce8030b6edd2bdb5ae4931"><b>Project Overview</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://www.youtube.com/watch?v=lzwi1ru7XzU"><b>Demo Trailer</b></a>
   &nbsp;·&nbsp;
   <a href="docs/ARCHITECTURE.md"><b>Architecture</b></a>
   &nbsp;·&nbsp;
