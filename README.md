@@ -12,9 +12,9 @@
   <img src="https://img.shields.io/badge/Status-In%20Development-F59E0B?style=for-the-badge" alt="In Development">
 </p>
 
-<img src="docs/images/company-growth-android-city.jpg" alt="CompanyGrowthRenewal Android Vulkan in-engine city rendering preview" width="960">
+<img src="docs/images/company-growth-android-city.jpg" alt="CompanyGrowthRenewal Android Vulkan in-engine night city with mission HUD and company skin/lighting UI" width="960">
 
-<sub>Android Vulkan ES3.1 in-engine rendering preview · 도시 전체 전경</sub><br>
+<sub>Android Vulkan ES3.1 in-engine rendering preview · 야간 도시 + 미션 HUD + 회사 스킨·조명 UI</sub><br>
 <sub>자체 클라이언트 시스템·라이팅·모바일 검증을 보여주는 화면이며, 라이선스된 제3자 시각 에셋의 원저작권을 주장하지 않습니다.</sub>
 
 <p>
