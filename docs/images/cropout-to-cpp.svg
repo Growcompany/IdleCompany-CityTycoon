@@ -1,86 +1,184 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="620" viewBox="0 0 1400 620" role="img" aria-labelledby="title desc">
-  <title id="title">Cropout reference to CompanyGrowthRenewal C++ redesign</title>
-  <desc id="desc">A comparison between the Epic Games Cropout Blueprint sample and the independent CompanyGrowthRenewal C++ architecture.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title desc">
+  <title id="title">What came from Cropout and what CompanyGrowthRenewal built beyond it</title>
+  <desc id="desc">An original isometric village illustration separates Cropout-derived learning patterns from independently built CompanyGrowthRenewal C++ systems: lifecycle service boundaries, typed DataTable and CommonUI routing, a cross-platform camera domain, and deterministic gameplay pipelines.</desc>
+
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0d1117"/>
-      <stop offset="1" stop-color="#111b2e"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0A1018"/>
+      <stop offset="0.52" stop-color="#101D2C"/>
+      <stop offset="1" stop-color="#0A121D"/>
     </linearGradient>
-    <linearGradient id="leftCard" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#272f42"/>
-      <stop offset="1" stop-color="#1b2233"/>
+    <radialGradient id="cyanGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#55D7FF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#55D7FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sceneSky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4E718E"/>
+      <stop offset="0.55" stop-color="#33586E"/>
+      <stop offset="1" stop-color="#183342"/>
+    </linearGradient>
+    <linearGradient id="sceneShade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#08111B" stop-opacity="0.92"/>
+      <stop offset="0.55" stop-color="#0B1721" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#0B1721" stop-opacity="0.08"/>
     </linearGradient>
     <linearGradient id="rightCard" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#123d54"/>
-      <stop offset="1" stop-color="#102a43"/>
+      <stop offset="0" stop-color="#122538"/>
+      <stop offset="1" stop-color="#0D1826"/>
     </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.35"/>
-    </filter>
-    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
-      <path d="M0,0 L12,6 L0,12 Z" fill="#55d7ff"/>
-    </marker>
+    <linearGradient id="pillar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#173348"/>
+      <stop offset="1" stop-color="#112438"/>
+    </linearGradient>
+    <linearGradient id="route" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#75E7C5"/>
+      <stop offset="1" stop-color="#55D7FF"/>
+    </linearGradient>
+    <clipPath id="leftClip"><rect x="64" y="232" width="620" height="540" rx="30"/></clipPath>
   </defs>
 
-  <rect width="1400" height="620" rx="28" fill="url(#background)"/>
-
-  <text x="700" y="64" text-anchor="middle" fill="#f0f6fc" font-family="Segoe UI, Arial, sans-serif" font-size="30" font-weight="700">
-    Architecture study reference → project-specific C++ redesign
-  </text>
-  <text x="700" y="98" text-anchor="middle" fill="#8b949e" font-family="Segoe UI, Arial, sans-serif" font-size="18">
-    What was studied, what was independently designed, and where the evidence lives
-  </text>
-
-  <g filter="url(#shadow)">
-    <rect x="70" y="145" width="500" height="360" rx="24" fill="url(#leftCard)" stroke="#596579" stroke-width="2"/>
-    <rect x="830" y="145" width="500" height="360" rx="24" fill="url(#rightCard)" stroke="#36b8e0" stroke-width="2"/>
+  <!-- Background -->
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <circle cx="720" cy="410" r="350" fill="url(#cyanGlow)"/>
+  <path d="M0 760 C350 690 520 850 850 770 C1120 705 1320 760 1600 690 L1600 900 L0 900 Z" fill="#0C1724"/>
+  <g opacity="0.18" stroke="#8BDCF3" stroke-width="1">
+    <path d="M1050 20 L1600 292"/><path d="M1135 0 L1600 230"/><path d="M960 0 L1600 317"/>
+    <path d="M0 695 L410 900"/><path d="M0 620 L560 900"/>
   </g>
 
-  <rect x="105" y="178" width="214" height="34" rx="17" fill="#3b4458"/>
-  <text x="212" y="201" text-anchor="middle" fill="#d0d7de" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="1">
-    OFFICIAL REFERENCE
-  </text>
-  <text x="105" y="260" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="38" font-weight="750">
-    Cropout Sample Project
-  </text>
-  <text x="105" y="295" fill="#aab4c3" font-family="Segoe UI, Arial, sans-serif" font-size="19">
-    Epic Games · cross-platform UE sample
-  </text>
+  <!-- Header -->
+  <rect x="64" y="54" width="282" height="38" rx="19" fill="#15354A" stroke="#3AA6C9"/>
+  <circle cx="88" cy="73" r="6" fill="#55D7FF"/>
+  <text x="106" y="79" fill="#BDEFFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="1.7">ARCHITECTURE STUDY</text>
+  <text x="64" y="154" fill="#F8FAFC" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="58" font-weight="800" letter-spacing="-1.2">What came from Cropout — what we built beyond it</text>
+  <text x="64" y="197" fill="#9DB1C3" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="23">Learning baseline on the left. Project-owned C++ systems and responsibility boundaries on the right.</text>
 
-  <g fill="#d0d7de" font-family="Segoe UI, Arial, sans-serif" font-size="21">
-    <circle cx="119" cy="344" r="5" fill="#9fa9bc"/><text x="138" y="351">Blueprint architecture</text>
-    <circle cx="119" cy="386" r="5" fill="#9fa9bc"/><text x="138" y="393">Common UI · Enhanced Input</text>
-    <circle cx="119" cy="428" r="5" fill="#9fa9bc"/><text x="138" y="435">Save/Load · Interfaces</text>
-    <circle cx="119" cy="470" r="5" fill="#9fa9bc"/><text x="138" y="477">Mobile and PC structure</text>
+  <!-- Left visual card shadow and base -->
+  <rect x="72" y="242" width="620" height="540" rx="30" fill="#02070D" opacity="0.5"/>
+  <rect x="64" y="232" width="620" height="540" rx="30" fill="url(#sceneSky)" stroke="#577E91" stroke-width="2"/>
+
+  <g clip-path="url(#leftClip)">
+    <!-- distant landscape -->
+    <circle cx="592" cy="300" r="86" fill="#E6C878" opacity="0.36"/>
+    <path d="M44 488 L214 370 L342 420 L493 326 L720 468 L720 620 L42 620 Z" fill="#264B4C"/>
+    <path d="M20 526 L193 411 L334 461 L492 374 L719 509 L719 650 L20 650 Z" fill="#32704E"/>
+
+    <!-- isometric terrain islands -->
+    <polygon points="86,574 350,418 654,586 386,748" fill="#4D8B50"/>
+    <polygon points="86,574 386,748 386,774 86,600" fill="#2F613C"/>
+    <polygon points="386,748 654,586 654,612 386,774" fill="#254F38"/>
+    <polygon points="143,571 351,449 590,581 383,706" fill="#6A9D56"/>
+
+    <!-- river / road -->
+    <path d="M122 620 C218 578 267 606 343 561 C420 516 463 514 587 568 L550 601 C459 568 418 570 355 609 C272 660 213 621 145 657 Z" fill="#85C5CA" opacity="0.72"/>
+    <path d="M170 530 C246 506 298 489 355 454 C424 412 493 450 571 486" fill="none" stroke="#D9BE83" stroke-width="32" stroke-linecap="round" opacity="0.9"/>
+    <path d="M170 530 C246 506 298 489 355 454 C424 412 493 450 571 486" fill="none" stroke="#F0D89C" stroke-width="18" stroke-linecap="round" opacity="0.9"/>
+
+    <!-- farm plots -->
+    <g transform="translate(480 567)">
+      <polygon points="0,26 62,-10 119,22 57,59" fill="#8A633E"/>
+      <path d="M16 25 L67 -4 M35 37 L86 8 M54 48 L105 19" stroke="#D7A65E" stroke-width="5"/>
+    </g>
+
+    <!-- focal blue roof building -->
+    <g>
+      <polygon points="281,500 381,441 474,494 373,554" fill="#B8785B"/>
+      <polygon points="281,500 373,554 373,640 281,586" fill="#D59B75"/>
+      <polygon points="373,554 474,494 474,580 373,640" fill="#AE765E"/>
+      <polygon points="258,487 379,415 497,483 373,557" fill="#628BB0"/>
+      <polygon points="258,487 373,557 373,578 258,507" fill="#456C91"/>
+      <polygon points="373,557 497,483 497,504 373,578" fill="#345A7D"/>
+      <rect x="315" y="548" width="35" height="58" rx="3" fill="#76513E" transform="skewY(30)"/>
+      <polygon points="405,555 448,530 448,563 405,588" fill="#BDE8E9"/>
+      <path d="M426 543 L426 575 M405 571 L448 546" stroke="#4B7380" stroke-width="4"/>
+      <rect x="363" y="404" width="18" height="38" rx="5" fill="#D6E2E6"/>
+    </g>
+
+    <!-- coral roof cottage -->
+    <g transform="translate(-34 -10)">
+      <polygon points="190,505 247,473 304,506 247,541" fill="#E8B889"/>
+      <polygon points="190,505 247,541 247,591 190,556" fill="#CE926D"/>
+      <polygon points="247,541 304,506 304,556 247,591" fill="#B7795D"/>
+      <polygon points="177,496 247,454 316,494 247,536" fill="#D97869"/>
+      <polygon points="177,496 247,536 247,548 177,508" fill="#B85D5A"/>
+    </g>
+
+    <!-- trees -->
+    <g>
+      <g transform="translate(129 469)"><rect x="-6" y="36" width="12" height="42" rx="5" fill="#6E4D36"/><circle cx="0" cy="28" r="31" fill="#2F754A"/><circle cx="-12" cy="18" r="20" fill="#438D59"/><circle cx="15" cy="16" r="20" fill="#56A66A"/></g>
+      <g transform="translate(548 447) scale(.8)"><rect x="-6" y="36" width="12" height="42" rx="5" fill="#6E4D36"/><circle cx="0" cy="28" r="31" fill="#2F754A"/><circle cx="-12" cy="18" r="20" fill="#438D59"/><circle cx="15" cy="16" r="20" fill="#56A66A"/></g>
+      <g transform="translate(542 637) scale(.72)"><rect x="-6" y="36" width="12" height="42" rx="5" fill="#6E4D36"/><circle cx="0" cy="28" r="31" fill="#2F754A"/><circle cx="-12" cy="18" r="20" fill="#438D59"/><circle cx="15" cy="16" r="20" fill="#56A66A"/></g>
+    </g>
+
+    <!-- small abstract citizens -->
+    <g>
+      <ellipse cx="462" cy="642" rx="13" ry="8" fill="#1B3040" opacity="0.45"/>
+      <circle cx="462" cy="609" r="10" fill="#F0BF94"/><path d="M449 620 Q462 612 475 620 L471 650 L453 650 Z" fill="#E3C259"/>
+      <ellipse cx="224" cy="646" rx="12" ry="7" fill="#1B3040" opacity="0.45"/>
+      <circle cx="224" cy="618" r="9" fill="#EAB68C"/><path d="M212 628 Q224 620 236 628 L233 655 L215 655 Z" fill="#6EA8C8"/>
+    </g>
+
+    <!-- legibility vignette -->
+    <rect x="64" y="232" width="620" height="540" fill="url(#sceneShade)"/>
   </g>
 
-  <rect x="865" y="178" width="246" height="34" rx="17" fill="#155b78"/>
-  <text x="988" y="201" text-anchor="middle" fill="#b9efff" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="1">
-    INDEPENDENT REDESIGN
-  </text>
-  <text x="865" y="260" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="38" font-weight="750">
-    CompanyGrowthRenewal
-  </text>
-  <text x="865" y="295" fill="#9ddff3" font-family="Segoe UI, Arial, sans-serif" font-size="19">
-    UE5.4 C++ client architecture
-  </text>
-
-  <g fill="#d8f4fc" font-family="Segoe UI, Arial, sans-serif" font-size="21">
-    <circle cx="879" cy="344" r="5" fill="#55d7ff"/><text x="898" y="351">Subsystem · Manager · Component</text>
-    <circle cx="879" cy="386" r="5" fill="#55d7ff"/><text x="898" y="393">DataTable SOT · CommonUI 3-Stack</text>
-    <circle cx="879" cy="428" r="5" fill="#55d7ff"/><text x="898" y="435">Deferred save · offline settlement</text>
-    <circle cx="879" cy="470" r="5" fill="#55d7ff"/><text x="898" y="477">PlayFab · Firebase · tests · tools</text>
+  <!-- Left card labels -->
+  <rect x="96" y="268" width="252" height="36" rx="18" fill="#102432" stroke="#7BBBC8"/>
+  <text x="222" y="292" text-anchor="middle" fill="#D6F3F6" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">LEARNED FROM CROPOUT</text>
+  <text x="96" y="360" fill="#FFFFFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="54" font-weight="850">Cropout</text>
+  <text x="96" y="398" fill="#D7E5EA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20">Blueprint sample · architecture learning baseline</text>
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">
+    <rect x="96" y="690" width="116" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="154" y="716" text-anchor="middle" fill="#E4F7F3">Common UI</text>
+    <rect x="224" y="690" width="145" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="296" y="716" text-anchor="middle" fill="#E4F7F3">Enhanced Input</text>
+    <rect x="381" y="690" width="126" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="444" y="716" text-anchor="middle" fill="#E4F7F3">Save / Load</text>
+    <rect x="519" y="690" width="125" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="581" y="716" text-anchor="middle" fill="#E4F7F3">Mobile + PC</text>
   </g>
 
-  <line x1="618" y1="325" x2="780" y2="325" stroke="#55d7ff" stroke-width="8" stroke-linecap="round" marker-end="url(#arrow)"/>
-  <text x="700" y="294" text-anchor="middle" fill="#8be4ff" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">
-    ANALYZE
-  </text>
-  <text x="700" y="366" text-anchor="middle" fill="#8be4ff" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">
-    RE-DESIGN
-  </text>
+  <!-- Transformation route -->
+  <path d="M706 496 C748 496 761 496 801 496" fill="none" stroke="#07111A" stroke-width="16" stroke-linecap="round"/>
+  <path d="M706 496 C748 496 761 496 801 496" fill="none" stroke="url(#route)" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="713" cy="496" r="12" fill="#75E7C5" stroke="#102433" stroke-width="5"/>
+  <path d="M789 482 L810 496 L789 510 Z" fill="#55D7FF"/>
+  <text x="758" y="446" text-anchor="middle" fill="#A8EAFA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">LEARN</text>
+  <text x="758" y="466" text-anchor="middle" fill="#A8EAFA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">DECOMPOSE</text>
+  <text x="758" y="542" text-anchor="middle" fill="#A8EAFA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">RE-DESIGN</text>
 
-  <text x="700" y="558" text-anchor="middle" fill="#c9d1d9" font-family="Segoe UI, Arial, sans-serif" font-size="18">
-    Official Cropout page linked as the reference source · Independent project · No Epic affiliation or endorsement
-  </text>
+  <!-- Right architecture card -->
+  <rect x="831" y="242" width="705" height="540" rx="30" fill="#02070D" opacity="0.5"/>
+  <rect x="823" y="232" width="713" height="540" rx="30" fill="url(#rightCard)" stroke="#2EA9D0" stroke-width="2"/>
+  <rect x="855" y="268" width="232" height="36" rx="18" fill="#11445C" stroke="#3CC6EE"/>
+  <text x="971" y="292" text-anchor="middle" fill="#CBF4FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">BUILT FOR THIS PROJECT</text>
+  <text x="855" y="359" fill="#FFFFFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="40" font-weight="850">CompanyGrowthRenewal</text>
+  <text x="855" y="395" fill="#95DFF3" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="19">UE5.4 client architecture · project-owned responsibility boundaries</text>
+
+  <!-- Architecture pillars -->
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <line x1="890" y1="444" x2="890" y2="707" stroke="#2F6D88" stroke-width="3"/>
+
+    <rect x="855" y="426" width="649" height="69" rx="17" fill="url(#pillar)" stroke="#2E5870"/>
+    <circle cx="890" cy="460" r="20" fill="#1A6781"/><text x="890" y="467" text-anchor="middle" fill="#D6F7FF" font-size="16" font-weight="800">01</text>
+    <text x="927" y="454" fill="#F1F8FB" font-size="21" font-weight="800">Lifecycle service topology</text>
+    <text x="927" y="480" fill="#9FC2D1" font-size="17">Subsystem · Manager · ActorComponent</text>
+
+    <rect x="855" y="506" width="649" height="69" rx="17" fill="url(#pillar)" stroke="#2E5870"/>
+    <circle cx="890" cy="540" r="20" fill="#276E78"/><text x="890" y="547" text-anchor="middle" fill="#E0FCF7" font-size="16" font-weight="800">02</text>
+    <text x="927" y="534" fill="#F1F8FB" font-size="21" font-weight="800">Typed data → lifecycle-safe UI route</text>
+    <text x="927" y="560" fill="#9FC2D1" font-size="17">DataTable SOT · cached getters · CommonUI 3-Stack</text>
+
+    <rect x="855" y="586" width="649" height="69" rx="17" fill="url(#pillar)" stroke="#2E5870"/>
+    <circle cx="890" cy="620" r="20" fill="#33706B"/><text x="890" y="627" text-anchor="middle" fill="#E8FFF9" font-size="16" font-weight="800">03</text>
+    <text x="927" y="614" fill="#F1F8FB" font-size="21" font-weight="800">Cross-platform camera domain</text>
+    <text x="927" y="640" fill="#9FC2D1" font-size="17">Shared API · PC acceleration · mobile touch drag</text>
+
+    <rect x="855" y="666" width="649" height="69" rx="17" fill="url(#pillar)" stroke="#2E5870"/>
+    <circle cx="890" cy="700" r="20" fill="#3A6B8F"/><text x="890" y="707" text-anchor="middle" fill="#E4F2FF" font-size="16" font-weight="800">04</text>
+    <text x="927" y="694" fill="#F1F8FB" font-size="21" font-weight="800">Deterministic gameplay pipelines</text>
+    <text x="927" y="720" fill="#9FC2D1" font-size="17">Placement SSOT · portrait FIFO · automation tests</text>
+  </g>
+
+  <!-- Footer -->
+  <circle cx="67" cy="835" r="5" fill="#55D7FF"/>
+  <text x="84" y="841" fill="#B8C7D3" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18">Patterns adapted · implementation rebuilt independently · claims backed by source</text>
+  <text x="1536" y="841" text-anchor="end" fill="#718596" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15">No copied Cropout code or content · No Epic affiliation or endorsement</text>
 </svg>
+
