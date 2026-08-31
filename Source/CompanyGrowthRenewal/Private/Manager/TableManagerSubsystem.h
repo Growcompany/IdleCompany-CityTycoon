@@ -15,7 +15,6 @@
 #include "Table/BuildingData.h"
 #include "Table/CharacterAppearanceTable.h"
 #include "Table/WorkerCosmeticTable.h"
-#include "Table/LootBoxData.h"
 #include "Table/ResourceInfo.h"
 #include "Table/BuildingSkinData.h"
 #include "Table/BuildingLightData.h"
@@ -145,14 +144,6 @@ public:
     // Worker Cosmetic (AStickOfficeworker 외형: 색 + 안경). RowName = "D{dept}_R{rank}_T{tier}".
     UFUNCTION(BlueprintCallable, Category = "Worker Cosmetic")
     FWorkerCosmeticTable GetWorkerCosmeticData(FName RowName, bool& bOutSuccess) const;
-
-    // LootBox Data
-    UFUNCTION(BlueprintCallable, Category = "LootBox")
-    FLootBoxTable GetLootBoxData(FName RowName, bool& bOutSuccess) const;
-
-    // 카테고리별 룩박스 목록 조회 (RowName 포함)
-    // Note: TPair는 UFUNCTION에서 지원되지 않으므로 C++ 전용
-    TArray<TPair<FName, FLootBoxTable>> GetLootBoxesByCategoryWithNames(ELootBoxCategory Category) const;
 
     // Resource Data
     UFUNCTION(BlueprintCallable, Category = "Resource")
@@ -672,13 +663,6 @@ private:
     UPROPERTY()
     TMap<EEmployeeGender, FCharacterBaseMeshTable> CharacterBaseMeshTable;
 
-    // LootBox Data Table
-    UPROPERTY(EditAnywhere, Category = "LootBox")
-    UDataTable* LootBoxDataTable = nullptr;
-
-    UPROPERTY()
-    TMap<FName, FLootBoxTable> LootBoxTable;
-
     // Resource Data Table
     UPROPERTY(EditAnywhere, Category = "Resource")
     UDataTable* ResourceDataTable = nullptr;
@@ -1161,7 +1145,6 @@ private:
     void InitializeSkinColorTable();
     void InitializeHairColorTable();
     void InitializeCharacterBaseMeshTable();
-    void InitializeLootBoxTable();
     void InitializeResourceTable();
     void InitializeBuildingSkinTable();
     void InitializeBuildingLightTable();

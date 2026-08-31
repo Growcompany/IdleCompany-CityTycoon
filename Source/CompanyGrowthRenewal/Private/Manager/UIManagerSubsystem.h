@@ -13,7 +13,6 @@ class UUserWidget;
 class UUIBase;
 class ULoadingWidget;
 class UInGameLayerWidget;
-class ULootBoxLayerWidget;
 class UOfficeLayerWidget;
 class UOfficeMainWidget;
 class UWorldMapLayerWidget;
@@ -48,10 +47,6 @@ public:
     // 런타임에 생성된 InGame 레이어 인스턴스
     UPROPERTY()
     UInGameLayerWidget* UIInGameMain = nullptr;
-
-    // 런타임에 생성된 LootBox Map 레이어 인스턴스
-    UPROPERTY()
-    ULootBoxLayerWidget* UILootBoxLayer = nullptr;
 
     // Office 레이어
     UPROPERTY()
@@ -89,8 +84,6 @@ public:
 
     UInGameLayerWidget* GetInGameLayer() const;
 
-    ULootBoxLayerWidget* GetLootBoxLayer() const;
-
     UOfficeLayerWidget* GetOfficeLayer() const;
 
     UOfficeMainWidget* GetOfficeMain() const;
@@ -107,9 +100,6 @@ public:
 
     // 실제 InGame 레이어 생성 로직
     void ShowMainMapUI();
-
-    // LootBox Level의 메인위젯 생성 (델리게이트 바인딩용 위젯 반환)
-    ULootBoxLayerWidget* ShowLootBoxUI();
 
     // Office Level의 메인위젯 생성
     void ShowOfficeUI();

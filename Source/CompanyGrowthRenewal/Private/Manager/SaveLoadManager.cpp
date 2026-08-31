@@ -482,7 +482,7 @@ bool USaveLoadManager::SaveGameData()
     {
         FString CurrentLevelName = World->GetMapName();
 
-        // MainMap에서만 Building 데이터 업데이트 (LootBoxLevel 등에서는 기존 데이터 유지)
+        // MainMap에서만 Building 데이터 업데이트 (다른 레벨에서는 기존 데이터 유지)
         if (CurrentLevelName.Contains("MainMap") || CurrentLevelName.Contains("GameLevel"))
         {
             UEntityManager* EntityManager = World->GetSubsystem<UEntityManager>();
@@ -621,22 +621,9 @@ bool USaveLoadManager::SaveGameData()
                     OfficeData.EmployeeList.Num());
             }
         }
-        else if (CurrentLevelName.Contains("RecruitmentMap"))
-        {
-            // RecruitmentMap에서 채용된 직원 데이터 저장
-            int32 ManagedBuildingIndex = GameInst ? GameInst->GetCurrentManagedBuildingIndex() : -1;
-            if (ManagedBuildingIndex >= 0 && EmployeeManager)
-            {
-                FOfficeSaveData& OfficeData = SaveGameInstance->GameData.OfficeDataMap.FindOrAdd(ManagedBuildingIndex);
-                OfficeData.EmployeeList = EmployeeManager->GetEmployeesByBuilding(ManagedBuildingIndex);
-                OfficeData.EmployeeAppearances = EmployeeManager->GetAppearancesByBuilding(ManagedBuildingIndex);
-                UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] RecruitmentMap - Employee data saved for Building %d: Count=%d"),
-                    ManagedBuildingIndex, OfficeData.EmployeeList.Num());
-            }
-        }
         else
         {
-            // LootBoxLevel 등에서는 EntityManager를 건드리지 않음 (기존 데이터 자동 유지)
+            // 다른 레벨에서는 EntityManager를 건드리지 않음 (기존 데이터 자동 유지)
             UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] SaveGameData - Skipping building update in %s, preserving existing data: %d"),
                 *CurrentLevelName, SaveGameInstance->GameData.Buildings.Num());
         }
@@ -1159,7 +1146,7 @@ bool USaveLoadManager::LoadGameData()
 
     DebugPrintSaveData();
 
-    // 캐시 설정 (로드한 데이터 재사용, LootBoxInventory 등 보존)
+    // 캐시 설정 (로드한 데이터 재사용)
     CachedSaveData = LoadGameInstance;
     UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] Save data cached after load"));
 

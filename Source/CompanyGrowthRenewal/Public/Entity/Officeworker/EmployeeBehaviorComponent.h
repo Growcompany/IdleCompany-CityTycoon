@@ -9,7 +9,7 @@
 // 상태 변경 델리게이트
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEmployeeStateChanged, EEmployeeState, OldState, EEmployeeState, NewState);
 
-// 인사 완료 델리게이트 (RecruitmentGameMode에서 바인딩)
+// 인사 애니메이션 완료 델리게이트
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnGreetingFinished);
 
 // 버프 변경 델리게이트 (Bubble/Overlay 갱신용)
@@ -75,7 +75,7 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Behavior|Animation")
 	float Speed = 0.0f;
 
-	// 외부에서 초기화를 직접 제어할 때 true (RecruitmentMap 등)
+	// 초상화·가챠 캡처처럼 외부 연출이 초기화를 직접 제어할 때 true
 	UPROPERTY()
 	bool bSkipAutoInit = false;
 
@@ -303,7 +303,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Behavior|Animation")
 	void OnStandToSitComplete();
 
-	// 인사 시작 (RecruitmentGameMode에서 호출)
+	// 인사 애니메이션 시작
 	UFUNCTION(BlueprintCallable, Category = "Behavior|Greeting")
 	void StartGreeting();
 

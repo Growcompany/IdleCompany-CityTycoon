@@ -1,92 +1,76 @@
 # 프로젝트 아키텍처
 
-> **2026-07-22 감사 반영 재작성** — 레벨 3→6종/GameMode 실측, 매니저 7→31+α, 소스 트리 실측, 저장 흐름(RequestDeferredSave) 신설. `MainMenuMap.umap`은 존재하지 않아 삭제 (클래스 `AMainMenuGameModeBase`는 고아로 잔존 — 아래 참조).
+> **2026-08-31 레거시 맵 제거 반영** — 런타임 구조는 플레이 맵 3개 + 부팅 전용 `LoadingMap`이다. 대부분의 장기 도메인 상태는 `UGameInstanceSubsystem` 서비스가 소유하고, `UCGGameInstance`는 범용 레벨 전환·제한된 진입 컨텍스트와 저장 복원되는 `NextBuildingIndex` 발급을 담당한다. 레벨별 `GameMode`와 `ActorComponent`는 해당 월드에 종속된 표현·행동 계층이다.
 
 ## Level Flow (레벨 흐름도)
 
-게임은 여러 레벨(맵)로 구성되며, `CGGameInstance`를 통해 레벨 간 데이터 전달.
+게임은 부팅 전용 맵 1개와 플레이 맵 3개로 구성된다. `UCGGameInstance::TransitionToLevel`이 범용 전환을 담당하며, 지속되는 게임 도메인 상태는 원칙적으로 각 `UGameInstanceSubsystem`에 남는다. 현행 예외는 `UCGGameInstance`가 저장·복원하는 다음 건물 ID(`NextBuildingIndex`)다.
 
-### 핵심 레벨 (`Content/CompanyGrowth/Level/` 실측, 2026-07-22)
+### 런타임 레벨 (`Content/CompanyGrowth/Level/` 실측, 2026-08-31)
 
 ```
 Content/CompanyGrowth/Level/
-├── LoadingMap.umap                 # 부팅 로딩 씬 (게임 첫 맵. BGM 무음 가드 — OnPostLoadMapWithWorld)
-├── MainMap_TheRiverwalkCity.umap   # 메인 게임 맵 (도시, 건물 배치, 부지 인수)
-├── OfficeMap.umap                  # 오피스 씬 (직원 배치/행동, 프로젝트 개발)
-├── LootBoxMap.umap                 # 뽑기(가챠) 3D 연출 씬
-├── RecruitmentMap.umap             # 채용 씬 (사원증 발급 리빌 연출)
-├── WorldMap.umap                   # 세계지도 씬 (11개국 채광/공장/무역)
-└── (기타 테스트 맵 다수 — TestMap, CameraTestMap, EmployeeTestLevel 등, 쿠킹 대상 아님)
+├── LoadingMap.umap                 # 부팅 전용 로딩 씬
+├── MainMap_TheRiverwalkCity.umap   # 도시·건물·부지·회사 관리
+├── OfficeMap.umap                  # 직원·오피스·프로젝트 개발
+├── WorldMap.umap                   # 채광·공장·무역
+└── (개발/테스트 맵 — 런타임 플레이·MapsToCook 대상 아님)
 ```
 
-> 구 문서의 `MainMenuMap.umap`은 **존재하지 않음** (Content 레벨 폴더 실측) — 메인 메뉴 없이 LoadingMap → MainMap으로 부팅한다. 단 `AMainMenuGameModeBase` 클래스 파일은 `Private/GameMode/MainMenuGameModeBase.h/.cpp`에 **외부 참조 0건 고아**로 잔존 (Config 히트는 에디터 뷰포트 북마크뿐, 게임플레이 무관) — CLAUDE.md 레거시 제거 규칙에 따라 사용자 확인 후 삭제 후보.
+> 구 문서의 `MainMenuMap.umap`은 **존재하지 않음** (Content 레벨 폴더 실측) — 메인 메뉴 없이 LoadingMap → MainMap_TheRiverwalkCity로 부팅한다. 단 `AMainMenuGameModeBase` 클래스 파일은 `Private/GameMode/MainMenuGameModeBase.h/.cpp`에 **외부 참조 0건 고아**로 잔존 (Config 히트는 에디터 뷰포트 북마크뿐, 게임플레이 무관) — CLAUDE.md 레거시 제거 규칙에 따라 사용자 확인 후 삭제 후보.
 
 ### 레벨 전환 흐름
 
 ```
-LoadingMap (부팅)
-    ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     MainMap (메인 게임)                      │
-│  - 도시 전체 뷰, 건물 배치/관리, 부지·회사 인수              │
-│  - Factory 클릭, 건물 관리 패널, HQ 패널                     │
-└─────────────────────────────────────────────────────────────┘
-     │ 가챠(뽑기)        │ 건물 → 오피스 진입      │ 세계지도
-     ▼                  ▼                        ▼
-┌──────────────┐   ┌──────────────────────┐   ┌──────────────┐
-│  LootBoxMap  │   │      OfficeMap       │   │   WorldMap   │
-│  3D 뽑기 연출│   │  직원 3D/프로젝트 개발│   │  채광/공장/  │
-└──────────────┘   │  모드: EOfficeMode 4 │   │  무역 (11국) │
-     │             └──────────────────────┘   └──────────────┘
-     │                  │        ▲ ReturnFromRecruitmentMap
-     │                  ▼        │
-     │             ┌──────────────────────┐
-     │             │   RecruitmentMap     │
-     │             │  사원증 발급 연출     │
-     │             └──────────────────────┘
-     └────────────────► MainMap으로 복귀
+LoadingMap
+    ↓
+MainMap_TheRiverwalkCity ⇄ OfficeMap
+             ⇅
+          WorldMap
 ```
+
+- 직원 채용은 `OfficeMap` 내부의 `UEmployeeGachaPresentationWidget`과 공유 `AGachaCaptureStage`가 2D 리빌·라이브 컷아웃을 담당한다.
+- 건물 특성·스킨 가챠도 `MainMap_TheRiverwalkCity` 안의 현행 2D 프레젠테이션 흐름으로 끝나며 별도 맵으로 전환하지 않는다.
 
 ### 레벨별 GameMode (실측)
 
 | 레벨 | GameMode | 위치 |
 |------|----------|------|
-| MainMap | `ACGGameModeBase` | `Private/GameMode/CGGameModeBase.h` |
-| LoadingMap | `LoadingGameMode` | `Public/GameMode/` |
-| OfficeMap | `OfficeGameMode` | `Public/GameMode/` |
-| LootBoxMap | `LootBoxMapGameMode` | `Public/GameMode/` |
-| RecruitmentMap | `RecruitmentGameMode` | `Public/GameMode/` |
-| WorldMap | `WorldMapGameMode` | `Public/GameMode/` |
+| MainMap_TheRiverwalkCity | `ACGGameModeBase` | `Private/GameMode/CGGameModeBase.h` |
+| LoadingMap | `ALoadingGameMode` | `Public/GameMode/` |
+| OfficeMap | `AOfficeGameMode` | `Public/GameMode/` |
+| WorldMap | `AWorldMapGameMode` | `Public/GameMode/` |
 
 ### 레벨 전환 방법 (`Private/Core/CGGameInstance.h`)
 
 ```cpp
-// CGGameInstance를 통한 레벨 전환 (전환 전 저장 포함)
-GameInstance->TransitionToLevel("LootBoxMap", BackgroundIndex);
-
-// 루트박스 전환 (카테고리 저장 후 전환)
-GameInstance->TransitionToLootBoxMap(ELootBoxCategory::BuildingSkin, 0);
-
-// 채용맵 전환 (가챠 결과 저장 후 전환) / 복귀
-GameInstance->TransitionToRecruitmentMap(GachaResult, 0);
-GameInstance->ReturnFromRecruitmentMap();   // → OfficeMap 복귀
-
-// 오피스 전환 시 데이터 저장
+// 오피스 진입에 필요한 제한된 내비게이션 컨텍스트를 설정한다.
 GameInstance->SetCurrentManagedBuilding(Building);
 GameInstance->SetOfficeMode(EOfficeMode::Training);
+GameInstance->TransitionToLevel(TEXT("OfficeMap"), 0);
 ```
 
-### 레벨 간 데이터 전달 (CGGameInstance 보관 상태)
+`TransitionToLevel`은 `BlueprintCallable`인 범용 API다. 맵별 전용 전환 래퍼나 가챠 결과 임시 필드를 만들지 않고, 도메인 데이터는 해당 서브시스템이 계속 소유한다. 단, 저장 복원되는 `NextBuildingIndex` 발급은 현재 `UCGGameInstance`에 남아 있다.
+
+### 상태 소유권과 월드 표현 경계
+
+| 계층 | 책임 | 수명 |
+|------|------|------|
+| `UGameInstanceSubsystem` 도메인 서비스 | 직원·재화·미션·건물 특성/스킨·생산·무역 등 대부분의 지속 도메인 상태와 규칙 | 레벨 전환을 넘어 유지 |
+| `UCGGameInstance` | 범용 레벨 전환, 저장/로드 전환 훅, 오피스·방문 진입 컨텍스트, 저장 복원되는 다음 건물 ID 발급 | 게임 인스턴스 |
+| 레벨별 `GameMode` | 해당 월드의 스폰·초기화·진행 연결 | 현재 월드 |
+| `Actor` / `ActorComponent` | 배치, 이동, 캡처, 상호작용 등 월드에 묶인 표현·행동 | 소유 월드/액터 |
+
+### `UCGGameInstance`의 진입 컨텍스트와 현행 ID 예외
 
 | 변수 | 타입 | 용도 |
 |------|------|------|
-| `CurrentLootBoxCategory` | `ELootBoxCategory` | 루트박스 카테고리 |
-| `CurrentManagedBuildingIndex` | `int32` | 관리 중인 건물 인덱스 (구 문서의 FString EntityID 아님) |
+| `CurrentManagedBuildingIndex` | `int32` | `OfficeMap`에서 관리할 건물 인덱스 |
 | `CurrentOfficeMode` | `EOfficeMode` | 오피스 진입 모드 — Normal / PromotionTest / Training / FreeView (4모드) |
-| `CurrentBuildingCompanyType` | `ECompanyType` | 관리 중인 건물의 산업 |
-| `CurrentMapType` | `ECurrentMapType` | 현재 맵 (None/MainMap/OfficeMap/LootBoxMap/RecruitmentMap/WorldMap) |
-| `PendingGachaResult` | `FGachaResultData` | 채용맵으로 넘길 가챠 결과 |
-| `VisitCitySnapshot` 외 | `FCitySnapshot` 등 | 랭킹 도시 방문 모드 데이터 (`SetVisitData`/`IsVisitMode`) |
+| `CurrentBuildingCompanyType` | `ECompanyType` | 오피스 진입 대상 건물의 산업 |
+| `CurrentMapType` | `ECurrentMapType` | None / MainMap / OfficeMap / WorldMap |
+| `VisitCitySnapshot` 외 | `FCitySnapshot` 등 | 랭킹 도시 방문용 읽기 컨텍스트 (`SetVisitData`/`IsVisitMode`) |
+| `NextBuildingIndex` | `int32` | 새 건물 ID 발급과 저장·복원 — 현행 도메인 상태 예외 |
 
 ---
 
@@ -99,7 +83,7 @@ Source/CompanyGrowthRenewal/
 │   ├── Data/         # 데이터 구조체 (EmployeeTypes, FatigueConfig 등)
 │   ├── Entity/       # 게임 엔티티 (직원, 건물 등)
 │   ├── Enum/         # 열거형 정의
-│   ├── GameMode/     # 레벨별 게임 모드 (5종)
+│   ├── GameMode/     # 공개 GameMode (Loading/Office/World)
 │   ├── Global/       # 전역 설정/상수 (CGDevSettings 등)
 │   ├── Input/        # Enhanced Input 처리
 │   ├── Interfaces/   # 인터페이스 정의
@@ -124,7 +108,7 @@ Source/CompanyGrowthRenewal/
 
 ## Manager System
 
-핵심 매니저는 대부분 `UGameInstanceSubsystem`으로 구현되어 레벨 전환 시에도 유지된다 (개별 상속은 각 헤더 확인).
+대부분의 지속 도메인 상태는 `UGameInstanceSubsystem` 매니저가 소유해 레벨 전환 시에도 유지한다. 현행 `NextBuildingIndex` 예외는 `UCGGameInstance`에 남아 있다. 레벨별 `GameMode`와 `ActorComponent`는 상태를 현재 월드에 표현하며, 장기 상태의 권위가 아니다 (개별 상속은 각 헤더 확인).
 
 ### 주요 매니저 (한 줄 설명)
 
@@ -179,5 +163,5 @@ BuildingSkinManagerSubsystem, BuildingTraitManagerSubsystem, ChatManagerSubsyste
 
 ---
 
-*문서 버전: 2.0*
-*최종 수정: 2026-07-22 (감사 반영 재작성)*
+*문서 버전: 2.1*
+*최종 수정: 2026-08-31 (레거시 맵 제거 및 상태 소유권 경계 반영)*

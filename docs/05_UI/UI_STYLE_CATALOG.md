@@ -143,8 +143,8 @@ Overlay
 - **금융 색상 역할 `[확정 2026-08-11]`**: 산업 타일·업종 칩처럼 **대표색 하나만 쓰는 UI accent는 warm gold `#E8A93A`**를 사용한다. 금융 커버/일러스트의 보조 팔레트에는 에메랄드·틸네이비를 계속 쓸 수 있으며, 대표색 변경을 에메랄드 전면 금지로 확대 해석하지 않는다.
 
 ### 등급(Rarity) 색
-- `FLootBoxRarityUtility::GetRarityColor()` — `Public/Enum/LootBoxRarity.h:53` 이 코드 SOT.
-- 사용처: CardInfoWidget(빌딩 카드 배경), SkinInfoWidget, RecruitmentGameMode. 새 등급 색은 직접 hex 박지 말고 이 유틸 경유.
+- `FLootBoxRarityUtility::GetRarityColor()` — `Public/Enum/LootBoxRarity.h:45` 이 코드 SOT.
+- 사용처: CardInfoWidget(빌딩 카드 배경), SkinInfoWidget, EmployeeGachaPresentationWidget, GachaRevealPresentationWidget. 새 등급 색은 직접 hex 박지 말고 이 유틸 경유.
 - 등급별 카드 머티리얼: `MI_TraitCard_{Common,Rare,Epic,Legendary,Mythic}`.
 
 ### 패널/버튼 배경 자원 (Content/CompanyGrowth/UI/)

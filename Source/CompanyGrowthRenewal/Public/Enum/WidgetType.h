@@ -30,8 +30,6 @@ enum class EWidgetType : uint8
 	FactoryPanel UMETA(DisplayName = "FactoryPanelWidget"),
 	BuildingSkinCard UMETA(DisplayName = "BuildingSkinCardWidget"),
 	BuildingLightCard UMETA(DisplayName = "BuildingLightCardWidget"),
-	// LootBoxMap
-	LootBoxLayer UMETA(DisplayName = "LootBoxLayerWidget"),
 	IconButton UMETA(DisplayName = "IconButtonWidget"),
 	// OfficeMap
 	OfficeLayer UMETA(DisplayName = "OfficeLayerWidget"),
@@ -81,8 +79,6 @@ enum class EWidgetType : uint8
 	// 포트폴리오 패널 재사용 컴포넌트 (로드맵 노드 / 조합 셀 — CodexPanel 이 CreateWidget + Configure)
 	RoadmapNode UMETA(DisplayName = "RoadmapNodeWidget"),
 	PortfolioCell UMETA(DisplayName = "PortfolioCellWidget"),
-	// RecruitmentMap
-	RecruitmentResultPanel UMETA(DisplayName = "RecruitmentResultPanelWidget"),
 	// Bubble
 	BubbleElement UMETA(DisplayName = "BubbleElementWidget"),
 	// ScoreOrb

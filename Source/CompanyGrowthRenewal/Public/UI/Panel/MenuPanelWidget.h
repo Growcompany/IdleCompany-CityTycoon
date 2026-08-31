@@ -14,7 +14,7 @@ class UTableManagerSubsystem;
 class USaveLoadManager;
 
 /**
- * 메뉴 패널 위젯 - 스킨, 순위, 업적 등의 메뉴를 표시
+ * 메뉴 패널 위젯 - 순위, 가챠, 설정 메뉴를 표시
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UMenuPanelWidget : public UAnimatedActivatableWidget
@@ -29,9 +29,6 @@ protected:
 
 	UFUNCTION()
 	void OnCancelButtonClicked();
-
-	UFUNCTION()
-	void OnSkinButtonClicked();
 
 	UFUNCTION()
 	void OnRankButtonClicked();
@@ -55,10 +52,6 @@ protected:
 	// 닫기 버튼 (UIE_CloseButton)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UCloseButtonWidget* UIE_CloseButton;
-
-	// 스킨 버튼 — 스킨은 가챠에서 별도 관리, 메뉴에선 미사용 → Optional (WBP에서 제거 가능)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UBuildingSkinCardWidget* SkinBtn;
 
 	// 랭킹 버튼
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))

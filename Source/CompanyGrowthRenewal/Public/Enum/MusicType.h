@@ -9,7 +9,6 @@ enum class EMusicType : uint8
 	None UMETA(DisplayName = "None"),
 	Main UMETA(DisplayName = "Main Map"),
 	Upgrade UMETA(DisplayName = "Upgrade"),
-	LootBox UMETA(DisplayName = "LootBox"),
 	WorldMap UMETA(DisplayName = "World Map"),
 	OfficeGame UMETA(DisplayName = "Office - Game"),
 	OfficeElectronics UMETA(DisplayName = "Office - Electronics"),

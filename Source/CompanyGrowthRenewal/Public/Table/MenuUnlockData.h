@@ -6,7 +6,7 @@
 
 /**
  * 메뉴 버튼 해금 조건 DataTable 행
- * RowName = 버튼 이름 (예: "RankBtn", "SkinBtn")
+ * RowName = 버튼 이름 (예: "RankBtn")
  */
 USTRUCT(BlueprintType)
 struct FMenuUnlockData : public FTableRowBase

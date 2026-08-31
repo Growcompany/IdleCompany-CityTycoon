@@ -111,7 +111,7 @@
 |---|---|
 | `CUI_Style_Text_Nexon1_*` 7종 | 구세대 — 신규 사용 금지. ⚠ **이름의 숫자가 실제 크기와 다름** (Bold_10→실제15, Bold_Black_20→30, Regular_Black_15→22.5, Regular_Black_20→30). 소비자 5 위젯: `UIE_EmployeeManageCardInfo`, `UIE_RecruitmentCard`, `UIE_EmployeeListCard`, `UI_LaunchConfirmPanel`, `UI_ProjectReportPanel` |
 | `CUI_Style_Text_LargeSize` | ~~엔진 Roboto Bold 22.5 (한글 깨짐 루트)~~ → **NEXON Bold 22.5로 수리 완료** (2026-06-05) |
-| 무스타일 WBP 11개 (Roboto 폴백 위험) | `UI_LoadingWidget`(첫 화면), `UI_EmployeeManagePanel`, `UI_UpgradeMain`, `UI_LootBoxLayer`, `UI_EmployeeManageUpgradePanel`, `UIE_EmployeeFullCard`, `UIE_EntityCardFrame`, `UIE_BuildEntityResource`, `UI_Element_Button1`, `UI_Element_Button1WithIcon`, `UI_Element_Button2WithIcon` (마지막 3개는 §레거시 부품이라 교체가 답) |
+| 무스타일 WBP 10개 (Roboto 폴백 위험) | `UI_LoadingWidget`(첫 화면), `UI_EmployeeManagePanel`, `UI_UpgradeMain`, `UI_EmployeeManageUpgradePanel`, `UIE_EmployeeFullCard`, `UIE_EntityCardFrame`, `UIE_BuildEntityResource`, `UI_Element_Button1`, `UI_Element_Button1WithIcon`, `UI_Element_Button2WithIcon` (마지막 3개는 §레거시 부품이라 교체가 답) |
 | 폰트 직접 하드코딩 WBP 72개 | 동작은 정상(NEXON) — 신규 추가만 금지, 손대는 김에 스케일로 점진 마이그레이션 |
 | 로딩스크린 | `DefaultGame.ini` AsyncLoadingScreen이 **엔진 Roboto 20/24/32** 지정 — 한글 팁 텍스트가 Roboto 폴백 렌더 |
 | `WORLDMAP_NAVIGATION.md` 폰트/텍스트 절 | **superseded** — pt 계층(36/28/21…)과 "특수문자 전면 금지"는 구정책. 이 문서가 대체 |
@@ -135,7 +135,7 @@
 - [x] `make_text_scale.py` 에디터 실행 → v2 스케일 적용 + LargeSize Roboto 수리 (2026-06-05 완료, 14/14)
 - [ ] `UI_BuildModal`(Heading_L 소비자) 시각 확인 / BuildModalTreeBuilder의 38 하드코딩 회피책 정리
 - [ ] 컴포짓 폰트 Fallback Font Family 설정 (§6)
-- [ ] 무스타일 WBP 11개에 스케일 스타일 지정 (우선순위: UI_LoadingWidget → 공용 버튼 3종)
+- [ ] 무스타일 WBP 10개에 스케일 스타일 지정 (우선순위: UI_LoadingWidget → 공용 버튼 3종)
 - [ ] 로딩스크린 폰트를 NEXON으로 교체 (DefaultGame.ini AsyncLoadingScreen Font)
 - [ ] 레거시 `Nexon1_*` 소비자 5 위젯 → 스케일 마이그레이션
 - [ ] 크레딧 화면에 NEXON 폰트 고지

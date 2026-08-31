@@ -361,7 +361,7 @@ HairBase->SetAnimationMode(EAnimationMode::AnimationCustomMode);  // ← 추가
 ### Phase 9 후보 — 전수 조사 감사 잔여 (2026-06-02, 우선순위 순)
 
 **효과 큰 워커 핫패스 (invalidation 훅 설계 필요 → 신중히)**:
-- **Officeworker::Tick `bIsRoaming` 폴링** (`Officeworker.cpp:306-318`): 매 프레임 `Cast<AAIController>` + `GetPathFollowingComponent()->GetStatus()` + `IsTimerActive()` → `PathFollowingComponent::OnRequestFinished` 델리게이트로. 검증된 패턴 `RecruitmentGameMode.cpp:253`. **성공/실패 결과 양쪽**에서 `OnMoveCompleted` 호출 필수(NavMesh 경로 실패 시 워커 영구정지 방지). Phase 6의 EmployeeBehaviorComponent 폴링 항목과 같은 fix 계열, 별개 위치.
+- **Officeworker::Tick `bIsRoaming` 폴링** (`Officeworker.cpp:306-318`): 매 프레임 `Cast<AAIController>` + `GetPathFollowingComponent()->GetStatus()` + `IsTimerActive()` → UE `PathFollowingComponent::OnRequestFinished` 델리게이트 패턴으로 전환. **성공/실패 결과 양쪽**에서 `OnMoveCompleted` 호출 필수(NavMesh 경로 실패 시 워커 영구정지 방지). Phase 6의 EmployeeBehaviorComponent 폴링 항목과 같은 fix 계열, 별개 위치.
 - **EmployeeBehaviorComponent::GenerateIncome** (`L453-494`): non-Operation 분기가 매 프레임 `GetInstance` + `GetSubsystem<UEmployeeManager>` + `FindEmployee`로 거의 불변인 Level/EnhancementLevel만 읽음 → 컴포넌트에 캐시. **주의**: `EnhanceEmployee`(EmployeeManager.cpp:639)가 broadcast 안 함 → enhance/spawn/manage-apply 경로에 캐시 invalidation 훅 추가 필수(`OnExperienceGained`만으론 EnhancementLevel 변경 못 잡음).
 - **EmployeeManager::FindEmployee O(n)** (`L363-373`): income/score 틱마다 워커별 선형 스캔, 집계 O(workers × EmployeeList.Num())/frame → `TMap<int32,int32> EmployeeIDToIndex`로 O(1). mutation 6곳(Add L77/L137/L1145, RemoveAt L180, RemoveAll L1119/L1189) 동기화 필요(RemoveAt/RemoveAll은 인덱스 시프트 → stable keying 또는 rebuild).
 

@@ -2,11 +2,16 @@
 
 ## 수명주기 분리
 
-`UCGGameInstance`는 레벨 전환과 맵 간 상태 전달의 진입점입니다. 레벨을 넘어 유지돼야 하는 직원, 건물, 생산, 미션, UI, 저장, 랭킹과 채팅 상태는 GameInstanceSubsystem 계열 서비스가 소유합니다. 월드에 종속되는 표현과 입력은 GameMode, Controller, Pawn, ActorComponent에 남깁니다.
+`UCGGameInstance`는 범용 레벨 전환과 오피스·방문 진입 컨텍스트를 담당하며, 저장 복원되는 `NextBuildingIndex` 발급도 현행 예외로 남아 있습니다. 그 외 직원, 건물, 생산, 미션, UI, 저장, 랭킹과 채팅 등 대부분의 장기 상태는 GameInstanceSubsystem 계열 서비스가 소유합니다. 월드에 종속되는 표현과 입력은 GameMode, Controller, Pawn, ActorComponent에 남깁니다.
+
+![LoadingMap 부팅 후 MainMap, OfficeMap, WorldMap으로 전환하며 도메인 상태와 월드 표현을 분리한 구조](images/runtime-map-architecture.svg)
+
+런타임은 `LoadingMap` 부팅 후 `MainMap_TheRiverwalkCity`, `OfficeMap`, `WorldMap` 3개 플레이 맵으로 전환합니다. 가챠와 채용은 별도 레벨이 아니라 활성 맵의 CommonUI 흐름입니다.
 
 ```text
 UCGGameInstance
-├─ 레벨 전환과 맵 간 상태
+├─ 범용 레벨 전환·진입 컨텍스트
+├─ NextBuildingIndex 발급 (현행 예외)
 ├─ GameInstanceSubsystem
 │  ├─ Table / UI / SaveLoad
 │  ├─ Employee / Building / Mission

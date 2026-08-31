@@ -7,11 +7,8 @@
 #include "Engine/StreamableManager.h"
 #include "Global/GlobalAssetCache.h"
 #include "Level/CGLevelScriptBase.h"
-#include "Enum/LootBoxCategory.h"
 #include "Enum/CompanyType.h"
-#include "Enum/GachaTier.h"
 #include "Enum/MusicType.h"
-#include "Data/GachaRecruitmentData.h"
 #include "Data/RankingData.h"
 
 #include "CGGameInstance.generated.h"
@@ -42,8 +39,6 @@ enum class ECurrentMapType : uint8
 	None            UMETA(DisplayName = "없음"),
 	MainMap         UMETA(DisplayName = "메인 맵"),
 	OfficeMap       UMETA(DisplayName = "오피스 맵"),
-	LootBoxMap      UMETA(DisplayName = "뽑기 맵"),
-	RecruitmentMap  UMETA(DisplayName = "채용 맵"),
 	WorldMap        UMETA(DisplayName = "세계지도 맵")
 };
 
@@ -60,6 +55,7 @@ class COMPANYGROWTHRENEWAL_API UCGGameInstance : public UGameInstance
 	FStreamableManager streamableManager;
 
 public:
+	UFUNCTION(BlueprintCallable, Category = "Level")
 	void TransitionToLevel(const FString& LevelName, int32 BackgroundIndex = 0);
 
 private:
@@ -71,9 +67,6 @@ private:
 
 	UPROPERTY()
 	APlayerController* CurrentPlayerController;
-
-	// LootBox 시스템 - 현재 선택된 카테고리
-	ELootBoxCategory CurrentLootBoxCategory = ELootBoxCategory::BuildingSkin;
 
 	// 오피스 씬 관련 데이터 (레벨 전환 시 유지)
 	// 현재 관리 중인 건물 인덱스
@@ -148,18 +141,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Save/Load")
 	void LoadGameAfterLevelStart();
 
-public: // LootBox System
-	// LootBox 카테고리 관리
-	UFUNCTION(BlueprintCallable, Category = "LootBox")
-	void SetCurrentLootBoxCategory(ELootBoxCategory Category);
-
-	UFUNCTION(BlueprintCallable, Category = "LootBox")
-	ELootBoxCategory GetCurrentLootBoxCategory() const;
-
-	// LootBoxMap으로 전환 (카테고리 지정)
-	UFUNCTION(BlueprintCallable, Category = "LootBox")
-	void TransitionToLootBoxMap(ELootBoxCategory Category, int32 BackgroundIndex = 0);
-
 public: // Office System
 	// 오피스 씬 관련 데이터 관리
 	UFUNCTION(BlueprintCallable, Category = "Office")
@@ -201,34 +182,6 @@ public: // Map Type
 
 	UFUNCTION(BlueprintPure, Category = "MapType")
 	bool IsInOfficeMap() const { return CurrentMapType == ECurrentMapType::OfficeMap; }
-
-public: // Recruitment System
-	// 채용맵으로 전환 (가챠 결과를 저장 후 전환)
-	UFUNCTION(BlueprintCallable, Category = "Recruitment")
-	void TransitionToRecruitmentMap(const FGachaResultData& Result, int32 BackgroundIndex = 0);
-
-	// 채용 완료 후 오피스맵으로 복귀
-	UFUNCTION(BlueprintCallable, Category = "Recruitment")
-	void ReturnFromRecruitmentMap();
-
-	// 대기 중인 가챠 결과
-	UFUNCTION(BlueprintPure, Category = "Recruitment")
-	const FGachaResultData& GetPendingGachaResult() const { return PendingGachaResult; }
-
-	UFUNCTION(BlueprintCallable, Category = "Recruitment")
-	bool HasPendingGachaResult() const { return bHasPendingGachaResult; }
-
-private:
-	FGachaResultData PendingGachaResult;
-	bool bHasPendingGachaResult = false;
-
-	// 마지막 채용 직원 ID (OfficeMap 자동 선택용, 런타임 전용)
-	int32 LastRecruitedEmployeeID = INDEX_NONE;
-
-public:
-	void SetLastRecruitedEmployeeID(int32 ID) { LastRecruitedEmployeeID = ID; }
-	int32 GetLastRecruitedEmployeeID() const { return LastRecruitedEmployeeID; }
-	void ClearLastRecruitedEmployeeID() { LastRecruitedEmployeeID = INDEX_NONE; }
 
 	UFUNCTION(Exec)
 	void TestClothingRank(int32 RankValue);

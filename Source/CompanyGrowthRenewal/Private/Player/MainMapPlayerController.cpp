@@ -185,20 +185,6 @@ void AMainMapPlayerController::OnTouchMoved(ETouchIndex::Type FingerIndex, FVect
     }
 }
 
-void AMainMapPlayerController::OpenLootBoxMap(ELootBoxCategory Category)
-{
-	UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
-	if (GameInstance)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[MainMapPlayerController] Opening LootBox Map with category: %d"), static_cast<uint8>(Category));
-		GameInstance->TransitionToLootBoxMap(Category);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("[MainMapPlayerController] Failed to get GameInstance"));
-	}
-}
-
 void AMainMapPlayerController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);

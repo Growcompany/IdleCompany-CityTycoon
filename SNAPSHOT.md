@@ -1,9 +1,9 @@
 # Snapshot
 
-- Private source revision: `7df820f2469822c17f2ce1e5c60f4c46093a27dc`
-- Snapshot date: `2026-08-25`
+- Private source revision: `566fa3af6170cb59e15ee4ffeaf6a861cef4dcde`
+- Snapshot date: `2026-09-01`
 - Unreal Engine: `5.4`
-- Public source files under `Source/`: `878`
+- Public source files under `Source/`: `859`
 - Public C++ automation test source files: `62`
 - Public C++ automation test declarations: `148`
 - Working-tree changes excluded from export: `yes`

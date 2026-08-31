@@ -15,7 +15,6 @@
 #include "UI/UIBase.h"
 #include "UI/Panel/LoadingWidget.h"
 #include "UI/Panel/InGameLayerWidget.h"
-#include "UI/Panel/LootBoxLayerWidget.h"
 #include "UI/Panel/OfficeLayerWidget.h"
 #include "UI/Panel/OfficeMainWidget.h"
 #include "UI/Panel/WorldMapLayerWidget.h"
@@ -180,11 +179,6 @@ UInGameLayerWidget* UUIManagerSubsystem::GetInGameLayer() const
     return UIInGameMain;
 }
 
-ULootBoxLayerWidget* UUIManagerSubsystem::GetLootBoxLayer() const
-{
-    return UILootBoxLayer;
-}
-
 UOfficeLayerWidget* UUIManagerSubsystem::GetOfficeLayer() const
 {
     return UIOfficeLayer;
@@ -209,7 +203,6 @@ void UUIManagerSubsystem::ClearAllUI()
     // 2. 모든 참조 초기화
     UIBaseInstance = nullptr;
     UIInGameMain = nullptr;
-    UILootBoxLayer = nullptr;
     UIOfficeLayer = nullptr;
     UIOfficeMain = nullptr;
     UIWorldMapLayer = nullptr;
@@ -315,27 +308,6 @@ void UUIManagerSubsystem::TryShowOfflineReport()
     {
         PC->GoToUIMode();
     }
-}
-
-ULootBoxLayerWidget* UUIManagerSubsystem::ShowLootBoxUI()
-{
-    ClearAllUI();
-
-    if (UTableManagerSubsystem* TableMgr = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>())
-    {
-        // LootBox 레이어
-        if (TSubclassOf<UUserWidget> LayerClass = TableMgr->GetWidgetClass(EWidgetType::LootBoxLayer))
-        {
-            UILootBoxLayer = Cast<ULootBoxLayerWidget>(UIBaseInstance->PushMenuClass(LayerClass.Get()));
-            UE_LOG(LogTemp, Log, TEXT("[UIManagerSubsystem] ShowLootBoxUI - LootBoxLayer created"));
-        }
-        else
-        {
-            UE_LOG(LogTemp, Error, TEXT("[UIManagerSubsystem] ShowLootBoxUI - LootBoxLayer Widget class not found in DataTable"));
-        }
-    }
-
-    return UILootBoxLayer;
 }
 
 void UUIManagerSubsystem::ShowOfficeUI()

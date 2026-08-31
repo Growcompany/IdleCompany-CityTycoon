@@ -47,7 +47,7 @@
 
 <table>
   <tr>
-    <td align="center"><strong>878</strong><br>Source files</td>
+    <td align="center"><strong>859</strong><br>Source files</td>
     <td align="center"><strong>62</strong><br>C++ test files</td>
     <td align="center"><strong>148</strong><br>Test declarations</td>
     <td align="center"><strong>239</strong><br>Runnable tool checks passed</td>
@@ -107,29 +107,11 @@
 
 ## 3. System Architecture
 
-~~~mermaid
-flowchart TB
-    INPUT["Enhanced Input<br/>PC · Mobile"] --> PC["PlayerController"]
-    PC --> COMPONENTS["Input · Camera · Placement Components"]
-
-    GI["UCGGameInstance<br/>Level transition · cross-map state"] --> SERVICES
-
-    subgraph SERVICES["GameInstanceSubsystem domain services"]
-        TABLE["TableManager"]
-        SAVE["SaveLoad"]
-        UI["UIManager"]
-        GAME["Employee · Building · Mission · Production"]
-        NET["PlayFab · Ranking · Firebase Chat"]
-    end
-
-    CSV["CSV · DataTables"] --> TABLE
-    TABLE --> GAME
-    COMPONENTS --> GAME
-    GAME --> SAVE
-    NET --> SAVE
-    GAME --> UI
-    UI --> STACK["CommonUI<br/>Main · Prompt · Bottom"]
-~~~
+<div align="center">
+  <img src="docs/images/runtime-map-architecture.svg" alt="LoadingMap 부팅 후 MainMap, OfficeMap, WorldMap으로 전환하며 GameInstanceSubsystem 도메인 상태와 레벨별 월드 표현을 분리한 구조" width="960">
+  <br>
+  <sub>3개 플레이 맵 + 1개 부팅 맵 · 가챠와 채용은 별도 맵이 아닌 활성 맵의 CommonUI 흐름</sub>
+</div>
 
 - <code>CSV → Table cache → Domain/UI</code>: 콘텐츠와 표시 데이터를 코드 분기에서 분리합니다.
 - <code>Input → Controller/Component → Domain</code>: 플랫폼 입력과 게임 규칙의 책임을 나눕니다.
@@ -184,9 +166,14 @@ flowchart TB
 
 <a id="ai-workflow"></a>
 
-## 7. AI-Assisted Engineering Workflow
+## 7. AI 에이전트 활용 — Claude Code와 Codex
 
 기본 아키텍처, 시스템 경계, 데이터 흐름, 완료 조건과 최종 채택·기각은 직접 결정했습니다. AI는 기존 API 탐색, 영향 범위 분석, 복수 가설 생성, 반복 구현과 독립 리뷰의 처리량을 높이는 도구로 사용했습니다.
+
+- **Claude Code** — 긴 기능 명세를 구현 단위로 나누고, UI 흐름·UE C++·에디터 자동화 시안을 반복할 때 주로 활용했습니다.
+- **Codex** — 저장소 전체의 기존 구현과 영향 범위를 감사하고, 구현 뒤 독립 리뷰·빌드·테스트·쿠킹·발행 결과를 검증할 때 주로 활용했습니다.
+
+두 도구의 역할을 완전히 고정하지는 않았습니다. 같은 SOT와 체크리스트 아래 탐색·구현·검토에 투입하고, 결과의 채택 여부는 측정과 검증으로 결정했습니다.
 
 ~~~text
 직접 정의한 제약·SOT·완료 조건

@@ -3,7 +3,6 @@
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
 #include "Player/InputTypeManager.h"
-#include "Enum/LootBoxCategory.h"
 #include "MainMapPlayerController.generated.h"
 
 UENUM()
@@ -46,10 +45,6 @@ public:
     EInputType GetCurrentInputType() const { return UInputTypeManager::GetPlatformInputType(); }
 
 public:
-    // LootBox 맵으로 전환
-    UFUNCTION(BlueprintCallable, Category = "LootBox")
-    void OpenLootBoxMap(ELootBoxCategory Category);
-
     // 터치 이벤트 핸들러
     UFUNCTION()
     void OnTouchPressed(ETouchIndex::Type FingerIndex, FVector Location);

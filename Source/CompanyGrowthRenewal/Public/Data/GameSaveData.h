@@ -6,7 +6,6 @@
 #include "GameFramework/SaveGame.h"
 #include "Engine/GameInstance.h"
 #include "Manager/EmployeeManager.h"
-#include "Data/LootBoxInventoryData.h"
 #include "Table/BuildingSkinData.h"
 #include "Data/EntitySaveData.h"
 #include "Data/FactorySaveData.h"
@@ -44,12 +43,6 @@ struct FGameSaveData
 
     UPROPERTY(SaveGame)
     TMap<int32, FEmployeeAppearanceData> EmployeeAppearances;
-
-    // ===== LootBox & Inventory System =====
-
-    // 룩박스 인벤토리 (카테고리별 보유 상자 현황)
-    UPROPERTY(SaveGame)
-    FLootBoxInventoryData LootBoxInventory;
 
     // 보유 중인 건물 스킨 목록
     UPROPERTY(SaveGame)

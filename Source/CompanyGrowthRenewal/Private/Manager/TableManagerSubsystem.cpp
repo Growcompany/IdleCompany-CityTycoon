@@ -219,15 +219,6 @@ UTableManagerSubsystem::UTableManagerSubsystem()
         CharacterBaseMeshDataTable = CBMT.Object;
     }
 
-    // LootBox DataTable
-    static ConstructorHelpers::FObjectFinder<UDataTable> LBT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/DT_LootBox.DT_LootBox'")
-    );
-    if (LBT.Succeeded())
-    {
-        LootBoxDataTable = LBT.Object;
-    }
-
     // Resource DataTable
     static ConstructorHelpers::FObjectFinder<UDataTable> RT(
         TEXT("DataTable'/Game/CompanyGrowth/Table/DT_Resource.DT_Resource'")
@@ -687,7 +678,6 @@ void UTableManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     InitializeSkinColorTable();
     InitializeHairColorTable();
     InitializeCharacterBaseMeshTable();
-    InitializeLootBoxTable();
     InitializeResourceTable();
     InitializeBuildingSkinTable();
     InitializeBuildingLightTable();
@@ -1194,29 +1184,6 @@ void UTableManagerSubsystem::InitializeCharacterBaseMeshTable()
     }
 }
 
-void UTableManagerSubsystem::InitializeLootBoxTable()
-{
-    if (!LootBoxDataTable)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("LootBoxDataTable is nullptr!"));
-        return;
-    }
-
-    LootBoxTable.Empty();
-
-    TArray<FName> RowNames = LootBoxDataTable->GetRowNames();
-    for (const FName& RowName : RowNames)
-    {
-        FLootBoxTable* Row = LootBoxDataTable->FindRow<FLootBoxTable>(RowName, TEXT("InitializeLootBoxTable"));
-        if (Row)
-        {
-            LootBoxTable.Add(RowName, *Row);
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] LootBox Table Initialized (%d entries)"), LootBoxTable.Num());
-}
-
 TSubclassOf<UUserWidget> UTableManagerSubsystem::GetWidgetClass(EWidgetType Type) const
 {
     if (const TSubclassOf<UUserWidget>* Found = WidgetTable.Find(Type))
@@ -1432,37 +1399,6 @@ FCharacterBaseMeshTable* UTableManagerSubsystem::GetCharacterBaseMesh(EEmployeeG
 
     UE_LOG(LogTemp, Warning, TEXT("GetCharacterBaseMesh: Gender '%d' not found in CharacterBaseMeshTable!"), (int32)Gender);
     return nullptr;
-}
-
-FLootBoxTable UTableManagerSubsystem::GetLootBoxData(FName RowName, bool& bOutSuccess) const
-{
-    if (const FLootBoxTable* Found = LootBoxTable.Find(RowName))
-    {
-        bOutSuccess = true;
-        return *Found;
-    }
-
-    UE_LOG(LogTemp, Warning, TEXT("GetLootBoxData: RowName '%s' not found!"), *RowName.ToString());
-    bOutSuccess = false;
-    return FLootBoxTable();
-}
-
-TArray<TPair<FName, FLootBoxTable>> UTableManagerSubsystem::GetLootBoxesByCategoryWithNames(ELootBoxCategory Category) const
-{
-    TArray<TPair<FName, FLootBoxTable>> Result;
-
-    for (const auto& Pair : LootBoxTable)
-    {
-        if (Pair.Value.Category == Category)
-        {
-            Result.Add(TPair<FName, FLootBoxTable>(Pair.Key, Pair.Value));
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] GetLootBoxesByCategoryWithNames(%d): Found %d lootboxes"),
-        (int32)Category, Result.Num());
-
-    return Result;
 }
 
 void UTableManagerSubsystem::InitializeResourceTable()

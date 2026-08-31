@@ -61,21 +61,8 @@ Overworld/tiled map camera (inherits APlayerCamera). Top-down fixed angle, no ro
 |---|---|
 | `FIntPoint GetCurrentTileCoord() const` | Determine which tile grid cell the camera is currently centered on (useful for lazy-loading regions) |
 
-### ARecruitmentCameraPawn
-Fixed camera for recruitment map. No input handling, positioned at PlayerStart, low door-facing angle.
-파일: `Public/Player/RecruitmentCameraPawn.h`
-
-### ALootBoxOrbitPawn
-Orbiting camera around loot box actor. Left-right rotation via mouse/touch drag, fixed distance/height, no translation.
-파일: `Public/Player/LootBoxOrbitPawn.h`
-
-| API | 용도 |
-|---|---|
-| `void SetLootBox(ALootBoxActor* NewLootBox)` | Retarget orbit center to a new loot box actor |
-| `void ChangeLootBoxAppearance(ELootBoxRarity Rarity, ELootBoxType Type)` | Update 3D model skin based on rarity/type enum (affects viewer perception) |
-
 ### AMainMapPlayerController
-Main-map input mode state machine. Routes touch/mouse to Normal/BuildPlace/UI/Factory modes. Manages LootBox map transitions.
+Main-map input mode state machine. Routes touch/mouse to Normal/BuildPlace/UI/Factory modes.
 파일: `Private/Player/MainMapPlayerController.h`
 
 | API | 용도 |
@@ -87,7 +74,6 @@ Main-map input mode state machine. Routes touch/mouse to Normal/BuildPlace/UI/Fa
 | `void GoToFactoryMode()` | Switch to factory-specific input (used for factory/production screen) |
 | `EInputMode GetCurrentInputMode() const` | Query active input mode (check before mode transition to avoid duplicate calls) |
 | `EInputType GetCurrentInputType() const` | Get platform input type (KeyMouse/Touch/GamePad) for platform-specific UI branching |
-| `void OpenLootBoxMap(ELootBoxCategory Category)` | Transition to loot box screen with category filter |
 
 ### AOfficePlayerController
 Office-map controller. Inherits MainMapPlayerController. Adds explicit UI/Game mode toggle (separate from MainMap state machine).
@@ -110,10 +96,6 @@ World map controller. Inherits MainMapPlayerController for touch/pan/zoom compat
 ### AUpgradeMapPlayerController
 Upgrade/progression screen controller. Placeholder (no public APIs yet).
 파일: `Public/Player/UpgradeMapPlayerController.h`
-
-### ALootBoxPlayerController
-Loot box screen input handler. PC-side input (keyboard/Enhanced Input) + mobile touch (legacy). Connects UI widget to 3D loot box actor.
-파일: `Public/Player/LootBoxPlayerController.h`
 
 ### UMovementInputHandler
 Handles camera movement (WASD/drag), zoom (wheel), rotation (right-stick/spin). Applies boundary clamping and edge-pan acceleration.
@@ -471,7 +453,7 @@ Component managing employee state machine (Work/Rest/Wander), income generation,
 | `void OnTypeToSitComplete()` | Callback from AnimNotify when type?뭩it transition completes. |
 | `void OnSitToStandComplete()` | Callback from AnimNotify when sit?뭩tand transition completes. |
 | `void OnStandToSitComplete()` | Callback from AnimNotify when stand?뭩it transition completes. |
-| `void StartGreeting()` | Begin greeting animation (RecruitmentGameMode); broadcasts OnGreetingFinished on complete. |
+| `void StartGreeting()` | Begin greeting animation for an externally controlled presentation; broadcasts OnGreetingFinished on complete. |
 | `void OnGreetingComplete()` | Callback from AnimNotify when greeting animation finishes. |
 | `void AddBuff(EBuffType Type, float Value, float Duration)` | Apply temporary buff (score, crit chance, work speed); merges if already active. |
 | `float GetTotalScoreMultiplier() const` | Get largest ScoreMultiplier from active buffs (default 1.0 if none). |
@@ -1088,12 +1070,12 @@ World map production system: mines, factories, raw materials, refined products, 
 | `FOnProductAdded OnProductAdded` | Delegate: (ProductKey, NewAmount) fired on product warehouse add (UI inventory update) |
 
 ### UCGGameInstance
-Game root state holder: level transitions, office context, lootbox mode, recruitment flow, visit mode
+Game root navigation holder: generic level transitions plus limited office and visit entry context. Most persistent domain state belongs to GameInstanceSubsystem services; the save-restored `NextBuildingIndex` allocator remains here as the current exception.
 파일: `Private/Core/CGGameInstance.h`
 
 | API | 용도 |
 |---|---|
-| `void TransitionToLevel(const FString& LevelName, int32 BackgroundIndex=0)` | Load level by name (MainMap, OfficeMap, WorldMap, etc.) with optional background parallax index |
+| `void TransitionToLevel(const FString& LevelName, int32 BackgroundIndex=0)` | BlueprintCallable generic transition for `MainMap_TheRiverwalkCity`, `OfficeMap`, and `WorldMap`, with optional background parallax index |
 | `void SetCurrentManagedBuilding(ABuildingBaseActor* Building)` | Set context for OfficeMap entry (building data accessible during level) |
 | `int32 GetCurrentManagedBuildingIndex() const` | Get active building index (OfficeMap context, employee management scope) |
 | `void SetCurrentBuildingCompanyType(ECompanyType Type)` | Store company type of current building (UI industry-specific panel binding) |
@@ -1102,16 +1084,6 @@ Game root state holder: level transitions, office context, lootbox mode, recruit
 | `int32 GetNextBuildingIndex() const` | Peek next index without incrementing (save/load) |
 | `void SetOfficeMode(EOfficeMode Mode)` | Set OfficeMap behavior (Normal/Training/PromotionTest/FreeView) ??controls UI visibility, input handling |
 | `EOfficeMode GetOfficeMode() const` | Query office mode (UI panels enable/disable) |
-| `void SetCurrentLootBoxCategory(ELootBoxCategory Category)` | Store current gacha shop category (LootBoxMap UI synchronization) |
-| `ELootBoxCategory GetCurrentLootBoxCategory() const` | Get current shop category (used on LootBoxMap entry to restore tab) |
-| `void TransitionToLootBoxMap(ELootBoxCategory Category, int32 BackgroundIndex=0)` | Jump to LootBoxMap and set initial gacha category (BuildingOpenWidget uses) |
-| `void TransitionToRecruitmentMap(const FGachaResultData& Result, int32 BackgroundIndex=0)` | Jump to RecruitmentMap with gacha result (employee portrait scene) |
-| `void ReturnFromRecruitmentMap()` | Return to OfficeMap after recruitment completes (auto-select recruited employee) |
-| `const FGachaResultData& GetPendingGachaResult() const` | Access gacha result pending hire confirmation (RecruitmentMap reads) |
-| `bool HasPendingGachaResult() const` | Check if gacha result awaiting confirmation (gates hire button availability) |
-| `void SetLastRecruitedEmployeeID(int32 ID)` | Mark employee for auto-selection on OfficeMap return (recruited employee highlights) |
-| `int32 GetLastRecruitedEmployeeID() const` | Get last recruited ID (OfficeMap auto-selects and scrolls to this employee) |
-| `void ClearLastRecruitedEmployeeID()` | Clear selection after consuming (prevents stale selection on re-entry) |
 | `void SetVisitMode(bool bInVisitMode)` | Enable/disable visit mode (viewing another player's city from ranking) |
 | `bool IsVisitMode() const` | Check if viewing remote city (gates building operations, shows observer UI) |
 | `void SetVisitData(const FCitySnapshot& InSnapshot, const FString& InPlayFabId, const FString& InDisplayName)` | Store visited city data + player info (MainMap deserialization, remote entity rendering) |

@@ -151,8 +151,6 @@ EMusicType UCGGameInstance::ResolveMusicTypeForCurrentMap() const
 	{
 	case ECurrentMapType::MainMap:        return EMusicType::Main;
 	case ECurrentMapType::WorldMap:       return EMusicType::WorldMap;
-	case ECurrentMapType::LootBoxMap:     return EMusicType::LootBox;
-	case ECurrentMapType::RecruitmentMap: return EMusicType::None;
 	case ECurrentMapType::OfficeMap:
 		switch (CurrentBuildingCompanyType)
 		{
@@ -202,17 +200,9 @@ void UCGGameInstance::TransitionToLevel(const FString& LevelName, int32 Backgrou
 	{
 		CurrentMapType = ECurrentMapType::OfficeMap;
 	}
-	else if (LevelName.Contains(TEXT("LootBox")))
-	{
-		CurrentMapType = ECurrentMapType::LootBoxMap;
-	}
 	else if (LevelName.Contains(TEXT("Main")))
 	{
 		CurrentMapType = ECurrentMapType::MainMap;
-	}
-	else if (LevelName.Contains(TEXT("Recruitment")))
-	{
-		CurrentMapType = ECurrentMapType::RecruitmentMap;
 	}
 	else if (LevelName.Contains(TEXT("World")))
 	{
@@ -320,49 +310,6 @@ void UCGGameInstance::ListEmployees()
     }
 }
 
-
-void UCGGameInstance::SetCurrentLootBoxCategory(ELootBoxCategory Category)
-{
-	CurrentLootBoxCategory = Category;
-	UE_LOG(LogTemp, Log, TEXT("[GameInstance] LootBox Category set to: %d"), static_cast<uint8>(Category));
-}
-
-ELootBoxCategory UCGGameInstance::GetCurrentLootBoxCategory() const
-{
-	return CurrentLootBoxCategory;
-}
-
-void UCGGameInstance::TransitionToLootBoxMap(ELootBoxCategory Category, int32 BackgroundIndex)
-{
-	// 카테고리 저장
-	SetCurrentLootBoxCategory(Category);
-
-	// LootBoxMap으로 전환
-	TransitionToLevel(TEXT("LootBoxMap"), BackgroundIndex);
-}
-
-// ========== Recruitment System ==========
-
-void UCGGameInstance::TransitionToRecruitmentMap(const FGachaResultData& Result, int32 BackgroundIndex)
-{
-	PendingGachaResult = Result;
-	bHasPendingGachaResult = true;
-
-	UE_LOG(LogTemp, Log, TEXT("[GameInstance] 채용맵 전환 - 등급: %d, 티어: %d"),
-		static_cast<uint8>(Result.PotentialRarity), static_cast<uint8>(Result.UsedTier));
-
-	TransitionToLevel(TEXT("RecruitmentMap"), BackgroundIndex);
-}
-
-void UCGGameInstance::ReturnFromRecruitmentMap()
-{
-	bHasPendingGachaResult = false;
-
-	UE_LOG(LogTemp, Log, TEXT("[GameInstance] 채용맵에서 오피스맵으로 복귀 (BuildingIndex: %d)"),
-		CurrentManagedBuildingIndex);
-
-	TransitionToLevel(TEXT("OfficeMap"));
-}
 
 // ========== Office System ==========
 

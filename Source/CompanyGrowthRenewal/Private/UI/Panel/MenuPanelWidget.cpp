@@ -11,8 +11,6 @@
 #include "Manager/SaveLoadManager.h"
 #include "Table/MenuUnlockData.h"
 #include "Enum/WidgetType.h"
-#include "Core/CGGameInstance.h"
-#include "Enum/LootBoxCategory.h"
 #include "Player/MainMapPlayerController.h"
 
 void UMenuPanelWidget::NativeConstruct()
@@ -28,11 +26,6 @@ void UMenuPanelWidget::NativeConstruct()
 	if (UIE_CloseButton)
 	{
 		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UMenuPanelWidget::OnCancelButtonClicked);
-	}
-
-	if (SkinBtn)
-	{
-		SkinBtn->OnClicked().AddUObject(this, &UMenuPanelWidget::OnSkinButtonClicked);
 	}
 
 	if (RankBtn)
@@ -64,11 +57,6 @@ void UMenuPanelWidget::NativeDestruct()
 		UIE_CloseButton->OnCloseClicked.RemoveDynamic(this, &UMenuPanelWidget::OnCancelButtonClicked);
 	}
 
-	if (SkinBtn)
-	{
-		SkinBtn->OnClicked().Clear();
-	}
-
 	if (RankBtn)
 	{
 		RankBtn->OnClicked().RemoveAll(this);
@@ -92,7 +80,6 @@ void UMenuPanelWidget::NativeOnActivated()
 	Super::NativeOnActivated();
 
 	// 메뉴 버튼은 액션 버튼 — 선택 토글 비활성화
-	if (SkinBtn) { SkinBtn->SetIsSelectable(false); SkinBtn->SetIsSelected(false); }
 	if (RankBtn) { RankBtn->SetIsSelectable(false); RankBtn->SetIsSelected(false); }
 	if (GachaBtn) { GachaBtn->SetIsSelectable(false); GachaBtn->SetIsSelected(false); }
 
@@ -142,15 +129,6 @@ void UMenuPanelWidget::OnCancelButtonClicked()
 	ClosePanel();
 }
 
-void UMenuPanelWidget::OnSkinButtonClicked()
-{
-	// 스킨 LootBoxMap으로 이동
-	if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance()))
-	{
-		GI->TransitionToLootBoxMap(ELootBoxCategory::BuildingSkin, 0);
-	}
-}
-
 void UMenuPanelWidget::OnRankButtonClicked()
 {
 	// 잠금 상태면 무시
@@ -178,7 +156,6 @@ void UMenuPanelWidget::OnSettingsButtonClicked()
 
 void UMenuPanelWidget::UpdateAllButtonLockStates()
 {
-	UpdateButtonLockState(SkinBtn, TEXT("SkinBtn"));
 	UpdateButtonLockState(RankBtn, TEXT("RankBtn"));
 }
 

@@ -17,14 +17,6 @@ enum class ELootBoxRarity : uint8
 	Mythic		UMETA(DisplayName = "Mythic")       // 🔴 신화
 };
 
-// 루트 박스 형태 타입
-UENUM(BlueprintType)
-enum class ELootBoxType : uint8
-{
-	Square		UMETA(DisplayName = "Square Chest"),
-	Sphere		UMETA(DisplayName = "Sphere Chest")
-};
-
 /**
  * 루트박스 희귀도 관련 유틸리티
  * - 가중치 조회
