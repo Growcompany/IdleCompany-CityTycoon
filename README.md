@@ -68,15 +68,17 @@
 
 <div align="center">
   <a href="https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project">
-    <img src="docs/images/cropout-to-cpp.svg" alt="Cropout reference to CompanyGrowthRenewal C++ redesign" width="960">
+    <img src="docs/images/cropout-to-cpp.svg" alt="Cropout에서 학습한 기준과 CompanyGrowthRenewal에서 새로 구축한 C++ 시스템 비교" width="960">
   </a>
   <br>
-  <sub>Official architecture study reference · <a href="https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project">Epic Games — Cropout Sample Project</a></sub>
+  <sub><b>Learned from Cropout</b> — Common UI · Enhanced Input · Save/Load · Mobile/PC baseline</sub><br>
+  <sub><b>Built for this project</b> — lifecycle topology · typed data/UI routing · camera domain · deterministic gameplay pipelines</sub><br>
+  <sub>Official learning reference · <a href="https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project">Epic Games — Cropout Sample Project</a></sub>
 </div>
 
-[Cropout](https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project)은 Epic Games가 Blueprint로 제작한 크로스플랫폼 예시 프로젝트입니다. Common UI, Enhanced Input, Save/Load, Blueprint Interface와 모바일·PC 패키징 구성을 학습 기준선으로 삼았습니다.
+[Cropout](https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project)은 Epic Games가 Blueprint로 제작한 크로스플랫폼 예시 프로젝트입니다. 이 프로젝트에서 가져온 것은 코드나 콘텐츠가 아니라 Common UI, Enhanced Input, Save/Load, Blueprint Interface와 모바일·PC 패키징을 구성하는 **설계 기준과 사용 패턴**입니다.
 
-단순 포팅이나 기능 복제가 아니라, 회사키우기의 규모와 수명주기에 맞춰 책임 경계·데이터 흐름·저장·UI 라우팅을 C++ 중심으로 다시 설계했습니다.
+반면 **회사키우기에서 새로 쌓은 시스템**은 장기 수명 서비스의 책임 경계, 타입이 보장되는 DataTable SOT, CommonUI 3-Stack 라우터, PC·터치 공용 카메라 도메인, 배치 판정 SSOT와 초상화 FIFO 같은 결정적 파이프라인입니다. 단순 포팅이 아니라 게임 규모와 수명주기에 맞춰 C++로 분해하고 다시 설계했습니다.
 
 | Cropout에서 학습한 기준 | CompanyGrowthRenewal에서 직접 재설계한 구조 | Evidence |
 |---|---|---|
@@ -84,7 +86,7 @@
 | Common UI 활용 | Main·Prompt·Bottom 3-Stack 라우터와 입력 모드 수명주기 중앙화 | [UIBase.cpp](Source/CompanyGrowthRenewal/Private/UI/UIBase.cpp), [UIManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/UIManagerSubsystem.cpp) |
 | Enhanced Input | PC 가속 이동과 모바일 터치 드래그를 분리하고 카메라 도메인 API는 공유 | [MovementInputHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/MovementInputHandler.cpp), [PlayerCamera.cpp](Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.cpp) |
 | Blueprint 데이터 흐름 | 명시적 C++ 타입과 DataTable SOT·캐시·Loud Failure 파이프라인 구축 | [TableManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.cpp), [CSV sample](DataImport/Samples/DT_WidgetClass_Import.csv) |
-| 공식 sample의 Save/Load·패키징 기준선 | 서버 시간 기반 오프라인 정산, 지연 저장, 백엔드 경계와 자동 검증까지 확장 | [SaveLoadManager.cpp](Source/CompanyGrowthRenewal/Private/Manager/SaveLoadManager.cpp), [Tests](Source/CompanyGrowthRenewal/Private/Tests) |
+| Blueprint Interface로 책임을 나누는 방식 | 미리보기·확정이 공유하는 배치 판정 SSOT, 초상화 FIFO와 자동화 테스트로 결정적 파이프라인 구축 | [PlacementHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/PlacementHandler.cpp), [EmployeeManager.cpp](Source/CompanyGrowthRenewal/Private/Manager/EmployeeManager.cpp), [PlotPlacementRulesTests.cpp](Source/CompanyGrowthRenewal/Private/Tests/PlotPlacementRulesTests.cpp) |
 
 > Cropout은 구조 학습 기준이며 이 저장소는 독립 프로젝트입니다. Epic Games와 제휴하거나 공식 승인을 받은 저장소가 아니며, Cropout 프로젝트 파일의 코드와 게임 콘텐츠는 포함하지 않습니다.
 
@@ -280,3 +282,4 @@ Python 렌더링 검증은 <code>NumPy</code>와 <code>Pillow</code>가 필요�
 - Project-specific source and documentation: Copyright © 2025–2026 Jinhwan Lee. All rights reserved.
 
 See [NOTICE.md](NOTICE.md) for third-party attribution and repository terms.
+
