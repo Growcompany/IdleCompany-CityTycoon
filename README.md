@@ -23,7 +23,6 @@
   <img src="docs/images/demo-trailer-thumb.jpg" alt="회사키우기 데모 트레일러 재생 — 31초 인게임 영상" width="480">
 </a>
 
-<sub><b>Demo Trailer</b> · 31s · 전 구간 인게임 촬영 · 2026 Q4 출시예정</sub><br>
 <sub>건물 성장 · 외관/조명 스킨 · 직원 채용 · 프로젝트 시뮬레이션 · 방치 수익 · 도시 인수</sub>
 
 <p>
@@ -43,16 +42,7 @@
 </div>
 
 > [!NOTE]
-> 라이선스 에셋, 레벨, WBP·DataTable 에셋, 운영 설정과 외부 플러그인 바이너리를 제외한 **source-only snapshot**입니다. 이 저장소만으로 완성 게임을 실행하거나 전체 UE 빌드를 재현할 수는 없습니다.
-
-<table>
-  <tr>
-    <td align="center"><strong>859</strong><br>Source files</td>
-    <td align="center"><strong>62</strong><br>C++ test files</td>
-    <td align="center"><strong>148</strong><br>Test declarations</td>
-    <td align="center"><strong>239</strong><br><a href="SNAPSHOT.md">Runnable tool checks passed</a></td>
-  </tr>
-</table>
+> 라이선스 에셋, 레벨, WBP·DataTable 에셋, 운영 설정과 외부 플러그인 바이너리를 제외한 **source-only snapshot**입니다. 이 저장소만으로 완성 게임을 실행하거나 전체 UE 빌드를 재현할 수는 없습니다. 기준 revision과 공개 수치는 [SNAPSHOT.md](SNAPSHOT.md)에 정리했습니다.
 
 <div align="center">
 

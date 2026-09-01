@@ -6,6 +6,7 @@
 - Public source files under `Source/`: `859`
 - Public C++ automation test source files: `62`
 - Public C++ automation test declarations: `148`
+- Public `GameInstanceSubsystem` domain services: `29`
 - Working-tree changes excluded from export: `yes`
 
 The private Azure repository remains the source of truth. This GitHub repository is a one-way, sanitized source snapshot.
