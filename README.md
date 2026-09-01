@@ -50,13 +50,13 @@
     <td align="center"><strong>859</strong><br>Source files</td>
     <td align="center"><strong>62</strong><br>C++ test files</td>
     <td align="center"><strong>148</strong><br>Test declarations</td>
-    <td align="center"><strong>239</strong><br>Runnable tool checks passed</td>
+    <td align="center"><strong>239</strong><br><a href="SNAPSHOT.md">Runnable tool checks passed</a></td>
   </tr>
 </table>
 
 <div align="center">
 
-[Cropout → C++](#cropout-redesign) · [Highlights](#engineering-highlights) · [Architecture](#system-architecture) · [Validation](#visual-validation) · [Code](#code-tour) · [Problems](#troubleshooting) · [AI Workflow](#ai-workflow) · [Verification](#verification)
+[Cropout → C++](#cropout-redesign) · [Highlights](#engineering-highlights) · [Architecture](#system-architecture) · [Validation](#visual-validation) · [Code](#code-tour) · [Problems](#troubleshooting) · [AI Workflow](#ai-workflow)
 
 </div>
 
@@ -198,35 +198,9 @@
 | 반복 가능한 분석·리뷰 Skill | [.agents/skills](.agents/skills) |
 | 개발자와 AI의 책임 경계 | [AI_WORKFLOW.md](docs/AI_WORKFLOW.md) |
 
-<a id="verification"></a>
-
-## 8. Verification
-
-| 검증 | 현재 revision에서 확인한 결과 |
-|---|---|
-| Node balance simulator | 135개 중 129개 통과 · 6개 조건부 스킵 · 실패 0 |
-| Python rendering contracts | 110개 통과 · 실패 0 |
-| Cheat command documentation | C++ <code>Exec</code> 명령 85개와 Markdown·HTML 문서 일치 |
-| C++ Automation Test | 62개 소스 · 148개 선언 포함. 제외된 맵·에셋·플러그인이 필요하므로 전체 통과를 주장하지 않음 |
-
-수치 기준은 [SNAPSHOT.md](SNAPSHOT.md)에 고정했습니다. 빌드 성공과 런타임 성공, Editor와 Android 실기기 성공을 서로 대신하는 증거로 사용하지 않습니다.
-
-<details>
-<summary><strong>Runnable checks 재현 명령 보기</strong></summary>
-
-~~~powershell
-node --test "Tools/Balance/test/*.test.js"
-py -3 -m unittest discover -s Tools/MainMapPreview -p "test_*.py"
-py -3 Tools/CheatDoc/verify_cheat_docs.py
-~~~
-
-Python 렌더링 검증은 <code>NumPy</code>와 <code>Pillow</code>가 필요합니다.
-
-</details>
-
 <a id="repository-scope"></a>
 
-## 9. Repository Scope
+## 8. Repository Scope
 
 <details>
 <summary><strong>포함·제외 범위와 빌드 제한 보기</strong></summary>
