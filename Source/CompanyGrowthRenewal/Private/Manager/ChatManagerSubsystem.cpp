@@ -121,7 +121,7 @@ void UChatManagerSubsystem::SendMessage(const FString& Content, const FString& C
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
 	FJsonSerializer::Serialize(JsonBody, Writer);
 
-	// HTTP POST 요청
+	// 채팅만 PlayFab SDK 대신 Firebase 직접 HTTP (유일한 raw HTTP 경로)
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = FHttpModule::Get().CreateRequest();
 	const FString SendUrl = FString::Printf(TEXT("%s/chat/send"), *FirebaseBaseUrl);
 	HttpRequest->SetURL(SendUrl);

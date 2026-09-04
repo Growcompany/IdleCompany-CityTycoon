@@ -40,7 +40,7 @@ struct FMissionTable : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	FText Title;
 
-	// 가이드 페이즈별 멘토 1줄 (BuildFirstBuilding: [0]=건설 버튼 [1]=게임 타일/카드 [2]=배치 확정)
+	// 페이즈별 멘토 대사 1줄 (인덱스 = 가이드 페이즈)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	TArray<FText> MentorLines;
 
@@ -58,8 +58,8 @@ struct FMissionTable : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	FName NextMissionID;
 
-	// 하드 입력 게이트 구간 여부 — true 면 현행 게이트(현재 타겟 외 잠금), false 면 소프트 존(지연 힌트만, 입력 안 막음).
-	// 하드 = M1~M10b(코어 루프 1회전) / 소프트 = M11·M13 (스펙 2026-08-02 §2)
+	// 하드 게이트 여부: true = 현재 타겟 외 입력 잠금, false = 지연 힌트만
+	// 하드 = M1~M10b, 소프트 = M11·M13
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	bool bHardGate = false;
 };

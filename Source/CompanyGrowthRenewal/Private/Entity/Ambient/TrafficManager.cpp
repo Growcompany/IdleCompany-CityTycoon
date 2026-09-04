@@ -398,11 +398,12 @@ void ATrafficManager::CreateInstanceComponents()
 
 void ATrafficManager::ApplyCarInstances(int32 ModelIdx, int32 BodyInst, const TArray<int32>& HeadInsts, const TArray<int32>& TailInsts, const FVector& WorldLoc, float WorldYaw, bool bVisible, bool bWasVisible)
 {
-	// 숨김→숨김: 인스턴스가 이미 scale 0 → 트랜스폼 재기록 스킵(인스턴스 버퍼 churn 제거). 안 보이므로 위치 변화 무관.
+	// 숨김→숨김: 이미 scale 0 → 트랜스폼 재기록 스킵 (버퍼 churn 제거)
 	if (!bVisible && !bWasVisible)
 	{
 		return;
 	}
+	// 숨김 = 파괴 아닌 스케일 0 (인스턴스 인덱스 유지, 재등장 비용 0)
 	const float BodyScale = bVisible ? 1.f : 0.f;
 	const float LightScale = bVisible ? LightCardScale : 0.f;
 
@@ -418,8 +419,8 @@ void ATrafficManager::ApplyCarInstances(int32 ModelIdx, int32 BodyInst, const TA
 		BodyISM[ModelIdx]->UpdateInstanceTransform(BodyInst, BodyRender, true, false, true);
 	}
 
-	// 발광면 위치를 월드로 변환 후 '카메라 향함' 빌보드 → 라디얼 글로우가 어느 각도서든 동그랗게 퍼져 보임.
-	// 위치/기본스케일은 매프레임 재조준 패스(RefreshLightBillboards)용 캐시에도 기록.
+	// 발광면 월드 위치 + 카메라 향한 빌보드 → 어느 각도서든 원형 글로우
+	// 위치·기본 스케일은 재조준 패스(RefreshLightBillboards) 캐시에도 기록
 	auto WriteCard = [&](UInstancedStaticMeshComponent* ISM, int32 Inst, const FVector& WP,
 	                     TArray<FVector>& PosCache, TArray<float>& BaseCache)
 	{
@@ -433,8 +434,9 @@ void ATrafficManager::ApplyCarInstances(int32 ModelIdx, int32 BodyInst, const TA
 		const FVector ToCamV = CachedCameraLoc - WP;
 		const FVector Dir = ToCamV.GetSafeNormal();
 		const FRotator Rot = ToCamV.IsNearlyZero() ? FRotator::ZeroRotator : FRotationMatrix::MakeFromZ(Dir).Rotator();
+		// 화면상 크기 일정 범위 유지 (멀어져 픽셀 줄면 글로우 점멸)
 		const float WS = LightScale * FMath::Clamp(ToCamV.Size() / FMath::Max(LightRefDistance, 1.f), LightMinFactor, LightMaxGrow);
-		// CamPush: 카드가 차체 표면에 있어 스침각에서 절반이 차체에 파묻혀 z-테스트로 잘리는 깜빡임 방지.
+		// CamPush: 스침각에서 카드 절반이 차체에 묻혀 z-테스트로 잘리는 깜빡임 방지
 		ISM->UpdateInstanceTransform(Inst, FTransform(Rot, WP + Dir * LightCardCamPush, FVector(WS)), true, false, true);
 	};
 

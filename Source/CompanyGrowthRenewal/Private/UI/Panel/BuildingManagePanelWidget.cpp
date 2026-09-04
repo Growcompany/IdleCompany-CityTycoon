@@ -557,9 +557,10 @@ void UBuildingManagePanelWidget::SetTargetBuilding(ABuildingBaseActor* Building,
 		GameInstance->SetCurrentManagedBuilding(TargetBuilding);
 	}
 
+	// 카메라 프레이밍 요청 지점 (우측 패널 회피 → 건물은 화면 왼쪽)
 	if (Player && TargetBuilding)
 	{
-		// 층수 비례 포커싱 기본 + 키스톤은 영향권 반경이 더 크면 반경이 보이게 더 넓게 (화면 왼쪽 1/4 위치에)
+		// 층수 비례 포커싱. 키스톤은 영향권 반경이 보이게 더 넓게 (화면 왼쪽 1/4)
 		const float AuraRadius = TargetBuilding->IsKeystoneMonument() ? TargetBuilding->GetKeystoneAuraRadiusCm() : 0.f;
 		Player->FocusOnBuildingOrAura(TargetBuilding, CameraFocusTopPadding, CameraFocusBottomPadding, 0.3f, AuraRadius);
 		bOwnsFocusTarget = true;

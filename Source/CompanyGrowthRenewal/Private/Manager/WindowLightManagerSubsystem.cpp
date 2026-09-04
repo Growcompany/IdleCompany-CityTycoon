@@ -126,15 +126,14 @@ void UWindowLightManagerSubsystem::Tick(float DeltaTime)
 	}
 }
 
+// 시각 → 도시 전체 발광 강도 단일 계산기. 출력은 MPC 스칼라 1개
 float UWindowLightManagerSubsystem::CalculateNightIntensity(float CurrentHour) const
 {
-	// 밤 발광 밝기 단일 노브(기본 완전점등=1.0, 모든 발광카드가 이 게이트 구독 → 도시 전체 야간 발광). 살짝 밝게.
+	// 밤 발광 밝기 단일 노브 (모든 발광 카드 구독 → 도시 전체 점등). 1.0보다 살짝 밝게
 	constexpr float MaxIntensity = 1.2f;
 	constexpr float PreDuskIntensity = 0.1f;
-	// 블렌드 폭은 의도적으로 이 조명 매니저의 로컬 상수다(하늘 ATimeCycleSky의 EditAnywhere 블렌드와 별개).
-	// 단일 소스는 '경계'(SunRise/SunSet)이며, 하늘 어둠 ⟺ 조명 점등 일치는 '끝점'에서 보장된다:
-	// 램프 끝(DuskEnd/DawnEnd)은 항상 SunSet/SunRise라, 블렌드가 서로 달라도 완전점등/완전소등 시각은 일치
-	// (블렌드는 램프 '시작'만 옮긴다). 조명 블렌드까지 런타임 동기가 필요해지면 그때 공유 노브로 승격할 것.
+	// 블렌드 폭은 이 매니저 로컬 상수 (하늘 블렌드와 별개). 단일 소스는 경계(SunRise/SunSet)
+	// 램프 끝 = SunSet/SunRise라 완전 점등·소등 시각은 하늘과 일치 (블렌드는 시작만 이동)
 	constexpr float DawnBlendHours = 2.0f; // 여명: 불 꺼지는 데 걸리는 시간
 	constexpr float DuskBlendHours = 2.0f; // 황혼: 불 켜지는 데 걸리는 시간
 
@@ -155,7 +154,7 @@ float UWindowLightManagerSubsystem::CalculateNightIntensity(float CurrentHour) c
 	const float DuskMid   = SunSetHour - DuskBlendHours * 0.5f; // 약한 예열 → 본점등 전환
 	const float DuskEnd   = SunSetHour;                         // 불 완전 점등(= 하늘 완전 어둠)
 
-	// 여명 (DawnStart~DawnEnd): 1 → 0 (하늘 밝아짐과 동기, SunRise에 완전 소등)
+	// 여명 DawnStart~DawnEnd: 1 → 0 (SunRise에 완전 소등)
 	if (CurrentHour >= DawnStart && CurrentHour < DawnEnd)
 	{
 		return MaxIntensity * (1.0f - (CurrentHour - DawnStart) / FMath::Max(0.01f, DawnEnd - DawnStart));
@@ -170,7 +169,7 @@ float UWindowLightManagerSubsystem::CalculateNightIntensity(float CurrentHour) c
 	{
 		return PreDuskIntensity * ((CurrentHour - DuskStart) / FMath::Max(0.01f, DuskMid - DuskStart));
 	}
-	// 황혼 본점등 (DuskMid~DuskEnd): 0.1 → 1 (하늘 어두워짐과 동기, SunSet에 완전 점등)
+	// 황혼 본점등 DuskMid~DuskEnd: 0.1 → 1 (SunSet에 완전 점등)
 	else if (CurrentHour >= DuskMid && CurrentHour < DuskEnd)
 	{
 		const float Progress = (CurrentHour - DuskMid) / FMath::Max(0.01f, DuskEnd - DuskMid);

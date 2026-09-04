@@ -543,14 +543,15 @@ void UOfficeManager::ApplyOfficeSaveData(const FOfficeSaveData& OfficeData)
 
 	OnWorkstationCountChanged.Broadcast();
 
-	// 자동 배치(시작 프리셋/세이브 복원) 책상은 바닥 NavMesh 비동기 생성과 경합 → 전부 스폰된 다음 틱에 장애물 일괄 재반영
+	// 자동 배치 책상은 NavMesh 비동기 생성과 경합 → 전부 스폰된 다음 틱에 장애물 일괄 반영
 	if (World)
 	{
 		World->GetTimerManager().SetTimerForNextTick(
 			FTimerDelegate::CreateUObject(this, &UOfficeManager::RefreshWorkstationNavObstacles));
 	}
 
-	// 복원 완료 — 이 시점 이후의 SaveGameData만 오피스 인테리어를 디스크에 기록하도록 허용
+	// 복원 완료. 이후 SaveGameData만 오피스 인테리어 기록 허용
+	// 게이트가 둘인 이유 = 수명 차이 (bInitialLoadComplete = GameInstance, 이 플래그 = 새 World)
 	bInteriorRestored = true;
 }
 

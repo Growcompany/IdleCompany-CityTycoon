@@ -262,12 +262,8 @@ void USaveLoadManager::CalculateOfflineGains(float OfflineSeconds)
 
     OnOfflineGainsApplied.Broadcast(TotalGained, OfflineSeconds);
 
-    // 6-2 정산 보고 보관 — 단일 전달 경로(Consume). 여기서 인라인 Broadcast 하지 않는다:
-    //  · 로그인 경로: 이 시점엔 MainMap UI(UIBase) 가 없어 인라인 발화는 아무도 못 듣는다.
-    //  · 포그라운드 복귀 경로(CGGameInstance): MainMap 이 이미 떠 있어 인라인 발화 시 라이브 수신 →
-    //    이후 Consume 재발화로 이중 표시. → 두 경로 모두 "UI 준비 확인 시 Consume 1회" 로 통일.
-    // CapReached: OfflineSeconds 가 서버 오프라인 상한(12h, UPlayFabManagerSubsystem::OfflineCapSeconds)에
-    // 도달 = "더 오래 비워도 못 담는다" 안내. 12h 는 금고 시간 점근(Fable §)과 동일값이라 의미 일관.
+    // 정산 보고는 보관만, 인라인 Broadcast 금지 (로그인 = UIBase 부재, 복귀 = Consume과 이중 표시)
+    // → 두 경로 모두 UI 준비 확인 시 Consume 1회. CapReached = 12h 상한(OfflineCapSeconds) 도달
     bHasPendingOfflineReport = (TotalGained > 0.0f || Entries.Num() > 0);
     PendingOfflineTotal = TotalGained;
     PendingOfflineSeconds = OfflineSeconds;
@@ -319,12 +315,13 @@ void USaveLoadManager::DebugSetPendingOfflineReport(float InTotal, float InSecon
 
 void USaveLoadManager::ConsumePendingOfflineReport()
 {
+    // 보류 없으면 무동작. 여러 진입점에서 불려도 안전 (멱등)
     if (!bHasPendingOfflineReport)
     {
         return;
     }
 
-    // MainMap UI 준비 완료 시점 재발화 — 로그인 콜백 때(UIBase 없음) 놓친 모달을 이제 띄운다.
+    // MainMap UI 준비 시점 재발화 (로그인 콜백 때 UIBase 부재로 놓친 모달)
     OnOfflineGainsDetailed.Broadcast(PendingOfflineTotal, PendingOfflineSeconds, PendingOfflineEntries, bPendingOfflineCapReached);
 
     // 1회성 소비 — 재바인딩/재진입으로 중복 표시되지 않도록 상태 초기화
@@ -335,6 +332,7 @@ void USaveLoadManager::ConsumePendingOfflineReport()
     PendingOfflineEntries.Reset();
 }
 
+// 모든 저장의 단일 관문. 아래 게이트 2개 통과 후 디스크 기록
 bool USaveLoadManager::SaveGameData()
 {
     // 데이터 초기화 중 세이브 억제
@@ -344,9 +342,8 @@ bool USaveLoadManager::SaveGameData()
         return false;
     }
 
-    // 최초 로드(LoadGameData) 완료 전에는 저장을 막는다. 게임 시작 시 서브시스템 Initialize 단계에서
-    // SaveGameData가 호출되면, 아직 LoadGameData가 매니저들을 복원하기 전이라 미션 None / 빌딩 0 /
-    // 직원 0 등 기본·빈 값이 수집되어 디스크의 정상 세이브를 통째로 덮어쓴다(튜토리얼 진행 유실의 진범).
+    // 최초 로드 전 저장 차단: Initialize 단계 SaveGameData가 빈 값(미션 None·빌딩 0)으로 세이브를 덮음
+    // (튜토리얼 진행 유실의 진범)
     if (!bInitialLoadComplete)
     {
         UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] SaveGameData 무시 — 최초 로드 완료 전(서브시스템 초기화 단계). 세이브 보호."));
@@ -545,9 +542,8 @@ bool USaveLoadManager::SaveGameData()
                 // OfficeDataMap에서 해당 건물의 Office 데이터 가져오기 (없으면 새로 생성)
                 FOfficeSaveData& OfficeData = SaveGameInstance->GameData.OfficeDataMap.FindOrAdd(ManagedBuildingIndex);
 
-                // 오피스 진입 직후 ApplyOfficeSaveData(인테리어/데코/책상/스테이지 복원)가 끝나기 전에는
-                // 라이브 월드가 빈 기본값이라, 인테리어 항목을 수집하면 디스크의 멀쩡한 오피스 데이터를 0으로 클로버함.
-                // (재진입 시 결산서 모달이 복원 전에 SaveGameData를 호출하는 경로가 대표적.) 복원 전이면 인테리어 수집 자체를 건너뛰어 기존 디스크 데이터를 보존한다.
+                // ApplyOfficeSaveData 완료 전엔 월드가 빈 기본값 → 인테리어 수집 시 디스크 데이터가 0으로 덮임
+                // (재진입 시 결산 모달이 복원 전 SaveGameData 호출). 복원 전이면 인테리어 수집 생략
                 UOfficeManager* OfficeMgr = World->GetSubsystem<UOfficeManager>();
                 const bool bOfficeInteriorRestored = OfficeMgr && OfficeMgr->IsInteriorRestored();
 
@@ -603,7 +599,7 @@ bool USaveLoadManager::SaveGameData()
                         ManagedBuildingIndex);
                 }
 
-                // 직원 데이터 수집 (건물별 저장)
+                // 직원은 인테리어 복원과 무관하게 항상 수집 (채용·해고는 복원 전에도 발생). 건물별 저장
                 if (EmployeeManager)
                 {
                     OfficeData.EmployeeList = EmployeeManager->GetEmployeesByBuilding(ManagedBuildingIndex);

@@ -440,6 +440,8 @@ float APlayerCamera::FocusOnBuilding(ABuildingBaseActor* Building, float TopPadd
     // ZoomValue가 변하면 FOV와 카메라 각도도 함께 변하므로
     // 반복적으로 계산하여 최적의 ZoomValue를 수렴시킴
 
+    // 줌값 하나가 팔 길이·FOV·피치 동시 변경 → 닫힌 식 없음
+    // → 값 대입 후 결과 측정하는 탐색으로만 목표 줌값 산출
     // 현재 ZoomValue 저장 (계산 후 복원용)
     float OriginalZoomValue = 0.5f;
     if (MovementInputHandler)
@@ -451,44 +453,30 @@ float APlayerCamera::FocusOnBuilding(ABuildingBaseActor* Building, float TopPadd
 
         for (int32 Iteration = 0; Iteration < 5; ++Iteration)
         {
-            // 현재 추정 ZoomValue의 FOV 계산
-            // ZoomValue: 0 → FOV 30도 (가까움), 1 → FOV 20도 (멀리)
+            // 추정 ZoomValue → FOV (0 = 30도 가까움, 1 = 20도 멀리)
             float EstimatedFOV = FMath::Lerp(30.f, 20.f, TargetZoomValue);
             float HalfFOVRadians = FMath::DegreesToRadians(EstimatedFOV * 0.5f);
 
-            // 목표 ZoomValue의 카메라 각도 계산 (ApplyZoomSettings()과 동일)
-            // ZoomValue: 0 → -40도 (완만), 1 → -55도 (가파름)
+            // ZoomValue → 피치 (0 = -40도, 1 = -55도, ApplyZoomSettings와 동일)
             float TargetCameraPitch = FMath::Lerp(-40.0f, -55.0f, TargetZoomValue);
 
-            // 카메라 각도 보정 계산
-            // 카메라가 위에서 내려다보는 각도(-40도 ~ -55도)로 인해
-            // 건물이 수직으로 압축되어 보이는 효과를 보정
-            // 공식: PitchCorrection = cos(각도)
-            //   - 각도 -40도: cos(40°) ≈ 0.766 (약간 압축)
-            //   - 각도 -55도: cos(55°) ≈ 0.574 (많이 압축)
-            // 각도가 가파를수록 건물이 압축되어 보이므로 더 가까이 가야 함
+            // 피치 보정: 내려다보는 각도만큼 건물이 수직 압축돼 보임 → PitchCorrection = cos(각도)
+            // (-40도 ≈ 0.766, -55도 ≈ 0.574. 가파를수록 더 가까이)
             float PitchRadians = FMath::DegreesToRadians(FMath::Abs(TargetCameraPitch));
             float PitchCorrection = FMath::Cos(PitchRadians);
 
-            // 필요한 카메라 거리 계산
-            // 기본 원리: tan(FOV/2) = (화면에 보이는 높이 / 2) / Distance
-            // 각도 보정:
-            //   보이는 높이 = 실제 높이 * cos(각도)  (압축 효과)
-            //   Distance = (실제 높이 * cos(각도)) / (2 * tan(FOV/2) * DesiredRatio)
-            // 따라서: PitchCorrection을 분자에 곱함
-            // 건물 높이만 사용
+            // 필요 거리: 보이는 높이 = 건물 높이 × cos(각도) → Distance = 높이 × cos / (tan(FOV/2) × DesiredRatio)
+            // (PitchCorrection은 분자에. 건물 높이만 사용)
             float RequiredDistance = (BuildingHeight * PitchCorrection) / (FMath::Tan(HalfFOVRadians) * DesiredScreenHeightRatio);
 
-            // 이진 탐색으로 ZoomValue 역계산
-            // RequiredDistance에 해당하는 ZoomValue를 찾기
-            // ZoomCurve로 인해 직접 계산이 불가능하므로 이진 탐색 사용
+            // RequiredDistance에 맞는 ZoomValue 이진 탐색 (ZoomCurve 때문에 직접 계산 불가)
             float MinVal = 0.0f;
             float MaxVal = 1.0f;
             float TestZoomValue = TargetZoomValue;
 
             for (int32 i = 0; i < 15; ++i)
             {
-                // 테스트 ZoomValue 적용
+                // 테스트 ZoomValue 적용 (팔 길이 측정에 실제 줌 변경 필요 → 끝에서 원복)
                 MovementInputHandler->SetZoomValue(TestZoomValue);
                 MovementInputHandler->ApplyZoomSettings();
                 float TestArmLength = SpringArm->TargetArmLength;
@@ -518,7 +506,7 @@ float APlayerCamera::FocusOnBuilding(ABuildingBaseActor* Building, float TopPadd
             TargetZoomValue = TestZoomValue;
         }
 
-        // 원래 ZoomValue로 복원 (실제 전환은 Tick에서 시작)
+        // 원래 ZoomValue 복원 (실제 전환은 Tick). 계산 중 줌 잔류 시 카메라 점프
         MovementInputHandler->SetZoomValue(OriginalZoomValue);
         MovementInputHandler->ApplyZoomSettings();
     }

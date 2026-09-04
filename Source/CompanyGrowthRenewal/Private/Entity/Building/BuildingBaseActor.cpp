@@ -1319,6 +1319,7 @@ void ABuildingBaseActor::OpenManagePanel(AMainMapPlayerController* MainPC)
 		return;
 	}
 
+	// 패널 push 후 대상 건물 주입. 카메라 프레이밍은 SetTargetBuilding에서
 	UCommonActivatableWidget* PushedWidget = UIBase->PushBottomClass(BuildingManagePanel.Get());
 	UBuildingManagePanelWidget* ManagePanelWidget = Cast<UBuildingManagePanelWidget>(PushedWidget);
 

@@ -269,6 +269,7 @@ void UCGGameInstance::LoadGameAfterLevelStart()
             VisitBuildings.Add(MoveTemp(EntityData));
         }
 
+        // 세이브 경로와 같은 복원 API 합류 (방문 도시도 동일 스폰 코드)
         EntityMgr->SetBuildingsData(VisitBuildings);
         EntityMgr->RestoreEntityDataFromLoad();
 

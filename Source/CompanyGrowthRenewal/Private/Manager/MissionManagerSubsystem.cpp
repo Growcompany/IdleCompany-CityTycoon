@@ -87,19 +87,20 @@ void UMissionManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Collection.InitializeDependency<UTableManagerSubsystem>();
 	Collection.InitializeDependency<USaveLoadManager>();
 	Collection.InitializeDependency<UResourceItemManager>();
-	// UIManager 가 먼저 초기화돼야 아래 OnLevelLayerReady 구독이 잡힌다 — 의존성 없이는 init 순서상
-	// UIManager 가 늦어 GetSubsystem 이 null → 구독 스킵 → 트래커가 영영 안 뜨는 회귀가 났었음.
+	// UIManager 선초기화 필수 (아래 OnLevelLayerReady 구독)
+	// 누락 시 GetSubsystem null → 구독 스킵 → 트래커 미표시 회귀 있었음
 	Collection.InitializeDependency<UUIManagerSubsystem>();
-	// M7 수익 수집 완료(OnRevenueCollected) 구독을 위해 먼저 초기화 보장 (init 순서 누락 시 구독 스킵 방지)
+	// M7 OnRevenueCollected 구독용 선초기화 (순서 누락 시 구독 스킵)
 	Collection.InitializeDependency<UProjectOperationManager>();
-	// 직원 강화(OnEmployeeEnhanced) 구독을 위해 먼저 초기화 보장 (init 순서 누락 시 구독 스킵 방지)
+	// OnEmployeeEnhanced 구독용 선초기화 (순서 누락 시 구독 스킵)
 	Collection.InitializeDependency<UEmployeeManager>();
 
+	// 세이브 복원 완료 신호. 진행 중 미션 ID → DT 행 복원 진입점
 	if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
 	{
 		SaveMgr->OnGameDataLoaded.AddUObject(this, &UMissionManagerSubsystem::HandleGameDataLoaded);
 	}
-	// 레벨 UI 레이어 생성 완료 신호 — 트래커/가이드 빌드를 이 신호에 매단다 (StartPlay의 next-tick 경쟁 제거).
+	// 레벨 UI 레이어 완료 신호에 트래커·가이드 빌드 연결 (StartPlay next-tick 경쟁 제거)
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
 		UIMgr->OnLevelLayerReady.AddUObject(this, &UMissionManagerSubsystem::TryStartMissionChain);
@@ -124,7 +125,7 @@ void UMissionManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	{
 		OpMgr->OnRevenueCollected.AddDynamic(this, &UMissionManagerSubsystem::HandleRevenueCollected);
 	}
-	// 직원 강화 시도 완료 신호 구독 (미션판 G9 완료 판정 — 구독 스킵되면 G9 가 영영 안 채워진다)
+	// 직원 강화 완료 구독 (목표판 G9 판정, 스킵 시 G9 영구 미완)
 	if (UEmployeeManager* EmpMgr = GetGameInstance()->GetSubsystem<UEmployeeManager>())
 	{
 		EmpMgr->OnEmployeeEnhanced.AddUObject(this, &UMissionManagerSubsystem::HandleEmployeeEnhanced);
@@ -747,6 +748,8 @@ void UMissionManagerSubsystem::SetReadyToClaim()
 		return;
 	}
 
+	// NextMissionID 있음 = 체인 중간 → 수령 UI 없이 즉시 진행
+	// 체인 끝만 클레임 대기 (최종 보상 연출 1회)
 	const ETutorialMissionCompletionMode CompletionMode = FTutorialMissionCompletionRules::Resolve(
 		!ActiveMissionRow.NextMissionID.IsNone());
 	if (CompletionMode == ETutorialMissionCompletionMode::ImmediateAdvance)
@@ -762,8 +765,7 @@ void UMissionManagerSubsystem::SetReadyToClaim()
 		SaveMgr->SaveGameData();
 	}
 
-	// 가이드 전부 내림 — 조회 게터(하이라이트/스포트라이트)가 클레임 대기 중 null 을 반환하고,
-	// 상주 알림도 여기서 해제된다.
+	// 가이드 전부 해제 — 조회 게터는 클레임 대기 중 null, 상주 알림도 여기서 해제
 	UpdateGuideNotification();
 	OnMissionReadyToClaim.Broadcast(ActiveMissionRow);
 
@@ -882,6 +884,7 @@ void UMissionManagerSubsystem::ShowRewardSplash(const FMissionTable& Mission)
 	}
 }
 
+// 배치 완료 직후 현장 호출 훅. 조건 판정은 매니저 한 곳에
 void UMissionManagerSubsystem::NotifyBuildingPlaced(ABuildingBaseActor* Building)
 {
 	// 건설 채수 도달형 미션 신호 — 판정(보유 채수 절대값)은 GoalBoard 가 수행
@@ -895,8 +898,8 @@ void UMissionManagerSubsystem::NotifyBuildingPlaced(ABuildingBaseActor* Building
 
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::BuildFirstBuilding)
 	{
-		// 방금 지은 회사 빌딩을 다음 미션(M3 EnterOffice)의 p0 스포트라이트 대상으로 캡처.
-		// M2→M3 전환에도 살아남는다(SetActiveMission이 리셋하는 GuidePhase와 별개 멤버).
+		// 방금 지은 빌딩을 다음 미션(M3)의 스포트라이트 대상으로 캡처
+		// GuidePhase와 별개 멤버라 M2→M3 전환에도 유지
 		TutorialFirstBuildingWeak = Building;
 
 		SetReadyToClaim();

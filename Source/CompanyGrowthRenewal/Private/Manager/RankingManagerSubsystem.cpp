@@ -426,7 +426,7 @@ void URankingManagerSubsystem::HandleOtherPlayerData(
 			UE_LOG(LogTemp, Log, TEXT("[RankingManager] 도시 스냅샷 수신 (ID: %s, 빌딩: %d)"),
 				*PlayFabId, Snapshot.Buildings.Num());
 
-			// 방문 대기 중이었다면 맵 전환
+			// 방문 요청했던 상대의 스냅샷일 때만 맵 전환
 			if (PlayFabId == PendingVisitPlayFabId)
 			{
 				UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
@@ -434,6 +434,7 @@ void URankingManagerSubsystem::HandleOtherPlayerData(
 				{
 					GI->SetVisitMode(true);
 					GI->SetVisitData(Snapshot, PendingVisitPlayFabId, PendingVisitDisplayName);
+					// 방문 상태 먼저 세팅 → 레벨 전환. 새 월드 LoadGameAfterLevelStart가 이 플래그로 분기
 					GI->TransitionToLevel(TEXT("/Game/CompanyGrowth/Level/MainMap_TheRiverwalkCity"));
 				}
 				PendingVisitPlayFabId.Empty();

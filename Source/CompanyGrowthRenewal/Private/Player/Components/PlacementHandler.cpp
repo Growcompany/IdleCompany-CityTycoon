@@ -1821,17 +1821,15 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 	// === 접촉 자석 — 이웃 건물 변만 ===
 	// 부지 AABB 변은 스냅 대상이 아니다. 부지 사각형은 GridCols×셀크기로 "유도한" 근사 경계라
 	// 실제 블록보다 크고, 그 차이가 곧 인도다 — 거기 붙이면 정의상 인도 위(빨강)가 된다.
-	// 실제 건설 가능 경계는 ResolveFootprintOntoGround(블록 메시 트레이스)가 담당하고,
-	// 부지 사각형은 하드 clamp 로만 쓴다.
-	// 건물은 딱 붙인다(Gap=0). 오피스 가구만 PlacementPadding 만큼 띄운다.
+	// 건설 가능 경계는 ResolveFootprintOntoGround(블록 메시 트레이스), 부지 사각형은 하드 clamp만
+	// 건물은 Gap=0으로 밀착. 오피스 가구만 PlacementPadding만큼 이격
 	const FContactSnapResult Snap = ComputeContactSnap(
 		RawXY, HalfX, HalfY, Neighbors, PlacementSnapDistance, 0.f, OverlapsNeighbor(RawXY));
 	const float* BestDelta = Snap.Delta;
 	const bool* bHasDelta = Snap.bHasDelta;
 
-	// 후보 1개를 끝까지 평가 — 스냅 적용 → 부지 clamp → 지면 보정 → 유효성.
-	// 지면 보정(인도 → 블록 안쪽 되밀기)이 여기 포함되므로, 경계에 살짝 넘어간 경우는
-	// 진짜 블록 가장자리로 붙는다(= 구석에 딱).
+	// 미리보기와 실제 확정이 이 람다 하나 공유 (갈리면 초록 표시인데 건설 불가인 자리 발생)
+	// 후보 1개 평가: 스냅 → 부지 clamp → 지면 보정(인도 → 블록 안쪽) → 유효성. 경계 초과분은 블록 가장자리에 밀착
 	struct FPlacementCandidate { FVector2D XY; bool bValid; };
 	auto EvaluateCandidate = [&](bool bUseX, bool bUseY) -> FPlacementCandidate
 	{
@@ -1857,9 +1855,8 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 		return { GroundXY, !OverlapsNeighbor(GroundXY) && bGrounded };
 	};
 
-	// 자석은 상황을 악화시키지 않는다 — 스냅 결과가 무효면 축을 하나씩 빼보고, 그래도 무효면 스냅을 포기해
-	// 손가락 위치를 그대로 존중한다(못 짓는 자리에 붙잡아 두지 않는다).
-	// 정상 경우는 평가 1회로 끝나고, 폴백은 실제로 무효할 때만 돈다.
+	// 자석은 상황을 악화시키지 않음: 스냅 무효면 축을 하나씩 제외, 그래도 무효면 스냅 포기 (손가락 위치 존중)
+	// 정상 경우는 평가 1회, 폴백은 실제 무효일 때만
 	FPlacementCandidate Chosen = EvaluateCandidate(true, true);
 	if (!Chosen.bValid && bHasDelta[0] && bHasDelta[1])
 	{

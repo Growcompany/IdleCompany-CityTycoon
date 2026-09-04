@@ -270,9 +270,10 @@ void UUIManagerSubsystem::ShowMainMapUI()
         });
 }
 
+// 정산 모달 표시 단일 관문. 로그인·복귀 경로 합류점
 void UUIManagerSubsystem::TryShowOfflineReport()
 {
-    // UI 미준비면 보류 유지 — 나중 호출(ShowMainMap 또는 다음 CalculateOfflineGains)이 flush
+    // UI 미준비면 보류 유지 → 이후 ShowMainMap/CalculateOfflineGains가 flush
     if (!UIBaseInstance)
     {
         return;
@@ -293,14 +294,13 @@ void UUIManagerSubsystem::TryShowOfflineReport()
     TSubclassOf<UUserWidget> ModalClass = TableMgr->GetWidgetClass(EWidgetType::OfflineReportModal);
     if (!ModalClass)
     {
-        // DT_WidgetClass 미등록 — 등록 전까진 조용히 스킵(보류는 유지, 게임 정상). 등록 후 자동 표시.
+        // DT_WidgetClass 미등록이면 스킵 (보류 유지, 등록 후 자동 표시)
         UE_LOG(LogTemp, Warning,
             TEXT("[UIManagerSubsystem] OfflineReportModal 클래스 없음 — DT_WidgetClass 행 확인. 이번 표시 스킵."));
         return;
     }
 
-    // 모달이 NativeConstruct 에서 OnOfflineGainsDetailed 를 구독 → Consume 이 그 델리게이트를 1회 발화 →
-    // 모달 SetReportData 수신. 순서: push(구독 완료) 먼저 → Consume 나중.
+    // 모달이 NativeConstruct에서 구독 → Consume 1회 발화 → SetReportData 수신. push(구독) 먼저, Consume 나중
     UIBaseInstance->PushPromptClass(ModalClass.Get());
     SaveLoadMgr->ConsumePendingOfflineReport();
 

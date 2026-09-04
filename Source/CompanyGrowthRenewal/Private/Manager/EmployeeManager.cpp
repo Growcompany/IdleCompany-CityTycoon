@@ -56,16 +56,15 @@ void UEmployeeManager::Deinitialize()
 
 void UEmployeeManager::HandleWorldCleanup(UWorld* World, bool /*bSessionEnded*/, bool /*bCleanupResources*/)
 {
-    // 우리 게임 인스턴스의 월드만 — 에디터 프리뷰/기타 월드 정리에 반응하면 진행 중인 PIE 캡처를 죽인다.
-    // 정리 시점에 OwningGameInstance 가 이미 끊겼을 수 있어 현재 월드 동일성도 함께 본다.
+    // 우리 GameInstance의 월드만 (다른 월드 정리에 반응하면 진행 중 PIE 캡처가 죽음)
+    // 정리 시점엔 OwningGameInstance가 끊겼을 수 있어 현재 월드 동일성도 확인
     if (!World || (World != GetWorld() && World->GetGameInstance() != GetGameInstance()))
     {
         return;
     }
 
-    // 촬영 중 오피스를 떠나면 캡처 완료 델리게이트가 영영 안 온다 → bPortraitCapturing 이 세션 내내 true 로 남아
-    // 이후 모든 채용이 차단된다(위젯 파괴 뱅킹까지 같은 게이트에 막혀 결과 유실). 월드가 사라지는 지점에서 끊는다.
-    // 큐 폐기가 안전한 이유 = 초상화 없는 직원은 오피스 재입장 backfill 이 다시 찍는다(데이터는 이미 적립됨).
+    // 촬영 중 월드 소멸 시 완료 콜백 없음 → bPortraitCapturing 영구 잔류로 채용 전부 차단. 여기서 리셋
+    // 큐 폐기 안전: 초상화 없는 직원은 오피스 재입장 backfill이 재촬영
     if (bPortraitCapturing || bInPortraitCompletion || PendingPortraitQueue.Num() > 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[Portrait] 레벨 전환 — 파이프라인 리셋 (진행중=%d, 대기 큐 %d건 폐기, backfill 로 복구)"),
@@ -1159,7 +1158,8 @@ void UEmployeeManager::CaptureEmployeePortrait(const FString& EmployeeID,
     Request.Department = Department;
     Request.Tier = Tier;
 
-    // 완료 브로드캐스트 구간의 재진입 요청도 적재만 — 실행 중인 워커 델리게이트 재바인딩 UB 방지(시작은 다음 틱 Dequeue)
+    // 캐릭터·카메라·RenderTarget 1세트 공유 → 동시 채용 직렬화
+    // 완료 브로드캐스트 중 재진입 요청도 적재만 (워커 델리게이트 재바인딩 UB 방지, 시작은 다음 틱)
     if (bPortraitCapturing || bInPortraitCompletion)
     {
         PendingPortraitQueue.Add(Request);
@@ -1187,6 +1187,7 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
 
     UE_LOG(LogTemp, Warning, TEXT("[Portrait] StartPortraitCapture EmployeeID: '%s' (대기 큐 %d)"), *EmployeeID, PendingPortraitQueue.Num());
 
+    // 여기서부터 캡처 슬롯 점유. 이후 요청은 전부 큐로
     bPortraitCapturing = true;
 
     UWorld* World = GetWorld();
@@ -1258,25 +1259,25 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
     if (!Worker)
     {
         UE_LOG(LogTemp, Error, TEXT("[Portrait] No portrait worker found for gender: %d"), (int32)Gender);
-        // 동기 실패 — 플래그만 내리면 DequeueNextPortraitCapture 루프가 다음 요청을 이어받는다
+        // 동기 실패 — 플래그만 내리면 Dequeue 루프가 다음 요청 처리
         bPortraitCapturing = false;
         return;
     }
 
     UE_LOG(LogTemp, Log, TEXT("[Portrait] Using worker: %s for EmployeeID: %s"), *Worker->GetName(), *EmployeeID);
 
-    // 캡쳐 카메라/타깃 미설정이면 캡쳐가 조용히 실패해 bPortraitCapturing 이 영영 true → 채용 흐름 행.
-    // 미리 막고 완료 통지로 흐름을 풀어준다(초상화는 없지만 게임은 진행). 새 스틱 BP 의 TextureTarget 미배선 대비.
+    // 카메라/타깃 미설정이면 조용히 실패해 bPortraitCapturing 영구 true → 채용 행
+    // 미리 막고 완료 통지로 흐름 해제 (초상화 없이 진행. 새 스틱 BP TextureTarget 미배선 대비)
     if (!Worker->FaceCaptureCamera || !Worker->FaceCaptureCamera->TextureTarget)
     {
         UE_LOG(LogTemp, Error, TEXT("[Portrait] FaceCaptureCamera/TextureTarget 미설정 — 캡쳐 스킵: %s"), *Worker->GetName());
-        // 동기 실패 — 플래그만 내리면 DequeueNextPortraitCapture 루프가 다음 요청을 이어받는다
+        // 동기 실패 — 플래그만 내리면 Dequeue 루프가 다음 요청 처리
         bPortraitCapturing = false;
         OnEmployeeHireCompleted.Broadcast(EmployeeID);
         return;
     }
 
-    // 캡처 완료 델리게이트
+    // 캡처 완료 후에만 다음 요청 시작. 큐 재순회는 이 람다뿐
     Worker->OnPortraitCaptured.BindLambda([this](const FString& CompletedID)
     {
         bInPortraitCompletion = true;
@@ -1288,7 +1289,7 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
 
         bInPortraitCompletion = false;
 
-        // 실행 중인 단일캐스트 델리게이트를 같은 콜스택에서 재바인딩하면 UB — 한 틱 미뤄 콜스택을 벗어난다
+        // 실행 중인 델리게이트를 같은 콜스택에서 재바인딩하면 UB → 한 틱 미룸
         if (UWorld* CurWorld = GetWorld())
         {
             CurWorld->GetTimerManager().SetTimerForNextTick(
@@ -1296,8 +1297,7 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
         }
         else if (PendingPortraitQueue.Num() > 0)
         {
-            // 월드 없음(레벨 전환 중) = 다음 틱 예약 불가 → 큐를 비워 채용이 영구 차단되는 것만 막는다.
-            // 초상화는 오피스 입장 backfill 이 다시 찍는다.
+            // 월드 없음(레벨 전환 중) = 다음 틱 예약 불가 → 큐 비움 (채용 영구 차단만 방지, 초상화는 backfill)
             UE_LOG(LogTemp, Error, TEXT("[Portrait] 월드 없음 — 대기 큐 %d건 폐기(backfill 로 복구)"), PendingPortraitQueue.Num());
             PendingPortraitQueue.Empty();
         }

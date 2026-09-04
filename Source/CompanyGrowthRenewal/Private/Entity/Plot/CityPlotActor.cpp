@@ -270,6 +270,7 @@ bool ACityPlotActor::IsFootprintOnGround(const FVector& FootprintCenter, float H
 	return true;
 }
 
+// 논리 footprint와 메시 AABB 답이 갈림 → 실메시 트레이스가 최종 판정
 bool ACityPlotActor::EvaluateFootprintPoints(const FVector& FootprintCenter, float HalfX, float HalfY,
 	bool (&OutPointsOnBlock)[5]) const
 {
@@ -279,21 +280,18 @@ bool ACityPlotActor::EvaluateFootprintPoints(const FVector& FootprintCenter, flo
 		bPoint = true;
 	}
 
-	// 블록 미해결이어도 트레이스는 한다. 1차 권위는 "StreetSurface 채널이 응답하는가"(= 도시 지면 위인가)이고,
-	// 블록 동일성은 그 위에 얹는 정밀 판정일 뿐이다. 여기서 조기 반환하면 블록 탐색이 실패한 기기에서
-	// 트레이스를 통째로 건너뛰어 "전부 가능" 폴백이 걸리고, 인도까지 배치되며 되밀기도 안 돈다.
+	// 블록 미해결이어도 트레이스 수행. 1차 판정 = StreetSurface 채널 응답(도시 지면 여부), 블록 동일성은 정밀 판정
+	// 조기 반환 시 블록 탐색 실패 기기에서 트레이스 생략 → 전부 가능 폴백 → 인도 배치·되밀기 미동작
 	UWorld* Wld = GetWorld();
 	if (!Wld)
 	{
 		return false;
 	}
 
-	// 트레이스 채널: StreetSurface(ECC_GameTraceChannel3) — 도시 타일이 응답하는 커스텀 채널.
-	// (IsPlacementGrounded 의 Street 게이트와 동일 채널 — 단일 출처.)
+	// 트레이스 채널 = StreetSurface(ECC_GameTraceChannel3). IsPlacementGrounded와 동일 출처
 	const ETraceTypeQuery StreetTraceType = UEngineTypes::ConvertToTraceType(ECC_GameTraceChannel3);
 
-	// 깎인 모서리는 블록 메시 실형상 바깥이라, 메시 실형상 트레이스(bTraceComplex=true)로
-	// 사각 바운드가 아닌 진짜 모양을 따라가야 정확히 걸러진다.
+	// 깎인 모서리는 실형상 바깥 → bTraceComplex=true로 진짜 모양을 따라 판정
 	constexpr bool bTraceComplex = true;
 
 	AActor* BlockActor = CachedBlockActor.Get();
@@ -314,10 +312,8 @@ bool ACityPlotActor::EvaluateFootprintPoints(const FVector& FootprintCenter, flo
 	TArray<AActor*> ActorsToIgnore;
 	ActorsToIgnore.Add(const_cast<ACityPlotActor*>(this));
 
-	// 채널 미설정 안전장치: 5점 중 단 하나도 트레이스에 응답 안 하면(StreetSurface 채널/블록 콜리전 부재)
-	// 마스크를 신뢰할 수 없으니 막지 않는다("전부 가능" 폴백 — 구 ComputeBuildableCells 의 0-hit 폴백 계승,
-	// 잘못된 콜리전 설정이 모든 배치를 무효로 만들어 아무 데도 못 짓는 사태 회피).
-	// 반대로 일부라도 응답하면 채널은 작동 → 응답한 상태에서 한 점이라도 블록 밖이면 무효(깎인 모서리 걸러냄).
+	// 채널 미설정 안전장치: 5점 전부 무응답이면 마스크 불신 → 막지 않음 (콜리전 오설정으로 전면 배치 불가 회피)
+	// 일부라도 응답하면 채널 정상 → 한 점이라도 블록 밖이면 무효 (깎인 모서리 걸러냄)
 	bool bAnyTraceResponded = false;
 
 	for (int32 PointIndex = 0; PointIndex < 5; ++PointIndex)
@@ -333,14 +329,14 @@ bool ACityPlotActor::EvaluateFootprintPoints(const FVector& FootprintCenter, flo
 
 		if (!bAnyHit)
 		{
-			// 이 점은 빗나감(깎인 모서리/바닥 없음). 채널 응답 여부는 아직 모름 — 다른 점이 응답할 수 있다.
+			// 이 점 빗나감 (깎인 모서리/바닥 없음). 채널 응답 여부는 다른 점이 결정
 			OutPointsOnBlock[PointIndex] = false;
 			continue;
 		}
 
 		bAnyTraceResponded = true; // 채널이 작동함(최소 한 점이 무언가에 맞음).
 
-		// 이 부지의 블록(BlockActor)에 맞았거나, /TheRiverwalkCity/ 경로 메시면 유효.
+		// 부지 블록(BlockActor) 또는 /TheRiverwalkCity/ 메시에 맞으면 유효
 		bool bPointValid = false;
 		for (const FHitResult& Hit : Hits)
 		{
@@ -368,9 +364,8 @@ bool ACityPlotActor::EvaluateFootprintPoints(const FVector& FootprintCenter, flo
 		}
 	}
 
-	// 채널이 한 번도 응답 안 함 = 미설정 → 권위 없음(호출자가 "전부 가능" 폴백).
-	// 이 폴백은 조용히 걸리면 배치 제약이 통째로 사라지므로(인도/허공까지 허용) 반드시 로그를 남긴다 —
-	// 이게 없어서 모바일에서 제약 소실이 눈으로만 발견됐다. 스팸 방지로 부지당 1회.
+	// 채널 무응답 = 미설정 → 판정 권위 없음 (호출자가 전부 가능 폴백)
+	// 폴백은 배치 제약을 통째로 없애므로 반드시 로그 (모바일 제약 소실을 눈으로만 발견한 전례). 부지당 1회
 	if (!bAnyTraceResponded)
 	{
 		if (!bLoggedNoTraceAuthority)
@@ -391,6 +386,7 @@ bool ACityPlotActor::EvaluateFootprintPoints(const FVector& FootprintCenter, flo
 	return true;
 }
 
+// 무효 처리 대신 유효해지는 최소 거리만 밀어 배치 유지
 bool ACityPlotActor::ResolveFootprintOntoGround(const FVector& FootprintCenter, float HalfX, float HalfY,
 	float MaxPush, FVector2D& OutAdjustedXY) const
 {
@@ -417,8 +413,8 @@ bool ACityPlotActor::ResolveFootprintOntoGround(const FVector& FootprintCenter, 
 		return false;
 	}
 
-	// 실패한 코너들의 부호 합 → 그 반대가 밀 방향. 인덱스 1..4 = (-,-) (+,-) (-,+) (+,+).
-	// 오른쪽 두 코너만 실패하면 합이 (+2,0) → 왼쪽으로. 한 코너만이면 대각선으로.
+	// 실패 코너 부호 합의 반대 = 밀 방향. 인덱스 1..4 = (-,-)(+,-)(-,+)(+,+)
+	// (오른쪽 두 코너 실패 → 합 (+2,0) → 왼쪽. 한 코너면 대각선)
 	static const FVector2D CornerSigns[4] = {
 		FVector2D(-1.f, -1.f), FVector2D(1.f, -1.f), FVector2D(-1.f, 1.f), FVector2D(1.f, 1.f)
 	};
@@ -431,7 +427,7 @@ bool ACityPlotActor::ResolveFootprintOntoGround(const FVector& FootprintCenter, 
 		}
 	}
 
-	// 합이 0 = 마주보는 코너가 동시에 실패(부지보다 큰 footprint 등) → 방향 추론 불가, 보정 포기.
+	// 합 0 = 마주보는 코너 동시 실패 (footprint > 부지 등) → 방향 불명, 보정 포기
 	if (FailSum.IsNearlyZero())
 	{
 		return false;
@@ -449,9 +445,8 @@ bool ACityPlotActor::ResolveFootprintOntoGround(const FVector& FootprintCenter, 
 		return false;
 	}
 
-	// 이분 탐색 — Lo(불가) ~ Hi(가능) 사이 최소 이동거리. 반복수는 MaxPush 에 종속이다:
-	// 6회 = MaxPush/64 (2150 기준 약 34cm). 1.3m 남으면 경계에서 눈에 띄게 떠 보여 "딱 붙은" 느낌이 안 난다.
-	// MaxPush 를 키우면 반복수도 같이 올려야 정밀도가 유지된다(전엔 1075/5회로 같은 34cm였다).
+	// 이분 탐색: Lo(불가)~Hi(가능) 사이 최소 이동. 6회 = MaxPush/64 ≈ 34cm (2150 기준)
+	// MaxPush를 키우면 반복수도 같이 올려야 정밀도 유지 (전엔 1075/5회로 동일 34cm)
 	float Lo = 0.f;
 	float Hi = MaxPush;
 	for (int32 Step = 0; Step < 6; ++Step)

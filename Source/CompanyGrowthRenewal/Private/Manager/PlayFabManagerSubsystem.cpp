@@ -161,6 +161,7 @@ void UPlayFabManagerSubsystem::SavePlayerData(const FString& Key, const FString&
 	Request.Data.Add(Key, Value);
 	Request.Permission = PlayFab::ClientModels::UserDataPermission::UserDataPermissionPublic;
 
+	// SDK 규약: 성공·실패 델리게이트 쌍. 결과는 콜백으로만
 	PlayFabClientPtr->UpdateUserData(
 		Request,
 		PlayFab::UPlayFabClientAPI::FUpdateUserDataDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnDataUpdateSuccess),
@@ -272,12 +273,14 @@ void UPlayFabManagerSubsystem::OnDataGetSuccess(const PlayFab::ClientModels::FGe
 		int64 OfflineSeconds = 0;
 		if (LastSync > 0 && ServerNow > LastSync)
 		{
+			// 서버 시간 기준 경과, 캡으로 무한 누적 차단
 			OfflineSeconds = FMath::Min<int64>(ServerNow - LastSync, OfflineCapSeconds);
 		}
 
 		UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] 오프라인 보상 계산: ServerNow=%lld, LastSync=%lld, OfflineSeconds=%lld (cap=%lld)"),
 			ServerNow, LastSync, OfflineSeconds, OfflineCapSeconds);
 
+		// 여기선 경과 초만 전달. 정산·지급은 SaveLoadManager
 		OnOfflineGainsRequested.Broadcast(static_cast<float>(OfflineSeconds));
 
 		// 보상 브로드캐스트 직후 LastSync 갱신 → 다음 시퀀스 기준점 확정
@@ -514,12 +517,13 @@ void UPlayFabManagerSubsystem::OnGetTimeSuccess(const PlayFab::ClientModels::FGe
 
 	// 요청 타입별 분기 → 동일 GetTime 콜백 재사용 (상태머신 패턴)
 	const EServerTimeRequestType Handled = PendingTimeRequest;
+	// 분기 전 요청 타입 초기화 (후속 호출의 새 요청과 충돌 방지)
 	PendingTimeRequest = EServerTimeRequestType::None;
 
 	switch (Handled)
 	{
 	case EServerTimeRequestType::Login:
-		// 로그인 시퀀스: 서버 시간 확보 후 LastSync 조회 → OnDataGetSuccess 에서 보상 계산
+		// 로그인: 서버 시간 확보 → LastSync 조회 → OnDataGetSuccess에서 보상 계산
 		PendingServerNow = ServerUnix;
 		bAwaitingLastSyncResponse = true;
 		LoadPlayerData(PlayFab_LastSyncKey);
