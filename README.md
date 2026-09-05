@@ -58,7 +58,7 @@
 
 <div align="center">
   <a href="https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project">
-    <img src="docs/images/cropout-to-cpp.svg" alt="Cropout에서 학습한 기준과 CompanyGrowthRenewal에서 새로 구축한 C++ 시스템 비교" width="960">
+    <img src="docs/images/cropout-to-cpp.svg" alt="Cropout에서 참고한 패턴과 CompanyGrowthRenewal에서 직접 구축한 C++ 시스템 비교" width="960">
   </a>
   <br>
   <sub><b>Learned from Cropout</b> — Common UI · Enhanced Input · Save/Load · Mobile/PC baseline</sub><br>

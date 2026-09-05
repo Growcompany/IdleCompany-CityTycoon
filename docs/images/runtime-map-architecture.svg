@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" role="img" aria-labelledby="title desc">
   <title id="title">회사키우기 런타임 맵 전환과 상태 소유권 구조</title>
-  <desc id="desc">LoadingMap이 MainMap으로 부팅하고, MainMap은 OfficeMap·WorldMap과 양방향으로 전환합니다. 장기 도메인 상태는 대부분 GameInstanceSubsystem 서비스가 소유하고, 각 월드는 GameMode·Controller·Pawn·Actor·ActorComponent를 소유합니다. 저장 복원되는 NextBuildingIndex만 UCGGameInstance에 남은 예외입니다. 가챠와 채용은 별도 맵이 아니라 UI 흐름입니다.</desc>
+  <desc id="desc">LoadingMap이 MainMap으로 부팅하고, MainMap은 OfficeMap·WorldMap과 양방향으로 전환합니다. 장기 도메인 상태는 대부분 GameInstanceSubsystem 서비스가 소유하고, 각 월드는 GameMode·Controller·Pawn·Actor·ActorComponent를 소유합니다. 저장 복원되는 NextBuildingIndex만 UCGGameInstance에 남은 예외입니다.</desc>
 
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -23,21 +23,21 @@
   <text x="60" y="122" class="body">3개 플레이 맵 + 1개 부팅 맵 · 도메인 상태와 월드 표현의 수명주기 분리</text>
 
   <g aria-label="Boot flow">
-    <rect x="60" y="166" width="220" height="112" rx="16" fill="#ffffff" stroke="#b8c4cf" stroke-width="2"/>
-    <text x="84" y="196" class="eyebrow">부팅 전용</text>
-    <text x="84" y="228" class="map-title">LoadingMap</text>
-    <text x="84" y="254" class="class-name">ALoadingGameMode</text>
+    <rect x="60" y="234" width="220" height="112" rx="16" fill="#ffffff" stroke="#b8c4cf" stroke-width="2"/>
+    <text x="84" y="264" class="eyebrow">부팅 전용</text>
+    <text x="84" y="296" class="map-title">LoadingMap</text>
+    <text x="84" y="322" class="class-name">ALoadingGameMode</text>
 
-    <path d="M 280 222 H 388" fill="none" stroke="#60758a" stroke-width="3" marker-end="url(#arrow)"/>
-    <text x="313" y="208" class="small">부팅</text>
+    <path d="M 280 290 H 388" fill="none" stroke="#60758a" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="313" y="276" class="small">부팅</text>
   </g>
 
   <g aria-label="Playable maps">
-    <rect x="390" y="150" width="420" height="144" rx="18" fill="#edf3f7" stroke="#6e879b" stroke-width="2.5"/>
-    <text x="418" y="184" class="eyebrow">메인 플레이 맵</text>
-    <text x="418" y="220" class="map-title">MainMap_TheRiverwalkCity</text>
-    <text x="418" y="248" class="class-name">ACGGameModeBase</text>
-    <text x="418" y="274" class="small">도시 · 건물 · 부지 · 메인 HUD</text>
+    <rect x="390" y="218" width="420" height="144" rx="18" fill="#edf3f7" stroke="#6e879b" stroke-width="2.5"/>
+    <text x="418" y="252" class="eyebrow">메인 플레이 맵</text>
+    <text x="418" y="288" class="map-title">MainMap_TheRiverwalkCity</text>
+    <text x="418" y="316" class="class-name">ACGGameModeBase</text>
+    <text x="418" y="342" class="small">도시 · 건물 · 부지 · 메인 HUD</text>
 
     <rect x="870" y="154" width="270" height="116" rx="16" fill="#ffffff" stroke="#9aabb9" stroke-width="2"/>
     <text x="896" y="184" class="eyebrow">플레이 맵</text>
@@ -49,15 +49,11 @@
     <text x="896" y="372" class="map-title">WorldMap</text>
     <text x="896" y="400" class="class-name">AWorldMapGameMode</text>
 
-    <path d="M 810 208 H 870" fill="none" stroke="#60758a" stroke-width="3" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
-    <path d="M 770 288 C 830 288, 824 368, 870 368" fill="none" stroke="#60758a" stroke-width="3" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <path d="M 810 244 C 840 244, 840 212, 870 212" fill="none" stroke="#60758a" stroke-width="3" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <path d="M 810 336 C 840 336, 840 368, 870 368" fill="none" stroke="#60758a" stroke-width="3" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
   </g>
 
-  <g aria-label="UI-only flows">
-    <rect x="60" y="326" width="750" height="78" rx="14" fill="#ffffff" stroke="#c5cfd8" stroke-width="2" stroke-dasharray="6 5"/>
-    <text x="84" y="356" class="label">가챠 · 채용</text>
-    <text x="84" y="382" class="body">활성 맵의 CommonUI 흐름으로 처리 · 별도 LootBoxMap / RecruitmentMap 없음</text>
-  </g>
+
 
   <g aria-label="Ownership boundary">
     <rect x="60" y="460" width="1080" height="142" rx="18" fill="#e8eef3" stroke="#91a4b5" stroke-width="2"/>

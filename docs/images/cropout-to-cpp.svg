@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title desc">
-  <title id="title">Cropout에서 배운 기준과 회사키우기에서 직접 구축한 시스템</title>
-  <desc id="desc">왼쪽의 아이소메트릭 마을 일러스트는 Cropout에서 배운 설계 기준을, 오른쪽은 회사키우기(CompanyGrowthRenewal)에서 독립적으로 구축한 C++ 시스템(수명주기 서비스 경계, 타입 데이터·CommonUI 라우팅, 크로스플랫폼 카메라 도메인, 결정적 게임플레이 파이프라인)을 나타냅니다.</desc>
+  <title id="title">Cropout에서 참고한 패턴과 회사키우기에서 직접 구축한 C++ 시스템</title>
+  <desc id="desc">왼쪽의 아이소메트릭 마을 일러스트는 Cropout에서 참고한 패턴을, 오른쪽은 회사키우기(CompanyGrowthRenewal)에서 독립적으로 구축한 C++ 시스템(수명주기 서비스 경계, 타입 데이터·CommonUI 라우팅, 크로스플랫폼 카메라 도메인, 결정적 게임플레이 파이프라인)을 나타냅니다.</desc>
 
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -49,9 +49,9 @@
   <!-- Header -->
   <rect x="64" y="54" width="244" height="38" rx="19" fill="#15354A" stroke="#3AA6C9"/>
   <circle cx="88" cy="73" r="6" fill="#55D7FF"/>
-  <text x="106" y="79" fill="#BDEFFF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="1.7">아키텍처 학습 기준</text>
-  <text x="64" y="154" fill="#F8FAFC" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="54" font-weight="800" letter-spacing="-0.5">Cropout에서 배운 기준과 직접 구축한 시스템</text>
-  <text x="64" y="197" fill="#9DB1C3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="23">왼쪽은 학습 기준, 오른쪽은 회사키우기가 직접 소유한 C++ 시스템과 책임 경계입니다.</text>
+  <text x="106" y="79" fill="#BDEFFF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="1.7">아키텍처 참고 범위</text>
+  <text x="64" y="154" fill="#F8FAFC" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="50" font-weight="800" letter-spacing="-0.5">Cropout에서 참고한 패턴 vs 직접 구축한 C++ 시스템</text>
+  <text x="64" y="197" fill="#9DB1C3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="23">왼쪽은 Cropout에서 참고한 구성, 오른쪽은 회사키우기가 직접 소유한 C++ 시스템과 책임 경계입니다.</text>
 
   <!-- Left visual card shadow and base -->
   <rect x="72" y="242" width="620" height="540" rx="30" fill="#02070D" opacity="0.5"/>
@@ -124,9 +124,9 @@
 
   <!-- Left card labels -->
   <rect x="96" y="268" width="252" height="36" rx="18" fill="#102432" stroke="#7BBBC8"/>
-  <text x="222" y="292" text-anchor="middle" fill="#D6F3F6" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">Cropout 학습 기준</text>
+  <text x="222" y="292" text-anchor="middle" fill="#D6F3F6" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">Cropout에서 참고</text>
   <text x="96" y="360" fill="#FFFFFF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="54" font-weight="850">Cropout</text>
-  <text x="96" y="398" fill="#D7E5EA" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="20">Blueprint 공식 예제 · 아키텍처 학습 기준</text>
+  <text x="96" y="398" fill="#D7E5EA" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="20">Blueprint 공식 예제 · 아키텍처 참고</text>
   <g font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="16" font-weight="700">
     <rect x="96" y="690" width="116" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="154" y="716" text-anchor="middle" fill="#E4F7F3">Common UI</text>
     <rect x="224" y="690" width="145" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="296" y="716" text-anchor="middle" fill="#E4F7F3">Enhanced Input</text>
