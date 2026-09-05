@@ -51,7 +51,7 @@
   <circle cx="88" cy="73" r="6" fill="#55D7FF"/>
   <text x="106" y="79" fill="#BDEFFF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="1.7">아키텍처 참고 범위</text>
   <text x="64" y="154" fill="#F8FAFC" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="50" font-weight="800" letter-spacing="-0.5">Cropout에서 참고한 패턴 vs 직접 구축한 C++ 시스템</text>
-  <text x="64" y="197" fill="#9DB1C3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="23">왼쪽은 Cropout에서 참고한 구성, 오른쪽은 회사키우기가 직접 소유한 C++ 시스템과 책임 경계입니다.</text>
+  <text x="64" y="197" fill="#9DB1C3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="23">왼쪽은 Cropout에서 참고한 구성, 오른쪽은 회사키우기에서 직접 설계하고 구축한 C++ 시스템입니다.</text>
 
   <!-- Left visual card shadow and base -->
   <rect x="72" y="242" width="620" height="540" rx="30" fill="#02070D" opacity="0.5"/>
@@ -149,7 +149,7 @@
   <rect x="855" y="268" width="232" height="36" rx="18" fill="#11445C" stroke="#3CC6EE"/>
   <text x="971" y="292" text-anchor="middle" fill="#CBF4FF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">직접 구축한 시스템</text>
   <text x="855" y="359" fill="#FFFFFF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="40" font-weight="850">회사키우기<tspan dx="14" font-size="21" font-weight="600" fill="#95DFF3">CompanyGrowthRenewal</tspan></text>
-  <text x="855" y="395" fill="#95DFF3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="19">UE5.4 클라이언트 아키텍처 · 프로젝트가 직접 소유한 책임 경계</text>
+  <text x="855" y="395" fill="#95DFF3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="19">UE5.4 클라이언트 아키텍처 · 시스템별 역할과 소유권을 직접 설계</text>
 
   <!-- Architecture pillars -->
   <g font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif">
