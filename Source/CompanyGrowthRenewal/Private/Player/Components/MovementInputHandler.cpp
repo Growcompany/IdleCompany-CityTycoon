@@ -252,12 +252,40 @@ void UMovementInputHandler::UpdateZoom()
     ApplyZoomSettings();
 }
 
+FZoomRigParams UMovementInputHandler::GetZoomRigParams() const
+{
+    FZoomRigParams Params;
+    Params.MinArmLength = MinZoomDistance;
+    Params.MaxArmLength = MaxZoomDistance;
+    Params.PitchInDeg = ZoomInPitch;
+    Params.PitchOutDeg = ZoomOutPitch;
+    Params.FOVInDeg = ZoomInFOV;
+    Params.FOVOutDeg = ZoomOutFOV;
+    if (Owner && Owner->CameraComponent)
+    {
+        Params.CameraAspectRatio = Owner->CameraComponent->AspectRatio;
+    }
+    return Params;
+}
+
+float UMovementInputHandler::EvaluateZoomKey(float InZoomValue) const
+{
+    const float Clamped = FMath::Clamp(InZoomValue, 0.f, 1.f);
+    return ZoomCurve != nullptr ? ZoomCurve->GetFloatValue(Clamped) : 0.5f;
+}
+
+FZoomRigSample UMovementInputHandler::EvaluateZoomRig(float InZoomValue) const
+{
+    return CameraFramingMath::EvaluateRig(GetZoomRigParams(), EvaluateZoomKey(InZoomValue));
+}
+
 void UMovementInputHandler::ApplyZoomSettings()
 {
-    float lerpKey = ZoomCurve != nullptr ? ZoomCurve->GetFloatValue(ZoomValue) : 0.5f;
+    const float lerpKey = EvaluateZoomKey(ZoomValue);
+    const FZoomRigSample Rig = CameraFramingMath::EvaluateRig(GetZoomRigParams(), lerpKey);
 
-    Owner->SpringArm->TargetArmLength = FMath::Lerp(MinZoomDistance, MaxZoomDistance, lerpKey);
-    Owner->SpringArm->SetRelativeRotation(FRotator(FMath::Lerp(ZoomInPitch, ZoomOutPitch, lerpKey), 0.f, 0.f));
+    Owner->SpringArm->TargetArmLength = Rig.ArmLength;
+    Owner->SpringArm->SetRelativeRotation(FRotator(Rig.PitchDeg, 0.f, 0.f));
 
     const float NewMaxSpeed = FMath::Lerp(8000.f, 48000.f, lerpKey);
     Owner->MovementComponent->MaxSpeed = NewMaxSpeed;
@@ -265,7 +293,7 @@ void UMovementInputHandler::ApplyZoomSettings()
     Owner->MovementComponent->Acceleration = NewMaxSpeed * 6.f;
     Owner->MovementComponent->Deceleration = NewMaxSpeed * 6.f;
 
-    Owner->CameraComponent->FieldOfView = FMath::Lerp(ZoomInFOV, ZoomOutFOV, lerpKey);
+    Owner->CameraComponent->FieldOfView = Rig.HorizontalFOVDeg;
 }
 
 void UMovementInputHandler::UpdateDof() const

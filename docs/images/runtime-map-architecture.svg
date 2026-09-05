@@ -1,51 +1,51 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" role="img" aria-labelledby="title desc">
-  <title id="title">CompanyGrowthRenewal runtime map and ownership architecture</title>
-  <desc id="desc">LoadingMap boots into MainMap. MainMap connects bidirectionally to OfficeMap and WorldMap. Most persistent domain state belongs to GameInstanceSubsystem services, while each world owns GameMode, controller, pawn, actors, and actor components. The save-restored NextBuildingIndex allocator remains in UCGGameInstance as the current exception. Gacha and recruitment are UI flows rather than standalone maps.</desc>
+  <title id="title">회사키우기 런타임 맵 전환과 상태 소유권 구조</title>
+  <desc id="desc">LoadingMap이 MainMap으로 부팅하고, MainMap은 OfficeMap·WorldMap과 양방향으로 전환합니다. 장기 도메인 상태는 대부분 GameInstanceSubsystem 서비스가 소유하고, 각 월드는 GameMode·Controller·Pawn·Actor·ActorComponent를 소유합니다. 저장 복원되는 NextBuildingIndex만 UCGGameInstance에 남은 예외입니다. 가챠와 채용은 별도 맵이 아니라 UI 흐름입니다.</desc>
 
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#60758a"/>
     </marker>
     <style>
-      .title { font: 700 28px 'Segoe UI', Arial, sans-serif; fill: #172534; }
-      .eyebrow { font: 700 13px 'Segoe UI', Arial, sans-serif; letter-spacing: 1.5px; fill: #567087; }
-      .map-title { font: 700 20px 'Segoe UI', Arial, sans-serif; fill: #172534; }
+      .title { font: 700 28px 'Segoe UI', 'Noto Sans KR', Arial, sans-serif; fill: #172534; }
+      .eyebrow { font: 700 14px 'Segoe UI', 'Noto Sans KR', Arial, sans-serif; letter-spacing: 1.5px; fill: #567087; }
+      .map-title { font: 700 20px 'Segoe UI', 'Noto Sans KR', Arial, sans-serif; fill: #172534; }
       .class-name { font: 600 14px Consolas, 'Courier New', monospace; fill: #3f5870; }
-      .body { font: 500 15px 'Segoe UI', Arial, sans-serif; fill: #4c5e70; }
-      .small { font: 500 13px 'Segoe UI', Arial, sans-serif; fill: #66798b; }
-      .label { font: 700 14px 'Segoe UI', Arial, sans-serif; fill: #2e4c64; }
+      .body { font: 500 15px 'Segoe UI', 'Noto Sans KR', Arial, sans-serif; fill: #4c5e70; }
+      .small { font: 500 13px 'Segoe UI', 'Noto Sans KR', Arial, sans-serif; fill: #66798b; }
+      .label { font: 700 14px 'Segoe UI', 'Noto Sans KR', Arial, sans-serif; fill: #2e4c64; }
     </style>
   </defs>
 
   <rect width="1200" height="660" rx="24" fill="#f7f9fb"/>
-  <text x="60" y="58" class="eyebrow">RUNTIME TOPOLOGY</text>
+  <text x="60" y="58" class="eyebrow">런타임 구성</text>
   <text x="60" y="94" class="title">맵 전환과 상태 소유권</text>
   <text x="60" y="122" class="body">3개 플레이 맵 + 1개 부팅 맵 · 도메인 상태와 월드 표현의 수명주기 분리</text>
 
   <g aria-label="Boot flow">
     <rect x="60" y="166" width="220" height="112" rx="16" fill="#ffffff" stroke="#b8c4cf" stroke-width="2"/>
-    <text x="84" y="196" class="eyebrow">BOOT ONLY</text>
+    <text x="84" y="196" class="eyebrow">부팅 전용</text>
     <text x="84" y="228" class="map-title">LoadingMap</text>
     <text x="84" y="254" class="class-name">ALoadingGameMode</text>
 
     <path d="M 280 222 H 388" fill="none" stroke="#60758a" stroke-width="3" marker-end="url(#arrow)"/>
-    <text x="313" y="208" class="small">boot</text>
+    <text x="313" y="208" class="small">부팅</text>
   </g>
 
   <g aria-label="Playable maps">
     <rect x="390" y="150" width="420" height="144" rx="18" fill="#edf3f7" stroke="#6e879b" stroke-width="2.5"/>
-    <text x="418" y="184" class="eyebrow">PRIMARY PLAY MAP</text>
+    <text x="418" y="184" class="eyebrow">메인 플레이 맵</text>
     <text x="418" y="220" class="map-title">MainMap_TheRiverwalkCity</text>
     <text x="418" y="248" class="class-name">ACGGameModeBase</text>
     <text x="418" y="274" class="small">도시 · 건물 · 부지 · 메인 HUD</text>
 
     <rect x="870" y="154" width="270" height="116" rx="16" fill="#ffffff" stroke="#9aabb9" stroke-width="2"/>
-    <text x="896" y="184" class="eyebrow">PLAY MAP</text>
+    <text x="896" y="184" class="eyebrow">플레이 맵</text>
     <text x="896" y="216" class="map-title">OfficeMap</text>
     <text x="896" y="244" class="class-name">AOfficeGameMode</text>
 
     <rect x="870" y="310" width="270" height="116" rx="16" fill="#ffffff" stroke="#9aabb9" stroke-width="2"/>
-    <text x="896" y="340" class="eyebrow">PLAY MAP</text>
+    <text x="896" y="340" class="eyebrow">플레이 맵</text>
     <text x="896" y="372" class="map-title">WorldMap</text>
     <text x="896" y="400" class="class-name">AWorldMapGameMode</text>
 
@@ -63,12 +63,12 @@
     <rect x="60" y="460" width="1080" height="142" rx="18" fill="#e8eef3" stroke="#91a4b5" stroke-width="2"/>
     <line x1="600" y1="480" x2="600" y2="582" stroke="#b2bfca" stroke-width="2"/>
 
-    <text x="88" y="494" class="eyebrow">PERSISTENT DOMAIN SERVICES</text>
-    <text x="88" y="528" class="map-title">GameInstanceSubsystem services</text>
+    <text x="88" y="494" class="eyebrow">레벨을 넘어 유지되는 도메인 서비스</text>
+    <text x="88" y="528" class="map-title">GameInstanceSubsystem 서비스</text>
     <text x="88" y="556" class="body">Employee · Building · Production · Mission</text>
     <text x="88" y="580" class="body">Save/Load · Table · UI · Backend</text>
 
-    <text x="630" y="494" class="eyebrow">WORLD-BOUND EXPRESSION</text>
+    <text x="630" y="494" class="eyebrow">레벨에 묶인 월드 표현</text>
     <text x="630" y="528" class="map-title">레벨별 월드 객체</text>
     <text x="630" y="556" class="body">GameMode · Controller · Pawn</text>
     <text x="630" y="580" class="body">Actor · ActorComponent</text>

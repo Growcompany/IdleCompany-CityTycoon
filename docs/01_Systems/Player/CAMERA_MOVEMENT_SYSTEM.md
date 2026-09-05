@@ -84,6 +84,7 @@ Acceleration    = NewMaxSpeed * 6        // ← feel 튜닝 (§5)
 Deceleration    = NewMaxSpeed * 6        // ← feel 튜닝 (§5)
 FOV             = Lerp(ZoomInFOV, ZoomOutFOV, lerpKey)
 ```
+- 리그 평가는 순수 함수 `UMovementInputHandler::EvaluateZoomRig(ZoomValue)`(= `CameraFramingMath::EvaluateRig`)로 분리. `ApplyZoomSettings`는 그 결과를 적용만 한다. 프레이밍 탐색은 컴포넌트를 건드리지 않는다.
 
 ### 4.4 회전 — `Spin()`
 - `Owner->AddActorLocalRotation(FRotator(0, -Value[0], 0))` — **폰(=리그) yaw 회전**.
@@ -99,7 +100,7 @@ FOV             = Lerp(ZoomInFOV, ZoomOutFOV, lerpKey)
 
 | API | 용도 |
 |---|---|
-| `FocusOnBuilding(Building, ...)` | 건물 높이 비례 프레이밍(이진탐색으로 줌값 수렴). 반환=최종 팔길이 |
+| `FocusOnBuilding(Building, ...)` | 건물 높이 비례 프레이밍. 순수 리그 모델 위 1-D 이분법(`CameraFramingMath::SolveZoomForHeight`, 잔차 ≤1cm)으로 줌값 역산. 반환=최종 팔길이 |
 | `FocusOnActor(Actor, ScreenCenterRatioX, bTrackOcclusion=true)` | 바운딩박스 기반 범용 포커스. **`bTrackOcclusion=false`면 가림 고스트를 안 켠다**(로딩 뒤 초기 포커스·배치 모드용) |
 | `FocusOnLocation(Loc, Dist)` | 특정 위치로 이동(+선택 줌) |
 | `FocusOnAreaRadius(Center, R)` | 반경 R 원을 화면에 담기(MaxZoom 임시 확장) |
@@ -157,9 +158,10 @@ PIE 검증 체크리스트 = `docs/superpowers/specs/2026-08-08-focus-occlusion-
 2. **Live Coding 핫리로드가 `.voltbl`로 깨짐** — cpp만 바꿔도 `Cannot find image section .voltbl` + `pipe 0xEA`로 패치 실패(MSVC↔UE5.4 버그, 코드 무관·`.obj`는 정상). → **에디터 닫고 풀빌드**가 정답. 진짜 에러는 에디터 로그 아니라 `${UE_ROOT}\Engine\Programs\LiveCodingConsole\Saved\Logs\LiveCodingConsole.log`.
 3. **숨은 `Smooth` 모디파이어** — IA_Move/IA_Spin은 코드측 모디파이어가 없으므로, `IMC_BaseInput`에 `Smooth`(저역통과)·`Scalar`·`DeadZone`이 붙으면 가속·랙과 무관한 floaty 원인이 됨. 에디터에서 확인.
 4. **긴 SpringArm 팔 → 회전 "스윔"** — Spin이 폰 원점 기준 yaw라(팔 320000+socket -1200) 카메라가 큰 호를 그림. 더 깊은 개선은 화면 중앙 지면점을 피벗으로 회전.
-5. **망원 FOV(20~30°)** 가 잔여 랙·모션을 증폭 → 같은 랙도 더 무겁게 보임. (단 `FocusOnBuilding` 계산이 30/20·-40/-55를 하드코딩하므로 FOV 변경은 그 식과 동기화 필요.)
+5. **망원 FOV(20~30°)** 가 잔여 랙·모션을 증폭 → 같은 랙도 더 무겁게 보임. (`FocusOnBuilding`은 핸들러 Zoom Settings를 읽으므로 FOV/피치 밴드 변경은 그 값만 바꾸면 된다.)
 6. `PlayerCamera.cpp` 생성자의 `SetFieldOfView(25)`는 `ApplyZoomSettings`가 즉시 덮어쓰는 **데드 코드**.
 7. **모바일 실검증**: PC PIE 키보드로는 모바일 경로(드래그)가 안 돌아감. PIE 모바일 미리보기/터치 에뮬, 또는 **APK 재패키징·배포**(에디터 빌드만으론 폰 반영 X) 후 확인.
+8. **수직 FOV는 FieldOfView가 아니다** — 엔진 기본 제약 MaintainYFOV에서 `tan(vFOV/2) = tan(FieldOfView/2) / CameraComponent.AspectRatio`(CameraStackTypes.cpp). FOV 30°의 수직 화각은 약 17°. 세로 점유율 계산에 `tan(FOV/2)`를 그대로 쓰면 1.78배 틀린다(2026-09-06 정정, 이전엔 분모의 2 누락과 상쇄돼 티가 안 났음).
 
 ---
 
@@ -192,3 +194,4 @@ PIE 검증 체크리스트 = `docs/superpowers/specs/2026-08-08-focus-occlusion-
 | `Private/Player/OfficeCameraPawn.cpp` / `WorldMapCameraPawn.cpp` | 맵별 오버라이드 |
 | `Private/Player/OfficeCameraFraming.cpp` | Office hero box·수평 FOV 투영·5% safe-frame 줌 탐색 순수 계산 |
 | `Util/CoordinateUtils.*` | 화면→지면 투영(드래그·클릭 공용, O(1), 부호반전 없음) |
+| `Public/Player/Components/CameraFramingMath.h` · `Private/.../CameraFramingMath.cpp` | 줌 리그 순수 평가·수직 FOV 변환·필요 거리·이분법 솔버 (테스트 `CGR.CameraFraming.*` 6종) |

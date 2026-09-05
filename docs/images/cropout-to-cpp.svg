@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title desc">
-  <title id="title">What came from Cropout and what CompanyGrowthRenewal built beyond it</title>
-  <desc id="desc">An original isometric village illustration separates Cropout-derived learning patterns from independently built CompanyGrowthRenewal C++ systems: lifecycle service boundaries, typed DataTable and CommonUI routing, a cross-platform camera domain, and deterministic gameplay pipelines.</desc>
+  <title id="title">Cropout에서 배운 것과 회사키우기에서 직접 구축한 것</title>
+  <desc id="desc">왼쪽의 아이소메트릭 마을 일러스트는 Cropout에서 배운 설계 기준을, 오른쪽은 회사키우기(CompanyGrowthRenewal)에서 독립적으로 구축한 C++ 시스템(수명주기 서비스 경계, 타입 데이터·CommonUI 라우팅, 크로스플랫폼 카메라 도메인, 결정적 게임플레이 파이프라인)을 나타냅니다.</desc>
 
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -47,11 +47,11 @@
   </g>
 
   <!-- Header -->
-  <rect x="64" y="54" width="282" height="38" rx="19" fill="#15354A" stroke="#3AA6C9"/>
+  <rect x="64" y="54" width="244" height="38" rx="19" fill="#15354A" stroke="#3AA6C9"/>
   <circle cx="88" cy="73" r="6" fill="#55D7FF"/>
-  <text x="106" y="79" fill="#BDEFFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="1.7">ARCHITECTURE STUDY</text>
-  <text x="64" y="154" fill="#F8FAFC" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="58" font-weight="800" letter-spacing="-1.2">What came from Cropout — what we built beyond it</text>
-  <text x="64" y="197" fill="#9DB1C3" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="23">Learning baseline on the left. Project-owned C++ systems and responsibility boundaries on the right.</text>
+  <text x="106" y="79" fill="#BDEFFF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="1.7">아키텍처 학습 기준</text>
+  <text x="64" y="154" fill="#F8FAFC" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="54" font-weight="800" letter-spacing="-0.5">Cropout에서 배운 것 — 그 위에 직접 구축한 것</text>
+  <text x="64" y="197" fill="#9DB1C3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="23">왼쪽은 학습 기준, 오른쪽은 회사키우기가 직접 소유한 C++ 시스템과 책임 경계입니다.</text>
 
   <!-- Left visual card shadow and base -->
   <rect x="72" y="242" width="620" height="540" rx="30" fill="#02070D" opacity="0.5"/>
@@ -124,14 +124,14 @@
 
   <!-- Left card labels -->
   <rect x="96" y="268" width="252" height="36" rx="18" fill="#102432" stroke="#7BBBC8"/>
-  <text x="222" y="292" text-anchor="middle" fill="#D6F3F6" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">LEARNED FROM CROPOUT</text>
-  <text x="96" y="360" fill="#FFFFFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="54" font-weight="850">Cropout</text>
-  <text x="96" y="398" fill="#D7E5EA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20">Blueprint sample · architecture learning baseline</text>
-  <g font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16" font-weight="700">
+  <text x="222" y="292" text-anchor="middle" fill="#D6F3F6" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">Cropout에서 배운 것</text>
+  <text x="96" y="360" fill="#FFFFFF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="54" font-weight="850">Cropout</text>
+  <text x="96" y="398" fill="#D7E5EA" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="20">Blueprint 공식 예제 · 아키텍처 학습 기준</text>
+  <g font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="16" font-weight="700">
     <rect x="96" y="690" width="116" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="154" y="716" text-anchor="middle" fill="#E4F7F3">Common UI</text>
     <rect x="224" y="690" width="145" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="296" y="716" text-anchor="middle" fill="#E4F7F3">Enhanced Input</text>
     <rect x="381" y="690" width="126" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="444" y="716" text-anchor="middle" fill="#E4F7F3">Save / Load</text>
-    <rect x="519" y="690" width="125" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="581" y="716" text-anchor="middle" fill="#E4F7F3">Mobile + PC</text>
+    <rect x="519" y="690" width="125" height="40" rx="20" fill="#0C1B25" stroke="#87C9C6"/><text x="581" y="716" text-anchor="middle" fill="#E4F7F3">모바일 + PC</text>
   </g>
 
   <!-- Transformation route -->
@@ -139,46 +139,46 @@
   <path d="M706 496 C748 496 761 496 801 496" fill="none" stroke="url(#route)" stroke-width="7" stroke-linecap="round"/>
   <circle cx="713" cy="496" r="12" fill="#75E7C5" stroke="#102433" stroke-width="5"/>
   <path d="M789 482 L810 496 L789 510 Z" fill="#55D7FF"/>
-  <text x="758" y="446" text-anchor="middle" fill="#A8EAFA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">LEARN</text>
-  <text x="758" y="466" text-anchor="middle" fill="#A8EAFA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">DECOMPOSE</text>
-  <text x="758" y="542" text-anchor="middle" fill="#A8EAFA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">RE-DESIGN</text>
+  <text x="758" y="446" text-anchor="middle" fill="#A8EAFA" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">학습</text>
+  <text x="758" y="466" text-anchor="middle" fill="#A8EAFA" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">분해</text>
+  <text x="758" y="542" text-anchor="middle" fill="#A8EAFA" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="1.1">재설계</text>
 
   <!-- Right architecture card -->
   <rect x="831" y="242" width="705" height="540" rx="30" fill="#02070D" opacity="0.5"/>
   <rect x="823" y="232" width="713" height="540" rx="30" fill="url(#rightCard)" stroke="#2EA9D0" stroke-width="2"/>
   <rect x="855" y="268" width="232" height="36" rx="18" fill="#11445C" stroke="#3CC6EE"/>
-  <text x="971" y="292" text-anchor="middle" fill="#CBF4FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">BUILT FOR THIS PROJECT</text>
-  <text x="855" y="359" fill="#FFFFFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="40" font-weight="850">CompanyGrowthRenewal</text>
-  <text x="855" y="395" fill="#95DFF3" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="19">UE5.4 client architecture · project-owned responsibility boundaries</text>
+  <text x="971" y="292" text-anchor="middle" fill="#CBF4FF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="15" font-weight="750" letter-spacing="1.25">이 프로젝트에서 직접 구축</text>
+  <text x="855" y="359" fill="#FFFFFF" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="40" font-weight="850">회사키우기<tspan dx="14" font-size="21" font-weight="600" fill="#95DFF3">CompanyGrowthRenewal</tspan></text>
+  <text x="855" y="395" fill="#95DFF3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="19">UE5.4 클라이언트 아키텍처 · 프로젝트가 직접 소유한 책임 경계</text>
 
   <!-- Architecture pillars -->
-  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+  <g font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif">
     <line x1="890" y1="444" x2="890" y2="707" stroke="#2F6D88" stroke-width="3"/>
 
     <rect x="855" y="426" width="649" height="69" rx="17" fill="url(#pillar)" stroke="#2E5870"/>
     <circle cx="890" cy="460" r="20" fill="#1A6781"/><text x="890" y="467" text-anchor="middle" fill="#D6F7FF" font-size="16" font-weight="800">01</text>
-    <text x="927" y="454" fill="#F1F8FB" font-size="21" font-weight="800">Lifecycle service topology</text>
+    <text x="927" y="454" fill="#F1F8FB" font-size="21" font-weight="800">수명주기 서비스 구성</text>
     <text x="927" y="480" fill="#9FC2D1" font-size="17">Subsystem · Manager · ActorComponent</text>
 
     <rect x="855" y="506" width="649" height="69" rx="17" fill="url(#pillar)" stroke="#2E5870"/>
     <circle cx="890" cy="540" r="20" fill="#276E78"/><text x="890" y="547" text-anchor="middle" fill="#E0FCF7" font-size="16" font-weight="800">02</text>
-    <text x="927" y="534" fill="#F1F8FB" font-size="21" font-weight="800">Typed data → lifecycle-safe UI route</text>
-    <text x="927" y="560" fill="#9FC2D1" font-size="17">DataTable SOT · cached getters · CommonUI 3-Stack</text>
+    <text x="927" y="534" fill="#F1F8FB" font-size="21" font-weight="800">타입 데이터 → 수명주기 안전 UI 라우팅</text>
+    <text x="927" y="560" fill="#9FC2D1" font-size="17">DataTable 단일 기준 · 캐시 getter · CommonUI 3스택</text>
 
     <rect x="855" y="586" width="649" height="69" rx="17" fill="url(#pillar)" stroke="#2E5870"/>
     <circle cx="890" cy="620" r="20" fill="#33706B"/><text x="890" y="627" text-anchor="middle" fill="#E8FFF9" font-size="16" font-weight="800">03</text>
-    <text x="927" y="614" fill="#F1F8FB" font-size="21" font-weight="800">Cross-platform camera domain</text>
-    <text x="927" y="640" fill="#9FC2D1" font-size="17">Shared API · PC acceleration · mobile touch drag</text>
+    <text x="927" y="614" fill="#F1F8FB" font-size="21" font-weight="800">크로스플랫폼 카메라 도메인</text>
+    <text x="927" y="640" fill="#9FC2D1" font-size="17">공용 API · PC 가속 · 모바일 터치 드래그</text>
 
     <rect x="855" y="666" width="649" height="69" rx="17" fill="url(#pillar)" stroke="#2E5870"/>
     <circle cx="890" cy="700" r="20" fill="#3A6B8F"/><text x="890" y="707" text-anchor="middle" fill="#E4F2FF" font-size="16" font-weight="800">04</text>
-    <text x="927" y="694" fill="#F1F8FB" font-size="21" font-weight="800">Deterministic gameplay pipelines</text>
-    <text x="927" y="720" fill="#9FC2D1" font-size="17">Placement SSOT · portrait FIFO · automation tests</text>
+    <text x="927" y="694" fill="#F1F8FB" font-size="21" font-weight="800">결정적 게임플레이 파이프라인</text>
+    <text x="927" y="720" fill="#9FC2D1" font-size="17">배치 판정 단일 기준 · 직원 얼굴 사진 촬영 FIFO · 자동화 테스트</text>
   </g>
 
   <!-- Footer -->
   <circle cx="67" cy="835" r="5" fill="#55D7FF"/>
-  <text x="84" y="841" fill="#B8C7D3" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18">Patterns adapted · implementation rebuilt independently · claims backed by source</text>
-  <text x="1536" y="841" text-anchor="end" fill="#718596" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15">No copied Cropout code or content · No Epic affiliation or endorsement</text>
+  <text x="84" y="841" fill="#B8C7D3" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="18">패턴만 참고 · 구현은 독립적으로 재작성 · 근거는 소스 링크</text>
+  <text x="1536" y="841" text-anchor="end" fill="#718596" font-family="'Segoe UI', 'Noto Sans KR', Arial, sans-serif" font-size="15">Cropout 코드·콘텐츠 복사 없음 · Epic Games와 무관</text>
 </svg>
 

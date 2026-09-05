@@ -15,6 +15,7 @@
 #include "Player/MainMapPlayerController.h"
 #include "Player/Components/InteractableInputHandler.h"
 #include "Player/Components/MovementInputHandler.h"
+#include "Player/Components/CameraFramingMath.h"
 #include "Player/Components/PlacementHandler.h"
 #include "Player/Components/FocusOcclusionHandler.h"
 #include "Core/CGGameInstance.h"
@@ -436,127 +437,30 @@ float APlayerCamera::FocusOnBuilding(ABuildingBaseActor* Building, float TopPadd
         BuildingBottomWorld.X, BuildingBottomWorld.Y, BuildingBottomWorld.Z,
         BuildingTopWorld.X, BuildingTopWorld.Y, BuildingTopWorld.Z);
 
-    // 2단계: 목표 ZoomValue 반복 계산
-    // ZoomValue가 변하면 FOV와 카메라 각도도 함께 변하므로
-    // 반복적으로 계산하여 최적의 ZoomValue를 수렴시킴
-
-    // 줌값 하나가 팔 길이·FOV·피치 동시 변경 → 닫힌 식 없음
-    // → 값 대입 후 결과 측정하는 탐색으로만 목표 줌값 산출
-    // 현재 ZoomValue 저장 (계산 후 복원용)
-    float OriginalZoomValue = 0.5f;
-    if (MovementInputHandler)
+    // 2단계: 목표 ZoomValue — 순수 리그 모델 위에서 1-D 이분법(컴포넌트 미접촉, 실제 적용은 Tick 보간)
+    if (!MovementInputHandler)
     {
-        OriginalZoomValue = MovementInputHandler->GetZoomValue();
-
-        // 반복적으로 ZoomValue 수렴 (5회 반복으로 정확한 값 도출)
-        TargetZoomValue = 0.5f; // 초기 추정값
-
-        for (int32 Iteration = 0; Iteration < 5; ++Iteration)
-        {
-            // 추정 ZoomValue → FOV (0 = 30도 가까움, 1 = 20도 멀리)
-            float EstimatedFOV = FMath::Lerp(30.f, 20.f, TargetZoomValue);
-            float HalfFOVRadians = FMath::DegreesToRadians(EstimatedFOV * 0.5f);
-
-            // ZoomValue → 피치 (0 = -40도, 1 = -55도, ApplyZoomSettings와 동일)
-            float TargetCameraPitch = FMath::Lerp(-40.0f, -55.0f, TargetZoomValue);
-
-            // 피치 보정: 내려다보는 각도만큼 건물이 수직 압축돼 보임 → PitchCorrection = cos(각도)
-            // (-40도 ≈ 0.766, -55도 ≈ 0.574. 가파를수록 더 가까이)
-            float PitchRadians = FMath::DegreesToRadians(FMath::Abs(TargetCameraPitch));
-            float PitchCorrection = FMath::Cos(PitchRadians);
-
-            // 필요 거리: 보이는 높이 = 건물 높이 × cos(각도) → Distance = 높이 × cos / (tan(FOV/2) × DesiredRatio)
-            // (PitchCorrection은 분자에. 건물 높이만 사용)
-            float RequiredDistance = (BuildingHeight * PitchCorrection) / (FMath::Tan(HalfFOVRadians) * DesiredScreenHeightRatio);
-
-            // RequiredDistance에 맞는 ZoomValue 이진 탐색 (ZoomCurve 때문에 직접 계산 불가)
-            float MinVal = 0.0f;
-            float MaxVal = 1.0f;
-            float TestZoomValue = TargetZoomValue;
-
-            for (int32 i = 0; i < 15; ++i)
-            {
-                // 테스트 ZoomValue 적용 (팔 길이 측정에 실제 줌 변경 필요 → 끝에서 원복)
-                MovementInputHandler->SetZoomValue(TestZoomValue);
-                MovementInputHandler->ApplyZoomSettings();
-                float TestArmLength = SpringArm->TargetArmLength;
-
-                // 목표 거리와 차이 계산
-                float Diff = TestArmLength - RequiredDistance;
-
-                // 충분히 가까우면 종료 (오차 10 이하)
-                if (FMath::Abs(Diff) < 10.0f)
-                {
-                    break;
-                }
-
-                // 이진 탐색: 범위를 절반씩 좁혀감
-                if (Diff > 0.0f)  // 거리가 너무 멀면
-                {
-                    MaxVal = TestZoomValue;  // 상한 낮추기
-                }
-                else  // 거리가 너무 가까우면
-                {
-                    MinVal = TestZoomValue;  // 하한 높이기
-                }
-
-                TestZoomValue = (MinVal + MaxVal) * 0.5f;
-            }
-
-            TargetZoomValue = TestZoomValue;
-        }
-
-        // 원래 ZoomValue 복원 (실제 전환은 Tick). 계산 중 줌 잔류 시 카메라 점프
-        MovementInputHandler->SetZoomValue(OriginalZoomValue);
-        MovementInputHandler->ApplyZoomSettings();
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerCamera] FocusOnBuilding: No MovementInputHandler"));
+        return 0.f;
     }
+    const FZoomRigParams Rig = MovementInputHandler->GetZoomRigParams();
+    const auto CurveEval = [this](float Zoom) { return MovementInputHandler->EvaluateZoomKey(Zoom); };
+    TargetZoomValue = CameraFramingMath::SolveZoomForHeight(Rig, CurveEval, BuildingHeight, DesiredScreenHeightRatio);
+    const FZoomRigSample Target = MovementInputHandler->EvaluateZoomRig(TargetZoomValue);
+    const float ActualDistance = Target.ArmLength;
 
-    // 3단계: 카메라 위치 계산 (수평 오프셋)
-    FVector CameraRight = GetActorRightVector();
+    // 3단계: 수평 오프셋 — 수직 FOV 고정(MaintainYFOV), 수평 반각 = 수직 반각 × 뷰포트 종횡비. 화면 폭 = 2·D·tan
+    const FVector CameraRight = GetActorRightVector();
+    const float ScreenOffsetRatio = ScreenCenterRatioX - 0.5f; // 0.5=중앙, 0.3=왼쪽 20%
+    const float HorizontalHalfTan = CameraFramingMath::HorizontalHalfTangent(Target.HorizontalFOVDeg, Rig.CameraAspectRatio, AspectRatio);
+    const float HorizontalOffset = ScreenOffsetRatio * 2.f * ActualDistance * HorizontalHalfTan;
 
-    // 화면 수평 오프셋 비율 계산
-    // ScreenCenterRatioX = 0.5면 중앙 (오프셋 없음)
-    // ScreenCenterRatioX = 0.25면 왼쪽으로 25% (오프셋 -0.25)
-    // ScreenCenterRatioX = 0.75면 오른쪽으로 25% (오프셋 +0.25)
-    float ScreenOffsetRatio = ScreenCenterRatioX - 0.5f;
-
-    // 최종 목표 상태의 FOV로 수평 오프셋 계산
-    // 이진 탐색으로 구한 TargetZoomValue 적용 시 실제 SpringArm 거리 사용
-    float ActualDistance = 0.0f;
-    if (MovementInputHandler)
-    {
-        MovementInputHandler->SetZoomValue(TargetZoomValue);
-        MovementInputHandler->ApplyZoomSettings();
-        ActualDistance = SpringArm->TargetArmLength;  // 실제 카메라 거리 (ZoomCurve 반영)
-
-        // 원래 ZoomValue로 복원
-        MovementInputHandler->SetZoomValue(OriginalZoomValue);
-        MovementInputHandler->ApplyZoomSettings();
-    }
-    else
-    {
-        ActualDistance = SpringArm->TargetArmLength;  // fallback
-    }
-
-    // 수평 오프셋 월드 거리 계산
-    // 원리: tan(HorizontalFOV/2) = (화면 가로에 보이는 거리 / 2) / Distance
-    // 따라서: HorizontalOffset = ScreenOffsetRatio * Distance * tan(HorizontalFOV/2)
-    float FinalFOV = FMath::Lerp(30.f, 20.f, TargetZoomValue);
-    float HorizontalFOV = FinalFOV * AspectRatio;
-    float HalfHorizontalFOVRadians = FMath::DegreesToRadians(HorizontalFOV * 0.5f);
-    float HorizontalOffset = ScreenOffsetRatio * ActualDistance * FMath::Tan(HalfHorizontalFOVRadians);
-
-    // 4단계: 카메라 위치 계산
-    // 카메라가 실제로 보는 세로 높이
-    float VisibleHeight = ActualDistance * 2.0f * FMath::Tan(FMath::DegreesToRadians(FMath::Lerp(30.f, 20.f, TargetZoomValue) * 0.5f));
-
-    // 카메라 위치 계산: 건물 중심이 화면의 적절한 위치에 오도록
-    // 건물 중심이 화면의 (TopScreen + BottomScreen) / 2 위치에 오도록 계산
-    float BuildingCenterScreenPosition = (TopScreenPosition + BottomScreenPosition) * 0.5f;
-    FVector BuildingCenterWorld = BasePosition + FVector(0.f, 0.f, BuildingHeight * 0.5f);
-
-    // 카메라 중심(0.5)에서 건물 중심이 BuildingCenterScreenPosition에 오도록 오프셋 계산
-    float CameraHeightOffset = VisibleHeight * (0.5f - BuildingCenterScreenPosition);
+    // 4단계: 카메라 위치 — 건물 중심이 화면 세로 (Top+Bottom)/2 에 오도록
+    const float VerticalHalfTan = CameraFramingMath::VerticalHalfTangent(Target.HorizontalFOVDeg, Rig.CameraAspectRatio);
+    const float VisibleHeight = 2.f * ActualDistance * VerticalHalfTan;
+    const float BuildingCenterScreenPosition = (TopScreenPosition + BottomScreenPosition) * 0.5f;
+    const FVector BuildingCenterWorld = BasePosition + FVector(0.f, 0.f, BuildingHeight * 0.5f);
+    const float CameraHeightOffset = VisibleHeight * (0.5f - BuildingCenterScreenPosition);
     TargetCameraLocation = BuildingCenterWorld + FVector(0.f, 0.f, CameraHeightOffset) - CameraRight * HorizontalOffset;
 
     // Tick()에서 부드러운 보간 시작
@@ -567,9 +471,8 @@ float APlayerCamera::FocusOnBuilding(ABuildingBaseActor* Building, float TopPadd
         FocusOcclusionHandler->SetFocusTarget(Building);
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] FocusOnBuilding: Height=%f, ScreenRatio=%.1f%%, ZoomValue=%f, Pitch=%f, Distance=%f"),
-        BuildingHeight, DesiredScreenHeightRatio * 100.0f, TargetZoomValue,
-        FMath::Lerp(-40.0f, -55.0f, TargetZoomValue), ActualDistance);
+    UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] FocusOnBuilding: Height=%.1f, Ratio=%.1f%%, Zoom=%.4f, Pitch=%.1f, hFOV=%.1f, Arm=%.1f"),
+        BuildingHeight, DesiredScreenHeightRatio * 100.0f, TargetZoomValue, Target.PitchDeg, Target.HorizontalFOVDeg, ActualDistance);
 
     return ActualDistance;
 }
@@ -642,92 +545,27 @@ void APlayerCamera::FocusOnActor(AActor* Actor, float ScreenCenterRatioX, bool b
 
     float DesiredScreenHeightRatio = TopScreenPosition - BottomScreenPosition;
 
-    // 현재 ZoomValue 저장
-    float OriginalZoomValue = 0.5f;
-    if (MovementInputHandler)
+    if (!MovementInputHandler)
     {
-        OriginalZoomValue = MovementInputHandler->GetZoomValue();
-
-        // 반복적으로 ZoomValue 수렴
-        TargetZoomValue = 0.5f;
-
-        for (int32 Iteration = 0; Iteration < 5; ++Iteration)
-        {
-            float EstimatedFOV = FMath::Lerp(30.f, 20.f, TargetZoomValue);
-            float HalfFOVRadians = FMath::DegreesToRadians(EstimatedFOV * 0.5f);
-            float TargetCameraPitch = FMath::Lerp(-40.0f, -55.0f, TargetZoomValue);
-            float PitchRadians = FMath::DegreesToRadians(FMath::Abs(TargetCameraPitch));
-            float PitchCorrection = FMath::Cos(PitchRadians);
-
-            float RequiredDistance = (ActorHeight * PitchCorrection) / (FMath::Tan(HalfFOVRadians) * DesiredScreenHeightRatio);
-
-            // 이진 탐색으로 ZoomValue 역계산
-            float MinVal = 0.0f;
-            float MaxVal = 1.0f;
-            float TestZoomValue = TargetZoomValue;
-
-            for (int32 i = 0; i < 15; ++i)
-            {
-                MovementInputHandler->SetZoomValue(TestZoomValue);
-                MovementInputHandler->ApplyZoomSettings();
-                float TestArmLength = SpringArm->TargetArmLength;
-
-                float Diff = TestArmLength - RequiredDistance;
-
-                if (FMath::Abs(Diff) < 10.0f)
-                {
-                    break;
-                }
-
-                if (Diff > 0.0f)
-                {
-                    MaxVal = TestZoomValue;
-                }
-                else
-                {
-                    MinVal = TestZoomValue;
-                }
-
-                TestZoomValue = (MinVal + MaxVal) * 0.5f;
-            }
-
-            TargetZoomValue = TestZoomValue;
-        }
-
-        // 원래 ZoomValue로 복원
-        MovementInputHandler->SetZoomValue(OriginalZoomValue);
-        MovementInputHandler->ApplyZoomSettings();
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerCamera] FocusOnActor: No MovementInputHandler"));
+        return;
     }
+    const FZoomRigParams Rig = MovementInputHandler->GetZoomRigParams();
+    const auto CurveEval = [this](float Zoom) { return MovementInputHandler->EvaluateZoomKey(Zoom); };
+    TargetZoomValue = CameraFramingMath::SolveZoomForHeight(Rig, CurveEval, ActorHeight, DesiredScreenHeightRatio);
+    const FZoomRigSample Target = MovementInputHandler->EvaluateZoomRig(TargetZoomValue);
+    const float ActualDistance = Target.ArmLength;
 
-    // 카메라 위치 계산
-    FVector CameraRight = GetActorRightVector();
-    float ScreenOffsetRatio = ScreenCenterRatioX - 0.5f;
+    const FVector CameraRight = GetActorRightVector();
+    const float ScreenOffsetRatio = ScreenCenterRatioX - 0.5f;
+    const float HorizontalHalfTan = CameraFramingMath::HorizontalHalfTangent(Target.HorizontalFOVDeg, Rig.CameraAspectRatio, AspectRatio);
+    const float HorizontalOffset = ScreenOffsetRatio * 2.f * ActualDistance * HorizontalHalfTan;
 
-    float ActualDistance = 0.0f;
-    if (MovementInputHandler)
-    {
-        MovementInputHandler->SetZoomValue(TargetZoomValue);
-        MovementInputHandler->ApplyZoomSettings();
-        ActualDistance = SpringArm->TargetArmLength;
-
-        MovementInputHandler->SetZoomValue(OriginalZoomValue);
-        MovementInputHandler->ApplyZoomSettings();
-    }
-    else
-    {
-        ActualDistance = SpringArm->TargetArmLength;
-    }
-
-    float FinalFOV = FMath::Lerp(30.f, 20.f, TargetZoomValue);
-    float HorizontalFOV = FinalFOV * AspectRatio;
-    float HalfHorizontalFOVRadians = FMath::DegreesToRadians(HorizontalFOV * 0.5f);
-    float HorizontalOffset = ScreenOffsetRatio * ActualDistance * FMath::Tan(HalfHorizontalFOVRadians);
-
-    float VisibleHeight = ActualDistance * 2.0f * FMath::Tan(FMath::DegreesToRadians(FinalFOV * 0.5f));
-    float BuildingCenterScreenPosition = (TopScreenPosition + BottomScreenPosition) * 0.5f;
-    FVector ActorCenterWorld = BasePosition + FVector(0.f, 0.f, ActorHeight * 0.5f);
-
-    float CameraHeightOffset = VisibleHeight * (0.5f - BuildingCenterScreenPosition);
+    const float VerticalHalfTan = CameraFramingMath::VerticalHalfTangent(Target.HorizontalFOVDeg, Rig.CameraAspectRatio);
+    const float VisibleHeight = 2.f * ActualDistance * VerticalHalfTan;
+    const float BuildingCenterScreenPosition = (TopScreenPosition + BottomScreenPosition) * 0.5f;
+    const FVector ActorCenterWorld = BasePosition + FVector(0.f, 0.f, ActorHeight * 0.5f);
+    const float CameraHeightOffset = VisibleHeight * (0.5f - BuildingCenterScreenPosition);
     TargetCameraLocation = ActorCenterWorld + FVector(0.f, 0.f, CameraHeightOffset) - CameraRight * HorizontalOffset;
 
     BeginCameraTransition();
@@ -737,8 +575,8 @@ void APlayerCamera::FocusOnActor(AActor* Actor, float ScreenCenterRatioX, bool b
         FocusOcclusionHandler->SetFocusTarget(Actor);
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] FocusOnActor: %s, Height=%f, ZoomValue=%f"),
-        *Actor->GetName(), ActorHeight, TargetZoomValue);
+    UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] FocusOnActor: %s, Height=%.1f, Zoom=%.4f, Arm=%.1f"),
+        *Actor->GetName(), ActorHeight, TargetZoomValue, ActualDistance);
 }
 
 void APlayerCamera::FocusOnLocation(const FVector& TargetLocation, float DesiredDistance)
@@ -750,49 +588,15 @@ void APlayerCamera::FocusOnLocation(const FVector& TargetLocation, float Desired
 
     if (MovementInputHandler)
     {
-        // DesiredDistance가 지정되면 줌 값 조절, 아니면 현재 줌 유지
-        if (DesiredDistance > 0.f && SpringArm)
+        if (DesiredDistance > 0.f)
         {
-            float SavedZoomValue = MovementInputHandler->GetZoomValue();
-
-            // 이진 탐색으로 DesiredDistance에 맞는 ZoomValue 찾기
-            float MinVal = 0.0f;
-            float MaxVal = 1.0f;
-            TargetZoomValue = 0.5f;
-
-            for (int32 i = 0; i < 15; ++i)
-            {
-                MovementInputHandler->SetZoomValue(TargetZoomValue);
-                MovementInputHandler->ApplyZoomSettings();
-                float TestArmLength = SpringArm->TargetArmLength;
-
-                float Diff = TestArmLength - DesiredDistance;
-
-                if (FMath::Abs(Diff) < 10.0f)
-                {
-                    break;
-                }
-
-                if (Diff > 0.0f)
-                {
-                    MaxVal = TargetZoomValue;
-                }
-                else
-                {
-                    MinVal = TargetZoomValue;
-                }
-
-                TargetZoomValue = (MinVal + MaxVal) * 0.5f;
-            }
-
-            // 원래 ZoomValue로 복원 (Tick에서 보간 시작)
-            MovementInputHandler->SetZoomValue(SavedZoomValue);
-            MovementInputHandler->ApplyZoomSettings();
+            const FZoomRigParams Rig = MovementInputHandler->GetZoomRigParams();
+            const auto CurveEval = [this](float Zoom) { return MovementInputHandler->EvaluateZoomKey(Zoom); };
+            TargetZoomValue = CameraFramingMath::SolveZoomForArmLength(Rig, CurveEval, DesiredDistance);
         }
         else
         {
-            // 줌 변경 없이 현재 값 유지
-            TargetZoomValue = MovementInputHandler->GetZoomValue();
+            TargetZoomValue = MovementInputHandler->GetZoomValue(); // 거리 미지정 = 현재 줌 유지
         }
     }
 

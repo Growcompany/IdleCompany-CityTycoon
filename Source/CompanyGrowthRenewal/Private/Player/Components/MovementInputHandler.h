@@ -8,6 +8,7 @@
 #include "InputMappingContext.h"
 #include "InputAction.h"
 #include "EnhancedInputComponent.h"
+#include "Player/Components/CameraFramingMath.h"
 #include "MovementInputHandler.generated.h"
 
 
@@ -53,6 +54,12 @@ public:
 	void UpdateZoom();
 	UFUNCTION(BlueprintCallable, Category = "Camera|Zoom")
 	void ApplyZoomSettings(); // ZoomValue를 SpringArm 등에 적용만 (값 변경 안 함)
+
+	// 줌 리그 순수 평가 — 컴포넌트 미접촉. 프레이밍 탐색은 이걸로만 계산(실제 적용은 ApplyZoomSettings/Tick)
+	FZoomRigParams GetZoomRigParams() const;
+	float EvaluateZoomKey(float InZoomValue) const;
+	FZoomRigSample EvaluateZoomRig(float InZoomValue) const;
+
 	void UpdateDof() const;
 	void MoveTracking();
 	void PositionCheck();

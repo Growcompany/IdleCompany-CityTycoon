@@ -29,6 +29,19 @@ Base camera pawn with movement (WASD/drag), zoom (wheel), pan, and building focu
 | `void StartBuildingRelocation(AInteractableBaseActor* ExistingBuilding)` | Prepare to move an already-placed building (saves original position for undo) |
 | `void EndBuildingRelocation()` | Cancel building move and restore original position |
 
+### CameraFramingMath (순수 계산, 월드 의존 없음)
+
+파일: `Public/Player/Components/CameraFramingMath.h`
+
+| API | 용도 |
+|---|---|
+| `FZoomRigSample EvaluateRig(const FZoomRigParams&, float Key)` | 줌 key → 팔길이·피치·수평 FOV (전부 선형) |
+| `float VerticalHalfTangent(float hFOVDeg, float CameraAspect)` / `HorizontalHalfTangent(..., float ViewportAspect)` | 엔진 MaintainYFOV와 같은 수직/수평 반각 탄젠트 |
+| `float RequiredArmLengthForHeight(H, PitchDeg, hFOVDeg, CameraAspect, Ratio)` | 높이 H가 화면 세로 Ratio를 차지하는 팔길이 (H·cos\|pitch\| / (2·tan(vFOV/2)·Ratio)) |
+| `float SolveZoomForHeight(Params, CurveEval, H, Ratio)` / `SolveZoomForArmLength(Params, CurveEval, Arm)` | 잔차 이분법으로 줌값 역산 (기본 24회·1cm). 리그 범위 밖이면 잔차 부호가 가리키는 끝점(계속 모자라면 1, 계속 남으면 0) |
+
+`UMovementInputHandler::GetZoomRigParams() / EvaluateZoomKey(z) / EvaluateZoomRig(z)` — 컴포넌트를 건드리지 않는 리그 평가. 새 포커스 함수는 `SetZoomValue+ApplyZoomSettings`로 탐색하지 말고 이걸 쓸 것.
+
 ### AOfficeCameraPawn
 Office-specific camera pawn (inherits APlayerCamera). Restricts yaw rotation, disables Spin/PlacementHandler/InteractableInputHandler. Adds wall edit mode and employee follow targeting.
 파일: `Public/Player/OfficeCameraPawn.h`
