@@ -68,7 +68,7 @@
 
 [Cropout](https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project)은 Epic Games가 Unreal Engine의 기능과 구조를 직접 보여주기 위해 Blueprint로 제작·공개한 공식 크로스플랫폼 예제입니다. 엔진이 의도한 시스템 구성과 크로스플랫폼 구현 방식을 신뢰도 높게 학습할 수 있는 좋은 표본이라고 판단해 설계 기준으로 선택했습니다. 여기서 가져온 것은 코드나 콘텐츠가 아니라 Common UI, Enhanced Input, Save/Load, Blueprint Interface와 모바일·PC 패키징을 구성하는 **설계 기준과 사용 패턴**입니다.
 
-반면 **회사키우기에서 새로 쌓은 시스템**은 장기 수명 서비스의 책임 경계, 타입이 보장되는 DataTable SOT, CommonUI 3-Stack 라우터, PC·터치 공용 카메라 도메인, 배치 판정 SSOT와 초상화 FIFO 같은 결정적 파이프라인입니다. 단순 포팅이 아니라 게임 규모와 수명주기에 맞춰 C++로 분해하고 다시 설계했습니다.
+반면 **회사키우기에서 새로 쌓은 시스템**은 장기 수명 서비스의 역할 분리, 타입이 보장되는 DataTable SOT, CommonUI 3-Stack 라우터, PC·터치 공용 카메라 도메인, 배치 판정 SSOT와 얼굴 사진 촬영 FIFO 같은 결정적 파이프라인입니다. 단순 포팅이 아니라 게임 규모와 수명주기에 맞춰 C++로 분해하고 다시 설계했습니다.
 
 | Cropout에서 학습한 기준 | CompanyGrowthRenewal에서 직접 재설계한 구조 | Evidence |
 |---|---|---|
@@ -176,7 +176,7 @@
 | 실제 문제 | AI로 확장한 처리량 | 직접 내린 판단과 검증 |
 |---|---|---|
 | **Android 야간 가독성·Shimmer** | 관련 CVar와 설정 영향 범위 탐색, A/B 캡처·지표 스크립트 작성, 독립 리뷰 병렬화 | 시간축 문제와 정지 화질을 분리하고 변수·허용 구간을 정의. Android Vulkan 동일 조건 결과로 후보를 채택·기각 |
-| **Save/Load 수명주기** | 호출부·직렬화 필드의 교차 탐색, Round-trip 테스트 골격과 누락 경로 검토 | 저장 책임 경계, 로드 완료 가드와 스로틀 정책을 결정하고 코드·테스트 대칭성 확인 |
+| **Save/Load 수명주기** | 호출부·직렬화 필드의 교차 탐색, Round-trip 테스트 골격과 누락 경로 검토 | 저장 담당 범위, 로드 완료 가드와 스로틀 정책을 결정하고 코드·테스트 대칭성 확인 |
 | **반복되는 구현 실수** | 기존 사고를 규칙·Hook·테스트·문서 동기화 도구로 전환하는 반복 작업 가속 | SOT와 실패 조건을 직접 정의하고, 자동 검사가 실제 누락을 차단하는지 회귀 테스트 |
 
 측정하지 않은 시간 절감률을 주장하지 않고, 저장소에 남은 코드·테스트·검증 도구로 확인할 수 있는 활용만 기술합니다.
@@ -186,7 +186,7 @@
 | Codex 프로젝트 엔지니어링 규칙 | [AGENTS.md](AGENTS.md) |
 | Claude Code 역할·Hook·작업 원칙 | [CLAUDE.md](CLAUDE.md), [.claude/agents](.claude/agents), [.claude/hooks](.claude/hooks) |
 | 반복 가능한 분석·리뷰 Skill | [.agents/skills](.agents/skills) |
-| 개발자와 AI의 책임 경계 | [AI_WORKFLOW.md](docs/AI_WORKFLOW.md) |
+| 개발자와 AI의 역할 분담 | [AI_WORKFLOW.md](docs/AI_WORKFLOW.md) |
 
 <a id="repository-scope"></a>
 
