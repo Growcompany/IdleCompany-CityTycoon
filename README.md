@@ -70,13 +70,13 @@
 
 반면 **회사키우기에서 새로 쌓은 시스템**은 장기 수명 서비스의 역할 분리, 타입이 보장되는 DataTable SOT, CommonUI 3-Stack 라우터, PC·터치 공용 카메라 도메인, 배치 판정 SSOT와 얼굴 사진 촬영 FIFO 같은 결정적 파이프라인입니다. 단순 포팅이 아니라 게임 규모와 수명주기에 맞춰 C++로 분해하고 다시 설계했습니다.
 
-| Cropout에서 학습한 기준 | CompanyGrowthRenewal에서 직접 재설계한 구조 | Evidence |
+| Cropout에서 참고한 패턴 | CompanyGrowthRenewal에서 직접 재설계한 구조 | Evidence |
 |---|---|---|
 | 크로스플랫폼 탑다운 구조 | 장기 수명 서비스와 월드 객체를 <code>GameInstanceSubsystem · Manager · ActorComponent</code>로 분리 | [CGGameInstance.cpp](Source/CompanyGrowthRenewal/Private/Core/CGGameInstance.cpp), [Architecture](docs/ARCHITECTURE.md) |
 | Common UI 활용 | Main·Prompt·Bottom 3-Stack 라우터와 입력 모드 수명주기 중앙화 | [UIBase.cpp](Source/CompanyGrowthRenewal/Private/UI/UIBase.cpp), [UIManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/UIManagerSubsystem.cpp) |
 | Enhanced Input | PC 가속 이동과 모바일 터치 드래그를 분리하고 카메라 도메인 API는 공유 | [MovementInputHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/MovementInputHandler.cpp), [PlayerCamera.cpp](Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.cpp) |
 | Blueprint 데이터 흐름 | 명시적 C++ 타입과 DataTable SOT·캐시·Loud Failure 파이프라인 구축 | [TableManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.cpp), [CSV sample](DataImport/Samples/DT_WidgetClass_Import.csv) |
-| Blueprint Interface로 책임을 나누는 방식 | 미리보기·확정이 공유하는 배치 판정 SSOT, 초상화 FIFO와 자동화 테스트로 결정적 파이프라인 구축 | [PlacementHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/PlacementHandler.cpp), [EmployeeManager.cpp](Source/CompanyGrowthRenewal/Private/Manager/EmployeeManager.cpp), [PlotPlacementRulesTests.cpp](Source/CompanyGrowthRenewal/Private/Tests/PlotPlacementRulesTests.cpp) |
+| Blueprint Interface로 책임을 나누는 방식 | 미리보기·확정이 공유하는 배치 판정 SSOT, 얼굴 사진 FIFO와 자동화 테스트로 결정적 파이프라인 구축 | [PlacementHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/PlacementHandler.cpp), [EmployeeManager.cpp](Source/CompanyGrowthRenewal/Private/Manager/EmployeeManager.cpp), [PlotPlacementRulesTests.cpp](Source/CompanyGrowthRenewal/Private/Tests/PlotPlacementRulesTests.cpp) |
 
 > Cropout은 구조 학습 기준이며 이 저장소는 독립 프로젝트입니다. Epic Games와 제휴하거나 공식 승인을 받은 저장소가 아니며, Cropout 프로젝트 파일의 코드와 게임 콘텐츠는 포함하지 않습니다.
 
