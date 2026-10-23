@@ -18,18 +18,33 @@ enum class ECGStartMode : uint8
 	MidGamePreset UMETA(DisplayName = "진행 상태 프리셋 (중반부터)")
 };
 
+UENUM(BlueprintType)
+enum class ECGBackendMode : uint8
+{
+	Local UMETA(DisplayName = "로컬 (완전 오프라인)"),
+	Server UMETA(DisplayName = "서버 (연동 테스트)")
+};
+
 /**
- * 개발 시작 모드 설정 (UDeveloperSettings).
+ * 개발 시작/백엔드 모드 설정 (UDeveloperSettings).
  * Project Settings > Game > "CG Dev" 섹션에 드롭다운으로 노출되고 DefaultGame.ini 에 저장된다.
  * 런타임에서 GetEffectiveStartMode() 로 읽는다 — **Shipping 빌드에선 항상 FullTutorial 강제**
  * (dev 설정 무력화 → 실제 플레이어 세이브/진행 보호).
  */
-UCLASS(config = Game, defaultconfig, meta = (DisplayName = "CG Dev (개발 시작 모드)"))
+UCLASS(config = Game, defaultconfig, meta = (DisplayName = "CG Dev"))
 class COMPANYGROWTHRENEWAL_API UCGDevSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
 
 public:
+	UPROPERTY(EditAnywhere, config, Category = "백엔드",
+		meta = (DisplayName = "플레이 모드", ToolTip = "로컬은 PlayFab/Firebase 없이 세이브로 플레이합니다. 변경 후 게임을 다시 시작하세요. Shipping은 항상 서버를 사용합니다."))
+	ECGBackendMode BackendMode = ECGBackendMode::Local;
+
+	static ECGBackendMode GetEffectiveBackendMode();
+	static bool IsOfflineMode();
+	static FString GetPortraitFolderName();
+
 	UPROPERTY(EditAnywhere, config, Category = "시작 모드")
 	ECGStartMode StartMode = ECGStartMode::FullTutorial;
 

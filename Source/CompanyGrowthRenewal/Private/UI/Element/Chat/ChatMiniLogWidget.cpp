@@ -57,6 +57,19 @@ void UChatMiniLogWidget::NativeConstruct()
 	{
 		HandleConnectionChanged(false);
 	}
+
+	const UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+	if (UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr)
+	{
+		PromptSource = UIBase;
+		PromptCountHandle = UIBase->OnPromptCountChanged.AddUObject(this, &UChatMiniLogWidget::HandlePromptCountChanged);
+		HandlePromptCountChanged(UIBase->GetPromptStackCount());
+	}
+}
+
+void UChatMiniLogWidget::HandlePromptCountChanged(int32 PromptCount)
+{
+	SetRenderOpacity(PromptCount > 0 ? 0.f : 1.f);
 }
 
 void UChatMiniLogWidget::NativeDestruct()
@@ -76,6 +89,11 @@ void UChatMiniLogWidget::NativeDestruct()
 		ChatMgr->OnMessagesReceived.Remove(MessagesReceivedHandle);
 		ChatMgr->OnChatConnectionChanged.Remove(ConnectionChangedHandle);
 	}
+	if (UUIBase* UIBase = PromptSource.Get())
+	{
+		UIBase->OnPromptCountChanged.Remove(PromptCountHandle);
+	}
+	PromptSource.Reset();
 
 	// 페이드아웃 타이머 정리
 	if (UWorld* World = GetWorld())
@@ -101,7 +119,7 @@ void UChatMiniLogWidget::OnChatIconClicked()
 			TSubclassOf<UUserWidget> PanelClass = TableMgr->GetWidgetClass(EWidgetType::ChatPanel);
 			if (PanelClass)
 			{
-				UIMgr->UIBaseInstance->PushPromptClass(TSubclassOf<UCommonActivatableWidget>(PanelClass));
+				if (!UIMgr->UIBaseInstance->PushPromptClass(TSubclassOf<UCommonActivatableWidget>(PanelClass))) return;
 
 				// UI 모드 전환
 				AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController());

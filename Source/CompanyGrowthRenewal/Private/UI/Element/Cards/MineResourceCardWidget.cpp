@@ -5,7 +5,7 @@
 #include "UI/Element/Common/StatRowWidget.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/MineManager.h"
-#include "Global/GlobalUtilFunctions.h"
+#include "Manager/ResourceItemManager.h"
 #include "Table/ResourceInfo.h"
 #include "Components/Image.h"
 #include "Components/EditableTextBox.h"
@@ -35,6 +35,13 @@ void UMineResourceCardWidget::NativeConstruct()
 
 	CurrentQuantity = FMath::Max<int64>(MinQuantity, 1);
 	RefreshQuantityUI();
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UResourceItemManager* ResourceMgr = GI->GetSubsystem<UResourceItemManager>())
+		{
+			ResourceMgr->OnResourceChanged.AddUObject(this, &UMineResourceCardWidget::HandleResourceChanged);
+		}
+	}
 }
 
 void UMineResourceCardWidget::NativeDestruct()
@@ -54,6 +61,13 @@ void UMineResourceCardWidget::NativeDestruct()
 	if (NumberEditableTextBox)
 	{
 		NumberEditableTextBox->OnTextCommitted.RemoveDynamic(this, &UMineResourceCardWidget::HandleQuantityCommitted);
+	}
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UResourceItemManager* ResourceMgr = GI->GetSubsystem<UResourceItemManager>())
+		{
+			ResourceMgr->OnResourceChanged.RemoveAll(this);
+		}
 	}
 	Super::NativeDestruct();
 }
@@ -111,6 +125,12 @@ void UMineResourceCardWidget::RefreshQuantityUI()
 	{
 		NumberEditableTextBox->SetText(FText::AsNumber(CurrentQuantity));
 	}
+	if (AcceptButton)
+	{
+		AcceptButton->SetButtonText(FText::Format(
+			NSLOCTEXT("MineResourceCard", "InstallLineWithCapacity", "한도 {0}개 라인 설치"),
+			FText::AsNumber(CurrentQuantity)));
+	}
 	RefreshCostText();
 	RefreshTimeText();
 }
@@ -139,18 +159,37 @@ double UMineResourceCardWidget::ComputeProductionTimeSec(int64 Quantity) const
 
 void UMineResourceCardWidget::RefreshCostText()
 {
-	if (!Text_Cost) return;
 	const int64 Cost = ComputeCost(CurrentQuantity);
-	// 사용자 WBP DefaultStatValue 형식 ("200원") 과 일치
-	Text_Cost->SetStatValue(FString::Printf(TEXT("%s원"),
-		*UGlobalUtilFunctions::AbbreviateNumber(Cost, ENumberAbbrevStyle::Auto, ENumberRoundMode::Ceil).ToString()));
+	const UGameInstance* GI = GetGameInstance();
+	const UResourceItemManager* ResourceMgr = GI ? GI->GetSubsystem<UResourceItemManager>() : nullptr;
+	const bool bAffordable = Cost <= 0 || (ResourceMgr && ResourceMgr->HasResource(EResourceType::Money, Cost));
+	if (Text_Cost)
+	{
+		Text_Cost->SetStatName(TEXT("라인 설치비 (1회)"));
+		const FString CostText = FString::Printf(TEXT("%s원"), *FText::AsNumber(Cost).ToString());
+		Text_Cost->SetStatValue(bAffordable ? CostText :
+			FString::Printf(TEXT("%s (%s)"), *CostText, *NSLOCTEXT("MineResourceCard", "InsufficientMoney", "돈 부족").ToString()));
+	}
+	if (AcceptButton)
+	{
+		AcceptButton->SetIsEnabled(bAffordable);
+	}
+}
+
+void UMineResourceCardWidget::HandleResourceChanged(EResourceType Type, int64 /*NewValue*/)
+{
+	if (Type == EResourceType::Money)
+	{
+		RefreshCostText();
+	}
 }
 
 void UMineResourceCardWidget::RefreshTimeText()
 {
 	if (!Text_Time) return;
+	Text_Time->SetStatName(TEXT("반복 채광 시간"));
 	const double Sec = ComputeProductionTimeSec(CurrentQuantity);
-	const int32 Total = FMath::Max(static_cast<int32>(Sec), 0);
+	const int32 Total = FMath::Max(FMath::CeilToInt(Sec), 0);
 
 	FString Formatted;
 	if (Total < 60)

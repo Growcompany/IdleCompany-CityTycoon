@@ -70,4 +70,8 @@ struct FWorldFactoryUpgradeDefinition : public FTableRowBase
 	// 비용 증가율. NextCost = BaseCost * pow(CostGrowthRate, CurrentLevel).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade|Cost")
 	float CostGrowthRate = 1.15f;
+
+	// 해외 디오라마 외형 1·2·3단계가 시작되는 레벨. 비어 있으면 외형이 바뀌지 않는다(라인 증설은 실제 라인 수를 쓴다).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade|Display")
+	TArray<int32> AppearanceLevels;
 };

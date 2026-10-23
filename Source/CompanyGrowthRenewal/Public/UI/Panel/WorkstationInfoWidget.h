@@ -10,24 +10,28 @@
 class UImage;
 class UButton;
 class UButtonWidget;
-class UCloseButtonWidget;
+class UCostActionButtonWidget;
+class UPanelHeaderWidget;
 class UCommonTextBlock;
 class UListView;
 class UUpgradeSlot;
+class UBulkModeSelectorWidget;
 class UBorder;
-class UDisciplineRadarWidget;
 class UEmployeeRosterCardWidget;
 class AWorkstationActorBase;
 class UEmployeeManager;
+enum class EEnhanceBulkMode : uint8;
+enum class EResourceType : uint8;
+enum class EWorkstationUpgradeType : uint8;
 
 /**
- * 책상 도크 (우측 고정, 다크 슬레이트) — 책상 하드웨어 강화 + 이 책상의 착석 관리.
+ * 책상 도크 (우측 고정, 무광 셸 + 밝은 트레이) — 책상 강화(등급)·세 항목 강화 + 이 책상의 착석 관리.
  *
  * 착석/자리 비우기는 도크가 소유하고, 육성(스탯/강화)만 UI_EmployeeWindow(직원창)에 남는다.
- * 구성: 헤더("책상" + 책상이름·Lv + X) / 책상 카드(DeskUpgradeSlot 재사용) + 장비 블록
- *      / 근무자 칩 카드(점유 시만 — 얼굴+이름+★ + [직원창] 링크 + [자리 비우기])
- *      / 대기 직원 목록(빈 좌석일 때만, 탭 = 즉시 착석) / 안내 캡션.
- * 목업 SOT = docs/05_UI/EmployeeWindow_MOCKUP.html 스크린 C (px×2 = 2560 캔버스)
+ * 구성: 헤더(책상 이름이 제목) / 현재·다음 등급 장비 비교 + 세 항목 강화 행 + 독립 등급 강화 카드
+ *      / 근무 직원 카드(점유 시만 — 로스터 카드 + 특화 + [직원창 열기] [자리 비우기])
+ *      / 대기 직원 목록(빈 좌석일 때만, 탭 = 즉시 착석). 재배치·배수 선택은 도크 밖 좌하단.
+ * 목업 SOT = docs/05_UI/mockups/WorkstationDockRedesign_MOCKUP.html
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UWorkstationInfoWidget : public UAnimatedActivatableWidget
@@ -40,6 +44,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Workstation")
 	void SetEmployeeData(int32 EmployeeID);
+	AWorkstationActorBase* GetWorkstation() const { return CurrentWorkstation; }
+	// 실제 구매 가능한 첫 항목 또는 준비된 무료 책상 강화 버튼.
+	UWidget* GetFirstAffordableGrowthButton(bool bPromotionOnly) const;
+	UWidget* GetCloseButtonWidget() const;
 
 	// 미션 가이드 스텁 — 구 도크의 [스탯 관리]/첫 [+] 타겟은 직원창 이관으로 소멸(M9 재배선은 직능 SDD 작업).
 	// MissionManagerSubsystem 호출 계약 유지용(nullptr = 가이드 링 생략).
@@ -49,18 +57,19 @@ public:
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
-	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 	virtual void NativeOnActivated() override;
 	virtual void NativeOnDeactivated() override;
 
+	// 최초 진입 코치마크 (DT_PanelIntro PanelKey="WorkstationInfo")
+	void TryPlayPanelIntro();
+	void HandlePanelIntroFinished();
+	FTimerHandle PanelIntroTimer;
+	TWeakObjectPtr<class UPanelIntroOverlayWidget> PanelIntroOverlay;
+
 	// ========== 헤더 ==========
 
-	// "기본 책상 · Lv.2" (DT_WorkstationCard DisplayName + 세팅 레벨)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* HeaderSubText;
-
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UCloseButtonWidget* CloseButton;
+	TObjectPtr<UPanelHeaderWidget> PanelHeader;
 
 	// 배경 클릭 캐처 (도크 밖 클릭 = 닫기) — 풀스크린 투명 버튼
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -68,9 +77,45 @@ protected:
 
 	// ========== 책상 카드 ==========
 
-	// 컴퓨터 세팅 강화 슬롯 (재사용 UUpgradeSlot — 아이콘/레벨/현재→다음 작업 속도/비용/버튼+VFX)
+	// 등급 장비 구성 이미지는 DT_WorkstationSetupLevel의 대표 구성이며 선택한 책상 외형은 아니다.
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UUpgradeSlot* DeskUpgradeSlot;
+	UWidget* DeskCompareCard;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* CurrentGradeText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UImage* CurrentEquipImage;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* CurrentEquipText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UWidget* NextCompareColumn;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* NextGradeText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UImage* NextEquipImage;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* NextEquipText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* RetainedEffectText;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UWidget* DeskPromotionCard;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* PromotionTitleText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* PromotionRewardText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* PromotionConditionText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCostActionButtonWidget* PromoteButton;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UUpgradeSlot* ProcessingUpgradeSlot;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UUpgradeSlot* ToolsUpgradeSlot;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UUpgradeSlot* EnvironmentUpgradeSlot;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UBulkModeSelectorWidget* BulkModeSelector;
 
 	// ========== 근무자 칩 카드 (점유 시만, 빈 책상 = Collapsed) ==========
 
@@ -85,10 +130,6 @@ protected:
 
 	// ===== 근무자 서류 — 특화/연혁만 남는다 (신원은 OccupantCard 소관) =====
 
-	// 특화 = 기존 직능 레이더 재사용(작게). 값/등급색 코드 주입, 직원창 DisciplineCard 와 동일 규칙
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UDisciplineRadarWidget* OccupantRadar;
-
 	// "그래픽 특화" (argmax 직능, enum DisplayName)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* OccupantSpecText;
@@ -99,11 +140,9 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* OccupantLeadValue1;
 
-	// 연혁: 사번/입사일/근속 (등급은 위 배지)
+	// 연혁: 사번/근속 (입사일은 직원 창에서 본다)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* OccupantNoText;
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* OccupantHiredText;
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* OccupantTenureText;
 
@@ -115,41 +154,8 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButtonWidget* UnseatButton;
 
-	// ========== 장비 블록 (강화 슬롯 아래 인셋 플레이트) ==========
-
-	// 플레이트 셸 = SDF 2층(채움/키라인). 절차식 RoundedBox 는 다크 위에서 코너가 얼룩지고
-	// 모바일 다운스케일에서 키라인이 번진다 — UI_STYLE_CATALOG "SDF 채택 기준".
-	// Chip 마스터는 Wpx/Hpx 베이크라 높이가 변하는 이 블록에서는 C++ 가 실크기를 주입한다.
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UImage* EquipBlockBG;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UImage* EquipBlockLine;
-
-	// 최대 레벨이면 아이콘+이름+부연 행만 접는다. 요약 줄은 남는다.
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UWidget* EquipNextRow;
-
-	// "Lv.5 강화 시 추가" — 변화가 언제·어떤 성격으로 일어나는지. 품목명 위 눈썹 줄
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* EquipNextLead;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UImage* EquipNextIcon;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* EquipNextName;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* EquipNextDetail;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* EquipSummaryText;
-
-	// 품목별 아이콘 — 디자이너가 Class Defaults 에서 5종 지정(키보드/평면·커브드·세로 모니터/본체).
-	// WBP 에 직렬화되는 소프트 참조라 쿠커가 따라간다 — 별도 폴더 등록 불필요.
-	UPROPERTY(EditDefaultsOnly, Category = "Equipment")
-	TMap<EWorkstationEquipItem, TSoftObjectPtr<UTexture2D>> EquipIcons;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UButtonWidget* RelocateButton;
 
 	// ========== 벤치 섹션 (빈 좌석일 때만) ==========
 
@@ -169,7 +175,7 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UButtonWidget* RecruitButton;
 
-	// 안내 캡션 — 빈 좌석 유무로 문구가 갈린다
+	// 대기 목록 제목 옆 캡션(문구는 WBP) — 대기 직원이 없으면 접는다
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* NoteText;
 
@@ -180,9 +186,6 @@ private:
 	// 착석 직원 ID (-1이면 빈 책상)
 	int32 CurrentEmployeeID = -1;
 
-	// WBP 가 저작한 강화 버튼 라벨. 최대 레벨 「변경」 모드에서 바꿔 쓰고 되돌릴 때 필요하다.
-	FText DefaultUpgradeButtonText;
-
 	UPROPERTY()
 	UEmployeeManager* EmployeeManager;
 
@@ -191,19 +194,15 @@ private:
 	// 책상 실점유 ↔ CurrentEmployeeID 양방향 동기화 (직원창 자리비우기/해고/자동착석이 가려진 채로 바꿔도 칩 일치)
 	void SyncOccupancyFromWorkstation();
 
-	// 헤더 서브 + DeskUpgradeSlot 갱신 (직원 유무와 무관, 항상 표시)
+	// 헤더 제목 + 현재/다음 비교와 등급 강화 갱신 (직원 유무와 무관)
 	void UpdateDeskSection();
+	void UpdateComponentSection();
+	void UpdateComponentSlot(UUpgradeSlot* UpgradeSlot, EWorkstationUpgradeType Type);
+	void HandleBulkModeChanged(EEnhanceBulkMode NewMode);
+	void HandleResourceChanged(EResourceType Type, int64 NewValue);
 
 	// 근무자 칩 채우기 (빈 책상이면 카드째 Collapsed)
 	void UpdateWorkerCard();
-
-	// 강화 슬롯 아래 장비 블록 갱신 (현재 목록 + 다음 단계 변화)
-	void UpdateEquipBlock();
-
-	// 장비 플레이트 SDF 층에 실제 픽셀 크기 주입 (장비 행이 접히면 높이가 바뀐다)
-	void UpdateEquipPlateMaterialSize();
-
-	FVector2D LastEquipPlateSize = FVector2D::ZeroVector;
 
 	// 벤치 섹션 표시/갱신. 빈 좌석 없으면 섹션째 Collapsed
 	void UpdateBenchSection();
@@ -215,6 +214,8 @@ private:
 	void OnBenchCardClicked(int32 EmployeeID);
 
 	void OnUnseatClicked();
+	UFUNCTION() void OnRelocateClicked();
+	bool bPendingPlacementEdit = false;
 	void OnRecruitClicked();
 
 	void FocusCameraOnDesk();
@@ -224,8 +225,12 @@ private:
 
 	// ===== 핸들러 =====
 
-	// UUpgradeSlot 의 강화 버튼 클릭 → 책상 세팅 레벨 업그레이드
+	// 독립 등급 강화 버튼 클릭 → 책상 세팅 레벨 업그레이드
 	void OnDeskUpgradeClicked();
+	void OnProcessingUpgradeClicked();
+	void OnToolsUpgradeClicked();
+	void OnEnvironmentUpgradeClicked();
+	void TryComponentUpgrade(EWorkstationUpgradeType Type, UUpgradeSlot* UpgradeSlot);
 
 	// [직원창] → EmployeeWindow 푸시 (OfficeMainWidget::OnEmployeeButtonClicked 와 동일 경로)
 	void OnEmployeeWindowClicked();

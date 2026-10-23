@@ -21,6 +21,8 @@ struct FFactoryCostCurve
 	float GrowthRate = 1.15f;   // Geometric 전용
 	float LevelScale = 11.0f;   // Power 전용 — 작을수록 초반이 가파르다
 	float Exponent = 3.0f;      // Power 전용
+	float EarlyCostMultiplier = 1.0f;
+	int32 FullCostFromLevel = 1;
 
 	int64 CostAtLevel(int32 Level) const
 	{
@@ -37,6 +39,15 @@ struct FFactoryCostCurve
 		{
 			Raw = static_cast<double>(BaseCost)
 				* FMath::Pow(static_cast<double>(GrowthRate), static_cast<double>(NormalizedLevel));
+		}
+
+		// 처음 몇 레벨의 진입 비용을 낮추고 지정 레벨부터 원래 곡선을 그대로 사용한다.
+		if (FullCostFromLevel > 1 && NormalizedLevel < FullCostFromLevel)
+		{
+			const double Progress = FMath::Clamp(
+				static_cast<double>(NormalizedLevel - 1) / static_cast<double>(FullCostFromLevel - 1), 0.0, 1.0);
+			Raw *= FMath::Lerp(FMath::Clamp(static_cast<double>(EarlyCostMultiplier), 0.0, 1.0),
+				1.0, FMath::Square(Progress));
 		}
 
 		// double→int64 캐스트는 범위 초과 시 UB(음수 비용) — 캐스트 전에 유한성/상한을 검사한다
@@ -120,47 +131,20 @@ public:
 		}
 
 		case EFactoryUpgradeType::HoldProductionAmount:
-			// 생산량: 레벨 = 생산 개수 (1레벨=1개, 10000레벨=10000개)
+			// 1인당 생산능력: 레벨 = 인부 1명이 한 번에 만드는 벽돌 수
 			return static_cast<float>(Level);
 
-		case EFactoryUpgradeType::AutoCollection:
-		{
-			// 곡선 정의역은 레벨1부터 — 0 이하(미초기화)는 레벨1 값으로 클램프 (아래 91 분기가 10.1초로 계산하는 것 방어)
-			if (Level <= 0)
-			{
-				return 10.0f;
-			}
+		case EFactoryUpgradeType::LaborerCount:
+			// 인부 수: 레벨 0 = 1명, 레벨당 1명씩. 공장 단계의 정원은 사용처에서 제한한다.
+			return 1.0f + static_cast<float>(FMath::Max(0, Level));
 
-			// 자동 생산 속도: 레벨1=10초 → 레벨1000=0.001초
-			if (Level == 1)
-			{
-				return 10.0f;
-			}
-			else if (Level <= 91)
-			{
-				// 레벨 1~91: 10초 → 1초 (0.1초씩 감소, 90단계)
-				return 10.0f - ((Level - 1) * 0.1f);
-			}
-			else if (Level <= 541)
-			{
-				// 레벨 92~541: 1초 → 0.1초 (0.002초씩 감소, 450단계)
-				return 1.0f - ((Level - 91) * 0.002f);
-			}
-			else if (Level <= 1000)
-			{
-				// 레벨 542~1000: 0.1초 → 0.001초 (약 0.000216초씩 감소, 459단계)
-				return 0.1f - ((Level - 541) * (0.099f / 459.0f));
-			}
-			else
-			{
-				// 만렙: 0.001초
-				return 0.001f;
-			}
-		}
 
 		case EFactoryUpgradeType::AutoCollectionCapacity:
 			// 자동 수집 용량: 레벨 = 용량 (1레벨=1개, 10000레벨=10000개)
 			return static_cast<float>(Level);
+		case EFactoryUpgradeType::FactoryExpansion:
+			// 공장 전체 생산 배율은 ABrickFactory가 DT_FactoryAppearance에서 조회한다.
+			return 0.f;
 		}
 
 		return 0.0f;
@@ -186,7 +170,7 @@ public:
 			Curve.BaseCost = 150;
 			Curve.LevelScale = 34.0f;
 			break;
-		case EFactoryUpgradeType::AutoCollection:
+		case EFactoryUpgradeType::LaborerCount:
 			Curve.BaseCost = 500;
 			Curve.LevelScale = 5.0f;
 			break;
@@ -222,8 +206,8 @@ public:
 			return 351;  // 효과 곡선이 0.2초로 수렴하는 지점 = 상한
 		case EFactoryUpgradeType::HoldProductionAmount:
 			return 10000;  // 10000개까지
-		case EFactoryUpgradeType::AutoCollection:
-			return 1000;  // 0.001초까지
+		case EFactoryUpgradeType::LaborerCount:
+			return 0;  // 공장 단계의 DT 정원이 구매 상한을 결정한다.
 		case EFactoryUpgradeType::AutoCollectionCapacity:
 			return 10000;  // 10000개까지
 		}

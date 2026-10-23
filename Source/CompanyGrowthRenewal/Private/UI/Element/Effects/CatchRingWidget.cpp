@@ -10,6 +10,8 @@
 #include "Rendering/DrawElements.h"
 #include "Entity/Officeworker/Officeworker.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
+#include "Entity/Officeworker/EmployeeReactionComponent.h"
+#include "Global/GlobalUtilFunctions.h"
 
 namespace
 {
@@ -93,6 +95,8 @@ void UCatchRingWidget::NativeConstruct()
 	if (HitButton)
 	{
 		HitButton->OnClicked.AddDynamic(this, &UCatchRingWidget::HandleRingClicked);
+		HitButton->OnPressed.AddDynamic(this, &UCatchRingWidget::HandleRingPressed);
+		HitButton->OnReleased.AddDynamic(this, &UCatchRingWidget::HandleRingReleased);
 	}
 }
 
@@ -101,13 +105,28 @@ void UCatchRingWidget::NativeDestruct()
 	if (HitButton)
 	{
 		HitButton->OnClicked.RemoveDynamic(this, &UCatchRingWidget::HandleRingClicked);
+		HitButton->OnPressed.RemoveDynamic(this, &UCatchRingWidget::HandleRingPressed);
+		HitButton->OnReleased.RemoveDynamic(this, &UCatchRingWidget::HandleRingReleased);
 	}
+	// 들고 있던 중에 링이 사라지면 손을 뗀 것으로 친다 — 직원이 공중에 남지 않게
+	if (bCarryStartedByPress)
+	{
+		if (UEmployeeReactionComponent* Reaction = CarryReaction.Get())
+		{
+			Reaction->ReleaseCarry();
+		}
+	}
+	UnbindCarry();
+	ResetPressState();
 	Super::NativeDestruct();
 }
 
 void UCatchRingWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	UpdatePressDrag(MyGeometry);
+	SyncCarryBinding();
 
 	// NativePaint 는 const — 상태 갱신은 여기서만. 파열 중엔 펄스 위상을 멈춰 잔상이 맥동에 흔들리지 않게 한다.
 	if (bBursting)
@@ -128,6 +147,19 @@ bool UCatchRingWidget::IsBurstActive() const
 void UCatchRingWidget::SetWorker(AOfficeworker* InWorker)
 {
 	const bool bAnchorChanged = (Worker.Get() != InWorker);
+	if (bAnchorChanged)
+	{
+		// 끌던 직원에게서 링이 떠나면 손을 뗀 것으로 친다(OfficeLayer 는 끄는 링을 재배정하지 않아 보통 오지 않는다)
+		if (bCarryStartedByPress)
+		{
+			if (UEmployeeReactionComponent* Reaction = CarryReaction.Get())
+			{
+				Reaction->ReleaseCarry();
+			}
+		}
+		UnbindCarry();
+		ResetPressState();
+	}
 	Worker = InWorker;
 
 	// 파열이 끝난 링의 재사용(같은 직원이 다시 늘어지는 경우 포함) → 펄스 상태로 복귀.
@@ -146,24 +178,125 @@ void UCatchRingWidget::SetWorker(AOfficeworker* InWorker)
 
 void UCatchRingWidget::HandleRingClicked()
 {
+	// 끌기로 바뀐 누름의 잡기는 착지가 맡는다 — 버튼 위에서 뗐을 때 오는 클릭은 버린다
+	if (bSuppressClick)
+	{
+		bSuppressClick = false;
+		return;
+	}
 	// 이중 탭 가드 — HitButton 을 접으면 슬레이트 히트테스트가 프레임 경계에서 튀므로 플래그로만 막는다.
 	if (bBursting) return;
 
 	// "확 깨움" — 앵커 직원의 피로 차감 + 즉시 업무 복귀. 링은 파열 잔상이 끝난 뒤 OfficeLayer 가 회수.
 	EFatigueSlackPhase CaughtPhase = EFatigueSlackPhase::None;
+	bool bCaught = false;
 	if (AOfficeworker* W = Worker.Get())
 	{
 		if (W->BehaviorComponent)
 		{
 			// ApplyTapRelief 가 ExitSlackToWork 로 페이즈를 None 으로 돌리므로 먼저 읽는다
 			CaughtPhase = W->BehaviorComponent->GetFatigueSlackPhase();
-			W->BehaviorComponent->ApplyTapRelief();
+			bCaught = W->BehaviorComponent->TryManualCatch();
 		}
 	}
 
+	if (!bCaught) return;
 	bBursting = true;
 	BurstElapsed = 0.0f;
 
+	OnCaught.Broadcast(CaughtPhase);
+}
+
+UEmployeeReactionComponent* UCatchRingWidget::GetWorkerReaction() const
+{
+	const AOfficeworker* W = Worker.Get();
+	return W ? W->FindComponentByClass<UEmployeeReactionComponent>() : nullptr;
+}
+
+void UCatchRingWidget::ResetPressState()
+{
+	bPressTracking = false;
+	bCarryStartedByPress = false;
+	bSuppressClick = false;
+	bHiddenForCarry = false;
+	PressAbsolutePosition = FVector2D::ZeroVector;
+}
+
+void UCatchRingWidget::HandleRingPressed()
+{
+	ResetPressState();
+	// 이미 잡혀 파열 중이면 끌기 판정도 하지 않는다
+	bPressTracking = !bBursting;
+	PressAbsolutePosition = UGlobalUtilFunctions::GetPointerAbsolutePosition();
+}
+
+void UCatchRingWidget::HandleRingReleased()
+{
+	bPressTracking = false;
+	if (!bCarryStartedByPress) return;
+	bCarryStartedByPress = false;
+	if (UEmployeeReactionComponent* Reaction = CarryReaction.Get())
+	{
+		Reaction->ReleaseCarry();
+	}
+}
+
+void UCatchRingWidget::UpdatePressDrag(const FGeometry& MyGeometry)
+{
+	if (!bPressTracking) return;
+
+	// 터치 좌표는 눌린 동안만 있다 — 빈 값이면 이번 프레임은 건너뛴다
+	const FVector2D Pointer = UGlobalUtilFunctions::GetPointerAbsolutePosition();
+	if (Pointer.IsNearlyZero()) return;
+	if (PressAbsolutePosition.IsNearlyZero())
+	{
+		PressAbsolutePosition = Pointer;
+		return;
+	}
+	const double MovedUnits = (Pointer - PressAbsolutePosition).Size() / FMath::Max(MyGeometry.Scale, KINDA_SMALL_NUMBER);
+	if (MovedUnits < UEmployeeReactionComponent::CarryDragThresholdUnits) return;
+
+	bPressTracking = false;
+	UEmployeeReactionComponent* Reaction = GetWorkerReaction();
+	// 조는 직원(자리 다운) 링은 끌 수 없다 — 지금처럼 버튼 위에서 떼면 잡힌다
+	if (!Reaction || !Reaction->BeginCarry(true)) return;
+	bCarryStartedByPress = true;
+	bSuppressClick = true;
+	SyncCarryBinding();
+}
+
+void UCatchRingWidget::SyncCarryBinding()
+{
+	UEmployeeReactionComponent* Reaction = GetWorkerReaction();
+	UEmployeeReactionComponent* Carried = (Reaction && Reaction->IsCarryActive()) ? Reaction : nullptr;
+	if (CarryReaction.Get() != Carried)
+	{
+		UnbindCarry();
+		if (Carried)
+		{
+			Carried->OnCarryCaught.AddUObject(this, &UCatchRingWidget::HandleCarryCaught);
+			CarryReaction = Carried;
+		}
+	}
+	bHiddenForCarry = Carried && Carried->IsCarryLifted();
+}
+
+void UCatchRingWidget::UnbindCarry()
+{
+	if (UEmployeeReactionComponent* Reaction = CarryReaction.Get())
+	{
+		Reaction->OnCarryCaught.RemoveAll(this);
+	}
+	CarryReaction.Reset();
+}
+
+void UCatchRingWidget::HandleCarryCaught(EFatigueSlackPhase CaughtPhase)
+{
+	// 끌어서 놓은 잡기도 탭 잡기와 같은 파열·소리·힌트 집계를 탄다(OfficeLayer 가 OnCaught 로 처리)
+	UnbindCarry();
+	bHiddenForCarry = false;
+	bBursting = true;
+	BurstElapsed = 0.0f;
 	OnCaught.Broadcast(CaughtPhase);
 }
 
@@ -187,6 +320,12 @@ int32 UCatchRingWidget::NativePaint(const FPaintArgs& Args, const FGeometry& All
 
 		DrawRing(OutDrawElements, DrawLayer, AllottedGeometry, Center, BurstRadius, BurstColor, BurstThickness);
 		return DrawLayer;
+	}
+
+	// 끄는 동안엔 버튼만 살려 두고(손가락 붙잡기) 링은 그리지 않는다
+	if (IsHoldingCarry())
+	{
+		return MaxLayer;
 	}
 
 	// 0~1 삼각파 맥동 (수축->팽창 반복) — sin 기반으로 부드럽게

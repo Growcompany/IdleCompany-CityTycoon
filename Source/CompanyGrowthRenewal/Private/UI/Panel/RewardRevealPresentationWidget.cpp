@@ -96,20 +96,21 @@ void URewardRevealPresentationWidget::SetupRewards(
 		if (R.ItemType != EItemType::None && R.ItemAmount > 0 && TableMgr)
 		{
 			bool bFound = false;
-			UTexture2D* Icon = TableMgr->GetItemIcon(R.ItemType, bFound);
+			UObject* Icon = TableMgr->GetItemIconResource(R.ItemType, bFound);
 			FShopItemTable ItemRow;
 			const FText ItemName = TableMgr->GetShopItemByItemType(R.ItemType, ItemRow) ? ItemRow.DisplayName : FText::GetEmpty();
 			MakeBox(Icon, FText::Format(NSLOCTEXT("Reward", "Qty", "x{0}"), FText::AsNumber(R.ItemAmount)), ItemName, FText::GetEmpty());
 		}
 	}
 
-	// 등장 시작 — 전부 숨기고 스태거로 띄움
+	// 모달은 받은 보상을 첫 화면부터 전부 보인다 ― 한 장씩 띄우면 앞 몇 장만 보이고 나머지 자리가 비어 「보상이 3개뿐」으로 읽힌다
+	// 토스트 밴드만 카드를 한 장씩 얹는다
 	for (UWidget* Box : Boxes)
 	{
-		if (Box) { Box->SetRenderOpacity(0.f); }
+		if (Box) { Box->SetRenderOpacity(bToastMode ? 0.f : 1.f); }
 	}
-	RevealIndex = 0;
-	RevealTimer = 0.f;
+	RevealIndex = bToastMode ? 0 : Boxes.Num();
+	RevealStartedAt = FPlatformTime::Seconds();
 
 	if (bToastMode)
 	{
@@ -122,8 +123,8 @@ void URewardRevealPresentationWidget::SetupRewards(
 	else
 	{
 		FadeInElapsed = -1.f;
-		bRevealing = Boxes.Num() > 0;
-		AutoCloseElapsed = bRevealing ? -1.f : 0.f;
+		bRevealing = false;
+		AutoCloseElapsed = 0.f;
 	}
 
 	// 카운트다운 초기 표시 (모달 전용 — 토스트 트리엔 CountdownText 가 없다)
@@ -134,7 +135,7 @@ void URewardRevealPresentationWidget::SetupRewards(
 	}
 }
 
-UItemCardSlotWidget* URewardRevealPresentationWidget::MakeBox(UTexture2D* Icon, const FText& Label, const FText& TooltipName, const FText& TooltipDesc, int32 TooltipPrice)
+UItemCardSlotWidget* URewardRevealPresentationWidget::MakeBox(UObject* Icon, const FText& Label, const FText& TooltipName, const FText& TooltipDesc, int32 TooltipPrice)
 {
 	// 토스트 변형이 없으면 원본으로 폴백 (미생성 상태에서도 보상은 뜬다)
 	TSubclassOf<UUserWidget> CardClass = (bToastMode && ToastBoxWidgetClass) ? ToastBoxWidgetClass : BoxWidgetClass;
@@ -147,7 +148,7 @@ UItemCardSlotWidget* URewardRevealPresentationWidget::MakeBox(UTexture2D* Icon, 
 	{
 		return nullptr;
 	}
-	Box->SetIcon(Icon);
+	Box->SetIconResource(Icon);
 	Box->SetLabel(Label);
 
 	// 토스트는 카드 크기/간격/필 색을 코드로 건드리지 않는다 — 전부 변형 WBP 소유.
@@ -179,6 +180,8 @@ void URewardRevealPresentationWidget::NativeConstruct()
 
 void URewardRevealPresentationWidget::NativeDestruct()
 {
+	OnPresentationClosed.Broadcast();
+	OnPresentationClosed.Clear();
 	if (ReceiveButton)
 	{
 		ReceiveButton->OnClicked().RemoveAll(this);
@@ -214,6 +217,7 @@ void URewardRevealPresentationWidget::NativeTick(const FGeometry& MyGeometry, fl
 		}
 		FadeInElapsed = -1.f;
 		bRevealing = Boxes.Num() > 0;
+		RevealStartedAt = FPlatformTime::Seconds();
 		if (!bRevealing)
 		{
 			AutoCloseElapsed = 0.f;
@@ -223,8 +227,9 @@ void URewardRevealPresentationWidget::NativeTick(const FGeometry& MyGeometry, fl
 	// 2) 스태거 등장
 	if (bRevealing)
 	{
-		RevealTimer += InDeltaTime;
-		while (RevealIndex < Boxes.Num() && RevealTimer >= RevealIndex * ActiveStagger)
+		// 실제 흐른 시간으로 센다 ― 프레임이 느리면 위젯 시간(한 프레임 최대 1/8초)이 뒤처져 앞 몇 장만 보이는 순간이 길어진다
+		const double RevealElapsed = FPlatformTime::Seconds() - RevealStartedAt;
+		while (RevealIndex < Boxes.Num() && RevealElapsed >= RevealIndex * ActiveStagger)
 		{
 			if (UWidget* Box = Boxes[RevealIndex])
 			{

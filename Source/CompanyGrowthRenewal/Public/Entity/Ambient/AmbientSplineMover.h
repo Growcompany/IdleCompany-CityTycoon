@@ -8,6 +8,7 @@
 
 class USplineComponent;
 class UStaticMeshComponent;
+class UAmbientVisibilityComponent;
 
 // 강 위 배 등 배경 요소를 스플라인 따라 천천히 루프 이동 + 룩어헤드 조향(각속도 제한) + 미세 보빙시키는
 // 레벨 드레싱 액터. 메시/머티리얼/스케일은 에디터에서 MeshComp 에 지정(정적 액터 승격 시 계승).
@@ -34,6 +35,12 @@ protected:
 	// 배 메시 (에디터에서 SM_container_ship_001 + override M_Color + scale 2 지정)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Ambient")
 	UStaticMeshComponent* MeshComp;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Ambient")
+	TObjectPtr<UAmbientVisibilityComponent> Visibility;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ambient|Visibility")
+	bool bAnimateOnlyWhenVisible = false;
 
 	// 이동 속도 (cm/s) — 은은함 위해 느리게
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ambient", meta = (ClampMin = "0.0"))

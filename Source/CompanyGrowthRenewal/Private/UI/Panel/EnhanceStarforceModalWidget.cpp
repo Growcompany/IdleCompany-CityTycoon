@@ -111,8 +111,7 @@ void UEnhanceStarforceModalWidget::NativeConstruct()
 	if (EnhanceActionButton)
 	{
 		EnhanceActionButton->OnClicked().AddUObject(this, &UEnhanceStarforceModalWidget::OnEnhanceClicked);
-		// 컬러 CTA 라벨 아웃라인 규칙 — 골드 버튼 = 다크골드 #8A5B00 2px
-		EnhanceActionButton->SetTextOutlineEnabled(true, 2.f, FLinearColor(0.254f, 0.105f, 0.f, 1.f));
+		EnhanceActionButton->SetTextOutlineEnabled(false);
 	}
 
 	if (CloseButton)
@@ -544,6 +543,11 @@ void UEnhanceStarforceModalWidget::NativeTick(const FGeometry& MyGeometry, float
 	}
 }
 
+UWidget* UEnhanceStarforceModalWidget::GetCloseButtonWidget() const
+{
+	return CloseButton;
+}
+
 UWidget* UEnhanceStarforceModalWidget::GetEnhanceActionButtonWidget() const
 {
 	return EnhanceActionButton;
@@ -694,7 +698,7 @@ void UEnhanceStarforceModalWidget::EnsureDeltaRows()
 		NameText->SetText(UEmployeeStatsHelper::GetStatDisplayName(static_cast<uint8>(i)));
 		if (NexonRegular)
 		{
-			NameText->SetFont(FSlateFontInfo(NexonRegular, 23));
+			NameText->SetFont(FSlateFontInfo(NexonRegular, 26));
 		}
 		NameText->SetColorAndOpacity(FSlateColor(SfDeltaInkSub));
 		if (UHorizontalBoxSlot* NameSlot = Row->AddChildToHorizontalBox(NameText))
@@ -706,7 +710,7 @@ void UEnhanceStarforceModalWidget::EnsureDeltaRows()
 		UTextBlock* CurText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
 		if (Pretendard)
 		{
-			CurText->SetFont(FSlateFontInfo(Pretendard, 23, FName(TEXT("SemiBold"))));
+			CurText->SetFont(FSlateFontInfo(Pretendard, 26, FName(TEXT("SemiBold"))));
 		}
 		CurText->SetColorAndOpacity(FSlateColor(SfDeltaMute));
 		if (UHorizontalBoxSlot* CurSlot = Row->AddChildToHorizontalBox(CurText))
@@ -718,7 +722,7 @@ void UEnhanceStarforceModalWidget::EnsureDeltaRows()
 		ArrowText->SetText(FText::FromString(TEXT("▶")));
 		if (NexonRegular)
 		{
-			ArrowText->SetFont(FSlateFontInfo(NexonRegular, 15));
+			ArrowText->SetFont(FSlateFontInfo(NexonRegular, 18));
 		}
 		ArrowText->SetColorAndOpacity(FSlateColor(SfArrowGold));
 		if (UHorizontalBoxSlot* ArrowSlot = Row->AddChildToHorizontalBox(ArrowText))
@@ -730,7 +734,7 @@ void UEnhanceStarforceModalWidget::EnsureDeltaRows()
 		UTextBlock* NextText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass());
 		if (Pretendard)
 		{
-			NextText->SetFont(FSlateFontInfo(Pretendard, 27, FName(TEXT("SemiBold"))));
+			NextText->SetFont(FSlateFontInfo(Pretendard, 30, FName(TEXT("SemiBold"))));
 		}
 		NextText->SetColorAndOpacity(FSlateColor(SfDeltaGain));
 		if (UHorizontalBoxSlot* NextSlot = Row->AddChildToHorizontalBox(NextText))
@@ -738,8 +742,8 @@ void UEnhanceStarforceModalWidget::EnsureDeltaRows()
 			NextSlot->SetVerticalAlignment(VAlign_Bottom);
 		}
 
-		// 좌열 0~3 / 우열 4~7 (enum 순서 유지)
-		if (UUniformGridSlot* Cell = DeltaGrid->AddChildToUniformGrid(Row, i % 4, i / 4))
+		// 능력치마다 한 행을 사용한다.
+		if (UUniformGridSlot* Cell = DeltaGrid->AddChildToUniformGrid(Row, i, 0))
 		{
 			Cell->SetHorizontalAlignment(HAlign_Fill);
 		}
@@ -807,6 +811,14 @@ void UEnhanceStarforceModalWidget::Rebuild()
 	SetOddsSegment(OddsSuccessText, OddsSuccessChip, TEXT("성공"), Success);
 	SetOddsSegment(OddsMaintainText, OddsMaintainChip, TEXT("유지"), Maintain);
 	SetOddsSegment(OddsDowngradeText, OddsDowngradeChip, TEXT("하락"), Downgrade);
+	if (OddsMaintainChip)
+	{
+		FSlateBrush MaintainBrush = OddsMaintainChip->Background;
+		MaintainBrush.OutlineSettings.CornerRadii = Downgrade <= KINDA_SMALL_NUMBER
+			? FVector4(0.f, 18.f, 18.f, 0.f)
+			: FVector4(0.f, 0.f, 0.f, 0.f);
+		OddsMaintainChip->SetBrush(MaintainBrush);
+	}
 	if (UWidget* OddsBar = GetWidgetFromName(TEXT("OddsHBox")))
 	{
 		OddsBar->SetVisibility(bCanTry ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
@@ -918,6 +930,10 @@ void UEnhanceStarforceModalWidget::RefreshAffordability()
 	if (EnhanceActionButton)
 	{
 		EnhanceActionButton->SetIsEnabled(bCanTry && bCanAfford);
+	}
+	if (UWidget* CTAGloss = GetWidgetFromName(TEXT("CTAGloss")))
+	{
+		CTAGloss->SetVisibility(bCanTry && bCanAfford ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	}
 	bSheenActive = bCanTry && bCanAfford;
 

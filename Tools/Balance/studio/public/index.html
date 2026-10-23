@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Balance Studio</title>
+<!-- 인라인 SVG 파비콘 — 외부 요청 없이 탭 아이콘을 채운다(없으면 매 로드마다 favicon.ico 404). -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2315202f'/%3E%3Cpath d='M3 11h2.5v2H3zm3.75-4h2.5v6h-2.5zM10.5 3H13v10h-2.5z' fill='%23b9761a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!-- 셸은 정적으로 둔다 — 데이터가 오기 전에도 구조가 보여야 "멈춘 것" 처럼 보이지 않는다.
+     app.mjs 는 이 뼈대를 찾아 개수·상태·내용만 채운다. -->
+<div id="app" data-boot="pending">
+  <div class="shell">
+    <aside class="side">
+      <div class="brand">
+        <b>Balance Studio</b>
+        <span>로컬 밸런스 튜닝</span>
+      </div>
+      <nav class="nav" aria-label="화면">
+        <button type="button" data-view="knobs" aria-current="page"><span>노브 탐색</span><span class="tag" hidden></span></button>
+        <button type="button" data-view="tables"><span>DataTable</span><span class="tag" hidden></span></button>
+        <button type="button" data-view="history"><span>변경 기록</span><span class="tag" hidden></span></button>
+        <button type="button" data-view="verify"><span>검증 결과</span><span class="tag" hidden></span></button>
+        <button type="button" data-view="profiles"><span>프로필 비교</span><span class="tag" hidden></span></button>
+        <button type="button" data-view="environment"><span>환경 상태</span><span class="tag" hidden></span></button>
+      </nav>
+      <div class="side-foot">
+        <div>적용은 백업 · 검증 · 되돌리기를 거칩니다.</div>
+        <div>기록: <code>out/studio/history.jsonl</code></div>
+      </div>
+    </aside>
+
+    <header class="top">
+      <h1 id="project-name">불러오는 중…</h1>
+      <div class="top-chips"></div>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="refresh-data">데이터 재추출</button>
+    </header>
+
+    <main>
+      <p class="boot-note">현재 밸런스 값을 불러오는 중입니다…</p>
+      <noscript><p class="note danger">이 도구는 JavaScript 가 필요합니다.</p></noscript>
+    </main>
+
+    <div class="statusbar" role="status" aria-live="polite">준비하는 중입니다…</div>
+  </div>
+</div>
+<script type="module" src="/app.mjs"></script>
+</body>
+</html>

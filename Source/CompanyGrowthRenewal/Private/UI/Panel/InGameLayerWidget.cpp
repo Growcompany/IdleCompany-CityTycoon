@@ -9,6 +9,8 @@
 #include "UnrealClient.h"         
 #include "GenericPlatform/GenericPlatformMisc.h"
 #include "Misc/CoreDelegates.h"
+#include "EngineUtils.h"
+#include "Entity/Factory/BrickFactory.h"
 
 // UI 관련
 #include "CommonTextBlock.h"
@@ -28,6 +30,7 @@
 #include <UI/Element/Common/BrickCollectWidget.h>
 #include "UI/Element/Effects/FloatingNumberWidget.h"
 #include "UI/Element/Effects/SelectionChevronWidget.h"
+#include "UI/Element/Effects/FactoryBoostWidget.h"
 #include "Global/GlobalUtilFunctions.h"
 #include <Kismet/GameplayStatics.h>
 #include <Blueprint/WidgetLayoutLibrary.h>
@@ -46,9 +49,11 @@
 #include "Entity/Building/BuildingBaseActor.h"
 #include "UI/Element/Chat/BubbleContainerWidget.h"
 #include "UI/Element/Common/CoinFlyoutContainerWidget.h"
+#include "UI/Element/Common/IncomeStreamGate.h"
 #include "Table/ResourceInfo.h"
 #include "Player/MainMapPlayerController.h"
 #include "Manager/SpawnManager.h"
+#include "Manager/CityAcquisitionManager.h"
 #include "Entity/Plot/CityPlotActor.h"
 #include "Table/CityPlotData.h"
 #include "UI/Element/Plot/PlotPriceBadgeWidget.h"
@@ -60,6 +65,7 @@
 #include "Player/PlayerCamera.h"
 #include "Player/Components/MovementInputHandler.h"
 #include "Player/Components/PlacementHandler.h"
+#include "Player/Components/InteractableInputHandler.h"
 
 
 void UInGameLayerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -68,6 +74,9 @@ void UInGameLayerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 
 	UpdateScreenRings(InDeltaTime);
 	UpdateSelectionMarker(InDeltaTime);
+
+	// 홀드 중 캔버스 크기가 바뀌면 최초 누름점의 비율로 위치를 다시 맞춘다.
+	UpdateFactoryBoostPosition();
 
 	// 가격 배지 위치는 매 틱 재투영(카메라 추적) — 부지는 고정이지만 화면 위 위치는 카메라 이동마다 바뀌므로 필수.
 	// 멤버십/가격/자금색은 아래 주기 타이머 + 소유 변경 이벤트에서만 갱신(매 틱 DT 조회/문자열 생성 회피).
@@ -135,6 +144,16 @@ void UInGameLayerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 		RefreshVaultGauges();
 	}
 
+	// 수익 팝업은 박자로만 나간다 — 적립은 매니저 1초 틱이고 여기서 표시만 묶는다.
+	// ⚠ 게이지 재평가보다 뒤에 둔다: 같은 프레임에 게이지가 새로 뜨는 건물이면 금액이 먼저 떠올라
+	// "게이지 없는 자리에서 돈이 나오는" 한 프레임이 생긴다.
+	IncomeBeatTimer += InDeltaTime;
+	if (IncomeBeatTimer >= IncomeBeatInterval)
+	{
+		IncomeBeatTimer = 0.0f;
+		FlushPendingIncomeStream();
+	}
+
 	FlushPendingAmountPopups(InDeltaTime);
 }
 
@@ -146,8 +165,6 @@ namespace
 	constexpr float TapRingDuration = 0.5f;
 	constexpr float TapRingStartRadius = 18.f;
 	constexpr float TapRingEndRadius = 78.f;
-	constexpr float GaugeRadius = 220.f;
-	constexpr float GaugePopDuration = 0.25f;
 
 	// 글로우 텍스처의 링이 라인 반경과 겹치도록 박스 확대 배율 (ring_a 기준, 시각루프로 튜닝)
 	constexpr float RingGlowScale = 1.35f;
@@ -175,18 +192,150 @@ void UInGameLayerWidget::SpawnTapRing()
 	ActiveRings.Add(Ring);
 }
 
-void UInGameLayerWidget::BeginHoldPulse(float CycleSeconds)
+void UInGameLayerWidget::BeginFactoryBoost(float Multiplier)
 {
-	bHoldPulseActive = true;
-	HoldPulseElapsed = 0.f;
-	HoldPulseCycle = FMath::Max(CycleSeconds, 0.05f);
-	GaugePopElapsed = -1.f;
-	HoldPulseAbsPos = UGlobalUtilFunctions::GetPointerAbsolutePosition();
+	if (!InGameCanvas || !TableMgr)
+	{
+		return;
+	}
+
+	if (!FactoryBoostWidget)
+	{
+		TSubclassOf<UUserWidget> BoostClass = TableMgr->GetWidgetClass(EWidgetType::FactoryBoost);
+		if (!BoostClass)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[InGameLayer] FactoryBoost 위젯 클래스 미등록(DT_WidgetClass 행 + UIE_FactoryBoost 확인)."));
+			return;
+		}
+
+		FactoryBoostWidget = CreateWidget<UFactoryBoostWidget>(this, BoostClass);
+		if (!FactoryBoostWidget)
+		{
+			return;
+		}
+
+		if (UCanvasPanelSlot* BoostSlot = InGameCanvas->AddChildToCanvas(FactoryBoostWidget))
+		{
+			BoostSlot->SetAutoSize(true);
+			BoostSlot->SetAlignment(FVector2D(0.5f, 1.0f));
+			BoostSlot->SetZOrder(50);
+		}
+	}
+
+	bool bHasPressAnchor = false;
+	if (const APlayerController* PC = GetOwningPlayer())
+	{
+		if (const APlayerCamera* Camera = Cast<APlayerCamera>(PC->GetPawn()))
+		{
+			if (const UInteractableInputHandler* Handler = Camera->InteractableInputHandler)
+			{
+				bHasPressAnchor = Handler->TryGetFactoryHoldAnchor(FactoryBoostAnchorAbsolute);
+			}
+		}
+	}
+	if (!bHasPressAnchor)
+	{
+		FactoryBoostAnchorAbsolute = UGlobalUtilFunctions::GetPointerAbsolutePosition();
+	}
+	bFactoryBoostAnchorResolved = false;
+	FactoryBoostLastCanvasSize = FVector2D::ZeroVector;
+
+	FactoryBoostWidget->BeginBoost(Multiplier, FactoryBoostAnchorAbsolute);
+	FactoryBoostWidget->ForceLayoutPrepass();
+	UpdateFactoryBoostPosition();
 }
 
-void UInGameLayerWidget::EndHoldPulse()
+void UInGameLayerWidget::EndFactoryBoost()
 {
-	bHoldPulseActive = false;
+	bFactoryBoostAnchorResolved = false;
+	FactoryBoostLastCanvasSize = FVector2D::ZeroVector;
+	if (FactoryBoostWidget)
+	{
+		FactoryBoostWidget->EndBoost();
+	}
+}
+
+void UInGameLayerWidget::UpdateFactoryBoostPosition()
+{
+	if (!FactoryBoostWidget || !InGameCanvas ||
+		FactoryBoostWidget->GetVisibility() == ESlateVisibility::Collapsed)
+	{
+		return;
+	}
+
+	const FGeometry CanvasGeo = InGameCanvas->GetCachedGeometry();
+	const FVector2D CanvasSize = CanvasGeo.GetLocalSize();
+	if (CanvasSize.X <= 48.f || CanvasSize.Y <= 48.f)
+	{
+		return;
+	}
+
+	if (!bFactoryBoostAnchorResolved)
+	{
+		const FVector2D CanvasLocal = CanvasGeo.AbsoluteToLocal(FactoryBoostAnchorAbsolute);
+		FactoryBoostAnchorNormalized = FVector2D(CanvasLocal.X / CanvasSize.X, CanvasLocal.Y / CanvasSize.Y);
+		bFactoryBoostAnchorResolved = true;
+	}
+	if (FactoryBoostLastCanvasSize.Equals(CanvasSize, 0.5f))
+	{
+		return;
+	}
+
+	FactoryBoostWidget->ForceLayoutPrepass();
+	const FVector2D DesiredSize = FactoryBoostWidget->GetDesiredSize();
+	if (DesiredSize.X <= 0.f || DesiredSize.Y <= 0.f)
+	{
+		return;
+	}
+
+	constexpr float ScreenMargin = 24.f;
+	constexpr float FingerGap = 100.f;
+	const float Scale = FMath::Min(1.f, FMath::Min(
+		(CanvasSize.X - 2.f * ScreenMargin) / DesiredSize.X,
+		(CanvasSize.Y - 2.f * ScreenMargin) / DesiredSize.Y));
+	const FVector2D VisualSize = DesiredSize * Scale;
+	const FVector2D PressPos(
+		FactoryBoostAnchorNormalized.X * CanvasSize.X,
+		FactoryBoostAnchorNormalized.Y * CanvasSize.Y);
+	const float HalfWidth = VisualSize.X * 0.5f;
+	const float MinX = ScreenMargin + HalfWidth;
+	const float MaxX = CanvasSize.X - ScreenMargin - HalfWidth;
+	const float MinBottom = ScreenMargin + VisualSize.Y;
+	const float MaxBottom = CanvasSize.Y - ScreenMargin;
+	float CenterX = FMath::Clamp(PressPos.X, MinX, MaxX);
+	float BottomY = 0.f;
+
+	if (PressPos.Y - FingerGap >= MinBottom)
+	{
+		BottomY = PressPos.Y - FingerGap;
+	}
+	else if (PressPos.Y + FingerGap + VisualSize.Y <= MaxBottom)
+	{
+		BottomY = PressPos.Y + FingerGap + VisualSize.Y;
+	}
+	else
+	{
+		BottomY = FMath::Clamp(PressPos.Y + VisualSize.Y * 0.5f, MinBottom, MaxBottom);
+		if (PressPos.X + FingerGap + VisualSize.X <= CanvasSize.X - ScreenMargin)
+		{
+			CenterX = PressPos.X + FingerGap + HalfWidth;
+		}
+		else if (PressPos.X - FingerGap - VisualSize.X >= ScreenMargin)
+		{
+			CenterX = PressPos.X - FingerGap - HalfWidth;
+		}
+	}
+
+	FactoryBoostWidget->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+	FactoryBoostWidget->SetRenderScale(FVector2D(Scale, Scale));
+	if (UCanvasPanelSlot* BoostSlot = Cast<UCanvasPanelSlot>(FactoryBoostWidget->Slot))
+	{
+		const float LayoutBottom = FMath::Clamp(BottomY, MinBottom, MaxBottom)
+			+ (DesiredSize.Y - VisualSize.Y) * 0.5f;
+		BoostSlot->SetPosition(FVector2D(CenterX, LayoutBottom));
+	}
+	FactoryBoostLastCanvasSize = CanvasSize;
 }
 
 void UInGameLayerWidget::SetSelectedBuildingMarker(ABuildingBaseActor* Building)
@@ -344,30 +493,6 @@ void UInGameLayerWidget::UpdateScreenRings(float DeltaTime)
 		}
 	}
 
-	if (bHoldPulseActive)
-	{
-		// 진행도 wrap = 한 바퀴 완료 = 생산 틱 (타이머와 같은 시점에 시작한 선형 진행이라 동기)
-		const float PrevProgress = FMath::Fmod(HoldPulseElapsed, HoldPulseCycle) / HoldPulseCycle;
-		HoldPulseElapsed += DeltaTime;
-		const float NewProgress = FMath::Fmod(HoldPulseElapsed, HoldPulseCycle) / HoldPulseCycle;
-		if (NewProgress < PrevProgress)
-		{
-			GaugePopElapsed = 0.f;
-		}
-
-		// 홀드 중 손가락/커서 위치 추적
-		HoldPulseAbsPos = UGlobalUtilFunctions::GetPointerAbsolutePosition();
-	}
-
-	if (GaugePopElapsed >= 0.f)
-	{
-		GaugePopElapsed += DeltaTime;
-		if (GaugePopElapsed >= GaugePopDuration)
-		{
-			GaugePopElapsed = -1.f;
-		}
-	}
-
 }
 
 namespace
@@ -421,7 +546,7 @@ int32 UInGameLayerWidget::NativePaint(const FPaintArgs& Args, const FGeometry& A
 {
 	int32 MaxLayer = Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
 
-	if (ActiveRings.Num() == 0 && !bHoldPulseActive && GaugePopElapsed < 0.f)
+	if (ActiveRings.Num() == 0)
 	{
 		return MaxLayer;
 	}
@@ -445,36 +570,6 @@ int32 UInGameLayerWidget::NativePaint(const FPaintArgs& Args, const FGeometry& A
 		DrawScreenRing(OutDrawElements, RingLayer, AllottedGeometry, LocalCenter,
 			FMath::Lerp(TapRingStartRadius, TapRingEndRadius, E),
 			FLinearColor(1.f, 0.95f, 0.8f, (1.f - T) * 0.9f), FMath::Lerp(5.f, 2.f, T));
-	}
-
-	if (bHoldPulseActive)
-	{
-		// 홀드: 생산 주기 라디얼 게이지 — 옅은 바탕 링 + 12시부터 시계방향으로 차오르는 호
-		const FVector2D LocalCenter = DesktopGeo.AbsoluteToLocal(HoldPulseAbsPos);
-		DrawScreenGlow(OutDrawElements, GlowLayer, AllottedGeometry, LocalCenter,
-			GaugeRadius * RingGlowScale, &RingGlowBrush, FLinearColor(1.f, 0.9f, 0.7f, 0.12f));
-		DrawScreenRing(OutDrawElements, RingLayer, AllottedGeometry, LocalCenter,
-			GaugeRadius, FLinearColor(1.f, 0.9f, 0.7f, 0.22f), 5.f);
-
-		const float Progress = FMath::Fmod(HoldPulseElapsed, HoldPulseCycle) / HoldPulseCycle;
-		if (Progress > KINDA_SMALL_NUMBER)
-		{
-			DrawScreenArc(OutDrawElements, RingLayer, AllottedGeometry, LocalCenter,
-				GaugeRadius, -PI / 2.f, Progress * 2.f * PI, FLinearColor(1.f, 0.9f, 0.7f, 0.95f), 10.f);
-		}
-	}
-
-	if (GaugePopElapsed >= 0.f)
-	{
-		// 한 바퀴 완료(생산 틱) 팝 — 게이지에서 밝게 퍼지는 링
-		const FVector2D LocalCenter = DesktopGeo.AbsoluteToLocal(HoldPulseAbsPos);
-		const float T = FMath::Clamp(GaugePopElapsed / GaugePopDuration, 0.f, 1.f);
-		DrawScreenGlow(OutDrawElements, GlowLayer, AllottedGeometry, LocalCenter,
-			FMath::Lerp(GaugeRadius, GaugeRadius + 110.f, RingEaseOutCubic(T)) * RingGlowScale,
-			&RingGlowBrush, FLinearColor(1.f, 0.97f, 0.85f, (1.f - T) * 0.5f));
-		DrawScreenRing(OutDrawElements, RingLayer, AllottedGeometry, LocalCenter,
-			FMath::Lerp(GaugeRadius, GaugeRadius + 110.f, RingEaseOutCubic(T)),
-			FLinearColor(1.f, 0.97f, 0.85f, (1.f - T) * 0.9f), 7.f);
 	}
 
 	return RingLayer;
@@ -595,17 +690,36 @@ void UInGameLayerWidget::NativeConstruct()
 	{
 		OpMgr->OnOperationCompleted.AddDynamic(this, &ThisClass::OnOperationCompletedForBubble);
 		OpMgr->OnOperationStarted.AddDynamic(this, &ThisClass::OnOperationStartedForBubble);
-		OpMgr->OnRevenueCollected.AddDynamic(this, &ThisClass::OnRevenueCollectedForBubble);
+		OpMgr->OnBuildingIncomeStreamed.AddUObject(this, &UInGameLayerWidget::HandleBuildingIncomeStreamed);
+	}
 
-		// 창고 구독은 이 하나뿐 — 게이트 없는 형제를 같이 붙이면 게이트가 무의미해진다
-		// (해제는 아래 NativeDestruct 블록과 1:1 쌍)
-		OpMgr->OnWarehouseUpdated.AddDynamic(this, &ThisClass::HandleWarehouseUpdated);
+	// 수거 UI 가 없어졌으므로 진입 시 남은 금고 잔액을 조용히 회수한다.
+	// 도달 경로: 치트·구버전 세이브·60초 미만 재접속(오프라인 리포트가 안 뜨는 복귀).
+	// 버블 평가보다 먼저 비워야 VaultFull 잔재가 한 프레임 뜨지 않는다.
+	// ⚠ 보류 중인 리포트가 있으면 양보한다 — 같은 next-tick 람다에서 이 레이어가 리포트보다 먼저 만들어지므로
+	//   여기서 비우면 리포트의 [모두 수령] 이 빈 금고를 만나 "수익이 없습니다" 토스트를 띄우고 코인이 안 난다.
+	const USaveLoadManager* EntrySaveMgr = GI->GetSubsystem<USaveLoadManager>();
+	const bool bReportOwnsCollection = EntrySaveMgr && EntrySaveMgr->HasPendingOfflineReport();
+	if (UProjectOperationManager* EntryOpMgr = GI->GetSubsystem<UProjectOperationManager>())
+	{
+		if (!bReportOwnsCollection && EntryOpMgr->HasAnyStoredRevenue())
+		{
+			EntryOpMgr->CollectAllStoredRevenue();
+		}
 	}
 
 	// 초기 버블 상태 평가
 	EvaluateAllBuildingBubbles();
 
 	// 인접-미소유 부지 가격 배지 초기 평가 (시작 스폰/세이브 복원 직후 — 상시 표시).
+	if (UCityAcquisitionManager* Acquisition = GetWorld()->GetSubsystem<UCityAcquisitionManager>())
+	{
+		Acquisition->OnCompanyCleared.Remove(PlotCompanyClearedHandle);
+		PlotCompanyClearedHandle = Acquisition->OnCompanyCleared.AddWeakLambda(this, [this](int32)
+		{
+			RefreshPlotPriceBadges();
+		});
+	}
 	RefreshPlotPriceBadges();
 
 	if (RevenueRateChip)
@@ -677,6 +791,16 @@ void UInGameLayerWidget::NativeConstruct()
 
 void UInGameLayerWidget::NativeDestruct()
 {
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(IconRecalcTimerHandle);
+		if (UCityAcquisitionManager* Acquisition = World->GetSubsystem<UCityAcquisitionManager>())
+		{
+			Acquisition->OnCompanyCleared.Remove(PlotCompanyClearedHandle);
+		}
+	}
+	PlotCompanyClearedHandle.Reset();
+
 	// UIManagerSubsystem 구독 해제
 	if (UUIManagerSubsystem* UIMgr = GetWorld()
 		->GetGameInstance()
@@ -722,10 +846,7 @@ void UInGameLayerWidget::NativeDestruct()
 		{
 			OpMgr->OnOperationCompleted.RemoveDynamic(this, &ThisClass::OnOperationCompletedForBubble);
 			OpMgr->OnOperationStarted.RemoveDynamic(this, &ThisClass::OnOperationStartedForBubble);
-			OpMgr->OnRevenueCollected.RemoveDynamic(this, &ThisClass::OnRevenueCollectedForBubble);
-
-			// 위 NativeConstruct AddDynamic 과 1:1 쌍
-			OpMgr->OnWarehouseUpdated.RemoveDynamic(this, &ThisClass::HandleWarehouseUpdated);
+			OpMgr->OnBuildingIncomeStreamed.RemoveAll(this);
 		}
 
 		// 본사 레벨업 구독 해제
@@ -733,6 +854,14 @@ void UInGameLayerWidget::NativeDestruct()
 		{
 			SaveMgr->OnHQLevelUp.RemoveDynamic(this, &UInGameLayerWidget::HandleHQLevelUp);
 		}
+	}
+
+	// 상주 스트리밍 컨테이너 정리 — 위 EnsureStreamCoinFlyout 의 1회 생성과 쌍.
+	// GameInstance 가드 밖에 둔다 — 위젯 정리는 구독 해제와 생명주기를 공유하지 않는다(GI 가 null 인 종료 경로에서도 떼야 한다).
+	if (StreamCoinFlyout)
+	{
+		StreamCoinFlyout->RemoveFromParent();
+		StreamCoinFlyout = nullptr;
 	}
 
 	if (ProfileImageBtn)
@@ -786,7 +915,7 @@ void UInGameLayerWidget::UpdateIconScreenPos()
 
 	World->GetTimerManager().SetTimer(
 		IconRecalcTimerHandle,
-		[this]()
+		FTimerDelegate::CreateWeakLambda(this, [this]()
 		{
 			for (auto& Pair : ResourceWidgets)
 			{
@@ -795,7 +924,7 @@ void UInGameLayerWidget::UpdateIconScreenPos()
 					Pair.Value->ForceRecalculateIconPos();
 				}
 			}
-		},
+		}),
 		0.15f,
 		false
 	);
@@ -806,7 +935,7 @@ void UInGameLayerWidget::HandleResourceChanged(EResourceType Type, int64 NewValu
 	// 코인 플라이아웃 중에는 Money 업데이트 억제 (점진적 표시 중)
 	if (bSuppressMoneyUpdate && Type == EResourceType::Money) return;
 
-	UE_LOG(LogTemp, Warning, TEXT("[InGameLayerWidget] HandleResourceChanged: Type=%d, NewValue=%lld"),
+	UE_LOG(LogTemp, Verbose, TEXT("[InGameLayerWidget] HandleResourceChanged: Type=%d, NewValue=%lld"),
 		(int32)Type, NewValue);
 
 	if (UResourceWidget** FoundWidget = ResourceWidgets.Find(Type))
@@ -819,7 +948,7 @@ void UInGameLayerWidget::HandleResourceChanged(EResourceType Type, int64 NewValu
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("[InGameLayerWidget] Failed to find widget for ResourceType=%d"), (int32)Type);
+		UE_LOG(LogTemp, Verbose, TEXT("[InGameLayerWidget] ResourceType=%d has no HUD counter"), (int32)Type);
 	}
 }
 
@@ -843,6 +972,41 @@ void UInGameLayerWidget::SpawnGainPopup(EResourceType Type, int64 DeltaAmount)
 void UInGameLayerWidget::SpawnSpendPopup(EResourceType Type, int64 DeltaAmount)
 {
 	SpawnAmountPopup(Type, DeltaAmount, /*bSpend=*/true);
+}
+
+void UInGameLayerWidget::SpawnWorldMoneyIncome(const FVector& WorldLocation, int64 Amount)
+{
+	APlayerController* PC = GetOwningPlayer();
+	if (Amount <= 0 || !PC || !InGameCanvas || !UIE_Resource_Money)
+	{
+		return;
+	}
+
+	FVector2D ViewportPosition;
+	if (!UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(PC, WorldLocation, ViewportPosition, true))
+	{
+		return;
+	}
+	const FGeometry ViewportGeometry = UWidgetLayoutLibrary::GetViewportWidgetGeometry(this);
+	const FGeometry CanvasGeometry = InGameCanvas->GetCachedGeometry();
+	const FVector2D SourceAbsolute = ViewportGeometry.LocalToAbsolute(ViewportPosition);
+	if (!IsIncomePopupSourceVisible(ViewportPosition, ViewportGeometry.GetLocalSize())
+		|| !IsIncomePopupSourceVisible(CanvasGeometry.AbsoluteToLocal(SourceAbsolute), CanvasGeometry.GetLocalSize()))
+	{
+		return;
+	}
+
+	EnsureStreamCoinFlyout(PC);
+	if (!StreamCoinFlyout)
+	{
+		return;
+	}
+	UIE_Resource_Money->CalculateIconScreenPos();
+	StreamCoinFlyout->StreamCoinDrawSize = ResolveStreamCoinDrawSize(
+		GetVaultGaugeZoomValue(), StreamCoinSizeNear, StreamCoinSizeFar,
+		StreamCoinZoomNear, StreamCoinZoomFar);
+	StreamCoinFlyout->SpawnIncomeText(SourceAbsolute, Amount, CachedStreamCoinTexture, CachedStreamCoinColor);
+	StreamCoinFlyout->SpawnStreamCoin(SourceAbsolute, UIE_Resource_Money->GetCachedIconScreenPos(), CachedStreamCoinTexture);
 }
 
 void UInGameLayerWidget::SpawnAmountPopup(EResourceType Type, int64 Amount, bool bSpend)
@@ -933,20 +1097,95 @@ namespace
 	constexpr double BrickLandSoundResetSeconds = 0.8;
 }
 
-void UInGameLayerWidget::SpawnBrickCollectAt(FVector2D Startpos, EResourceType TargetResourceType, int CollectAmount)
+void UInGameLayerWidget::PlayBrickCollectionFeedback(int32 Amount, float LandSoundVolume)
 {
-	if (!EffectCanvas) return;
+	if (Amount <= 0) return;
 
+	if (UIE_Resource_Brick)
+	{
+		UIE_Resource_Brick->PlayBump(0.05f);
+	}
+	SpawnGainPopup(EResourceType::Brick, Amount);
+
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (USoundManagerSubsystem* SM = GI->GetSubsystem<USoundManagerSubsystem>())
+		{
+			SM->PlayUISoundWithParams(CGUISoundTags::RewardBrick, LandSoundVolume, FMath::FRandRange(0.94f, 1.06f));
+		}
+	}
+}
+
+void UInGameLayerWidget::SpawnBrickCollectAt(FVector2D Startpos, EResourceType TargetResourceType, int CollectAmount, bool bSourceProjected)
+{
+	if (CollectAmount <= 0) return;
+
+	// 착지음 감쇠는 화면 안 비행과 화면 밖 즉시 적립이 같은 생산 배치 순서를 공유한다.
+	const double NowSeconds = GetWorld() ? static_cast<double>(GetWorld()->GetTimeSeconds()) : 0.0;
+	if (NowSeconds - LastBrickLandSoundTime >= BrickLandSoundResetSeconds)
+	{
+		BrickLandSoundVolume = 1.0f;
+	}
+	else
+	{
+		BrickLandSoundVolume = FMath::Max(BrickLandSoundVolume * BrickLandSoundDecayMult, BrickLandSoundMinVolume);
+	}
+	LastBrickLandSoundTime = NowSeconds;
+
+	auto CreditWithoutFlight = [this, CollectAmount]()
+	{
+		if (UGameInstance* GI = GetGameInstance())
+		{
+			if (UResourceItemManager* RMgr = GI->GetSubsystem<UResourceItemManager>())
+			{
+				RMgr->CollectFactoryBricks(CollectAmount);
+			}
+		}
+		PlayBrickCollectionFeedback(CollectAmount, BrickLandSoundVolume);
+	};
+
+	if (!bSourceProjected || !EffectCanvas || !TableMgr)
+	{
+		CreditWithoutFlight();
+		return;
+	}
+
+	const FGeometry ViewportGeo = UWidgetLayoutLibrary::GetViewportWidgetGeometry(this);
+	const FGeometry EffectCanvasGeo = EffectCanvas->GetCachedGeometry();
+	const FVector2D ViewportSize = ViewportGeo.GetLocalSize();
+	const FVector2D CanvasSize = EffectCanvasGeo.GetLocalSize();
+	if (ViewportSize.X <= 0.f || ViewportSize.Y <= 0.f || CanvasSize.X <= 0.f || CanvasSize.Y <= 0.f
+		|| !FMath::IsFinite(Startpos.X) || !FMath::IsFinite(Startpos.Y)
+		|| Startpos.X < 0.f || Startpos.Y < 0.f || Startpos.X >= ViewportSize.X || Startpos.Y >= ViewportSize.Y)
+	{
+		CreditWithoutFlight();
+		return;
+	}
+
+	// 뷰포트 로컬 시작점을 풀스크린 이펙트 캔버스의 로컬 좌표로 옮긴다.
+	const FVector2D CanvasLocalStart = EffectCanvasGeo.AbsoluteToLocal(ViewportGeo.LocalToAbsolute(Startpos));
+	if (!FMath::IsFinite(CanvasLocalStart.X) || !FMath::IsFinite(CanvasLocalStart.Y)
+		|| CanvasLocalStart.X < 0.f || CanvasLocalStart.Y < 0.f
+		|| CanvasLocalStart.X >= CanvasSize.X || CanvasLocalStart.Y >= CanvasSize.Y)
+	{
+		CreditWithoutFlight();
+		return;
+	}
+
+	// 잡부 생산이 상시 경로가 돼(ABrickFactory::OnLaborerEntered) 레벨 전환·로딩 중에도 불린다 —
+	// 호출부 HarvestBricksAt 가 같은 이유로 check() 를 걷어냈으므로 여기도 조용히 접는다.
+	// 위젯 등록 행은 DT 전체 교체로 실제로 사라진 적이 있다(2026-09-24, 14건).
+	// 같은 파일의 PlotPriceBadge(:1249)·VaultGauge(:1494) 호출부와 동일한 처리다.
 	TSubclassOf<UUserWidget> WidgetClass = TableMgr->GetWidgetClass(EWidgetType::BrickCollection);
-	check(WidgetClass);
+	if (!WidgetClass)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[InGameLayer] BrickCollection 위젯 클래스 없음 — 수집 연출 생략(DT_WidgetClass 행 확인)"));
+		CreditWithoutFlight();
+		return;
+	}
 
-	FGeometry EffectCanvasGeo = EffectCanvas->GetCachedGeometry();
-
-	// 뷰포트 시작점과 HUD 절대 타깃을 풀스크린 이펙트 레이어의 로컬 좌표로 통일한다.
-	FVector2D CanvasLocalStart = EffectCanvasGeo.AbsoluteToLocal(
-		UWidgetLayoutLibrary::GetViewportWidgetGeometry(this).LocalToAbsolute(Startpos)
-	);
-
+	// HUD 아이콘 절대 좌표도 같은 이펙트 캔버스 로컬로 옮긴다.
 	FVector2D TargetAbsPos = FVector2D::ZeroVector;
 	if (const UResourceWidget* const* TargetWidget = ResourceWidgets.Find(TargetResourceType))
 	{
@@ -962,6 +1201,33 @@ void UInGameLayerWidget::SpawnBrickCollectAt(FVector2D Startpos, EResourceType T
 	const int32 PerIcon = CollectAmount / IconCount;
 	const int32 Remainder = CollectAmount - PerIcon * IconCount;
 
+	TArray<UBrickCollectWidget*> BrickWidgets;
+	BrickWidgets.Reserve(IconCount);
+	for (int32 i = 0; i < IconCount; ++i)
+	{
+		UBrickCollectWidget* BrickW = CreateWidget<UBrickCollectWidget>(this, WidgetClass);
+		if (!BrickW) break;
+
+		UCanvasPanelSlot* SlotIcon = EffectCanvas->AddChildToCanvas(BrickW);
+		if (!SlotIcon) break;
+		BrickWidgets.Add(BrickW);
+
+		SlotIcon->SetAutoSize(true);
+		SlotIcon->SetAnchors(FAnchors(0, 0, 0, 0));
+		SlotIcon->SetAlignment(FVector2D(0.5f, 0.5f));
+		SlotIcon->SetPosition(CanvasLocalStart);
+	}
+
+	if (BrickWidgets.Num() != IconCount)
+	{
+		for (UBrickCollectWidget* BrickW : BrickWidgets)
+		{
+			BrickW->RemoveFromParent();
+		}
+		CreditWithoutFlight();
+		return;
+	}
+
 	if (UGameInstance* GI = GetGameInstance())
 	{
 		if (USoundManagerSubsystem* SM = GI->GetSubsystem<USoundManagerSubsystem>())
@@ -970,33 +1236,11 @@ void UInGameLayerWidget::SpawnBrickCollectAt(FVector2D Startpos, EResourceType T
 		}
 	}
 
-	// 착지음 감쇠 볼륨 산출 — 배치(=착지 1발) 간격이 리셋 윈도우보다 짧으면 연쇄 감쇠.
-	// 비행시간이 상수라 스폰 간격 = 착지 간격 (스폰 시점 판정으로 충분).
-	const double NowSeconds = GetWorld() ? static_cast<double>(GetWorld()->GetTimeSeconds()) : 0.0;
-	if (NowSeconds - LastBrickLandSoundTime >= BrickLandSoundResetSeconds)
-	{
-		BrickLandSoundVolume = 1.0f;
-	}
-	else
-	{
-		BrickLandSoundVolume = FMath::Max(BrickLandSoundVolume * BrickLandSoundDecayMult, BrickLandSoundMinVolume);
-	}
-	LastBrickLandSoundTime = NowSeconds;
-
 	for (int32 i = 0; i < IconCount; ++i)
 	{
-		UBrickCollectWidget* BrickW = CreateWidget<UBrickCollectWidget>(this, WidgetClass);
-		if (!BrickW) continue;
-
-		UCanvasPanelSlot* SlotIcon = EffectCanvas->AddChildToCanvas(BrickW);
-		if (!SlotIcon) continue;
-
-		SlotIcon->SetAutoSize(true);
-		SlotIcon->SetAnchors(FAnchors(0, 0, 0, 0));
-		SlotIcon->SetAlignment(FVector2D(0.5f, 0.5f));
-		SlotIcon->SetPosition(CanvasLocalStart);
-
 		const bool bLast = (i == IconCount - 1);
+		UCanvasPanelSlot* SlotIcon = Cast<UCanvasPanelSlot>(BrickWidgets[i]->Slot);
+		UBrickCollectWidget* BrickW = BrickWidgets[i];
 		BrickW->InitCollect(CanvasLocalStart, CanvasLocalTarget, SlotIcon, bLast ? PerIcon + Remainder : PerIcon,
 			i * BrickBurstStagger, bLast, CollectAmount, BrickLandSoundVolume);
 	}
@@ -1115,6 +1359,7 @@ void UInGameLayerWidget::EvaluateAllBuildingBubbles()
 	{
 		BubbleContainer->UpdateBubbleForBuilding(Entry.BuildingIndex, Entry.Type);
 	}
+
 }
 
 // ============================================================
@@ -1218,6 +1463,7 @@ void UInGameLayerWidget::RefreshPlotPriceBadges()
 
 	UResourceItemManager* RMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UResourceItemManager>() : nullptr;
 	const int64 OwnedMoney = RMgr ? RMgr->GetResourceAmount(EResourceType::Money) : 0;
+	const UCityAcquisitionManager* Acquisition = World->GetSubsystem<UCityAcquisitionManager>();
 
 	// 인접-미소유 부지만 배지 표시(원본 인접 마커와 동일 정의 — 소유 변경 시 한 겹씩 바깥으로 번짐).
 	TArray<ACityPlotActor*> AdjacentPlots;
@@ -1245,6 +1491,7 @@ void UInGameLayerWidget::RefreshPlotPriceBadges()
 
 		Badge->SetPlot(Plot);
 		Badge->SetPrice(PriceText, bCanAfford);
+		Badge->SetAcquisitionRequired(Acquisition && !Acquisition->ArePlotOccupantsCleared(Plot->GetPlotId()));
 
 		const ESlateVisibility DesiredVis = bOnScreen ? ESlateVisibility::Visible : ESlateVisibility::Collapsed;
 		if (Badge->GetVisibility() != DesiredVis)
@@ -1555,7 +1802,7 @@ void UInGameLayerWidget::RefreshVaultGauges()
 			continue;
 		}
 
-		// 프로젝트 업종(게임/금융/IT)만 후보 — 미입주/모뉴먼트(None)와 제조업(전자/반도체/자동차)을 함께 걷어낸다.
+		// 프로젝트 업종(게임/금융/IT)만 후보 — 미입주(None)와 제조업(전자/반도체/자동차)을 함께 걷어낸다.
 		// ⚠ 버블의 `!= None` 을 복제하면 안 된다: 버블은 뒤에 금액 검사가 붙어 제조업이 암묵적으로 걸러지지만
 		// 게이지엔 금액 검사가 없다. 제조업은 FOperationData 를 아예 안 가져 영구 회색 Idle = "정지" 로 읽히고
 		// (돌고 있는 공장에 대한 거짓말) 중앙 캡 16 슬롯을 정보량 0 으로 점유한다.
@@ -1801,28 +2048,6 @@ void UInGameLayerWidget::UpdateVaultGaugePositions()
 	}
 }
 
-void UInGameLayerWidget::HandleWarehouseUpdated(int32 BuildingID, float Amount, float Capacity)
-{
-	// Bar 는 시간 축이라 창고 값과 무관하다 ― 여기서 할 일은 만액 시 버블 인계 재평가뿐이다.
-	// ⚠ 전이(비만액 <-> 만액)에서만 올린다. 매니저가 활성 운영마다 1Hz 로 쏘므로 만액이면 무조건 올리면
-	// 만액 건물 하나가 ~200건물 버블 스윕(EvaluateAllBuildingBubbles)을 매초 고정시킨다 = 5초 폴링의 5배.
-	// "그냥 올리면 되지" 로 되돌리지 말 것.
-	const bool bNowFull = (Capacity > 0.0f && Amount >= Capacity);
-	const bool bWasFull = FullVaultBuildings.Contains(BuildingID);
-	if (bNowFull != bWasFull)
-	{
-		if (bNowFull)
-		{
-			FullVaultBuildings.Add(BuildingID);
-		}
-		else
-		{
-			FullVaultBuildings.Remove(BuildingID);
-		}
-		bBubbleReevalPending = true;
-	}
-}
-
 void UInGameLayerWidget::RefreshRevenueRateChip()
 {
 	// 미배치(WBP 트리 paste 전)면 조용히 스킵 — PlotPriceBadge 와 같은 롤아웃 패턴
@@ -1901,15 +2126,13 @@ EBubbleType UInGameLayerWidget::EvaluateBubbleTypeForBuilding(int32 BuildingInde
 	ABuildingBaseActor* Building = EntityMgr->GetBuildingByIndex(BuildingIndex);
 	if (!Building) return EBubbleType::None;
 
-	ECompanyType CompanyType = Building->GetCompanyType();
-
 	UCGGameInstance* GI = Cast<UCGGameInstance>(World->GetGameInstance());
 	if (!GI) return EBubbleType::None;
 
 	UProjectOperationManager* OpMgr = GI->GetSubsystem<UProjectOperationManager>();
 	if (!OpMgr) return EBubbleType::None;
 
-	// OfficeDataMap 은 함수 상단 1회 조회 — ReportPending/NoProject 판정 공유 (5초 폴링 비용 절약)
+	// 미확인 결산서는 오피스 저장 데이터에서 조회한다.
 	const FOfficeSaveData* OfficeData = nullptr;
 	if (USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>())
 	{
@@ -1919,25 +2142,19 @@ EBubbleType UInGameLayerWidget::EvaluateBubbleTypeForBuilding(int32 BuildingInde
 		}
 	}
 
-	// VaultFull (우선순위 1) — 금고가 용량 이상으로 찬 경우
-	if (CompanyType != ECompanyType::None)
-	{
-		const float StoredRevenue = OpMgr->GetStoredRevenue(BuildingIndex);
-		const float Capacity = OpMgr->CalculateWarehouseCapacity(BuildingIndex);
-		if (Capacity > 0.0f && StoredRevenue >= Capacity)
-		{
-			return EBubbleType::VaultFull;
-		}
-	}
-
 	// ReportPending (우선순위 2) — 건물별 미확인 결산서 (GenerateReport 가 set, ConsumeReport 가 clear)
 	if (OfficeData && OfficeData->bHasPendingReport)
 	{
 		return EBubbleType::ReportPending;
 	}
 
-	// NoProject(Zzz) 버블 폐기 (2026-07-23 사용자 결정) — 유휴는 창문 발광 off(어두움)로 구분.
-	// 버블+불빛 이중 신호 제거. 행동 유도가 필요한 결산 대기(ReportPending)만 버블 유지.
+	// 두 산업 경로 모두 오피스에서 개발한다. 제조업의 공장 생산은 다음 개발 착수를 막지 않는다.
+	const ECompanyType CompanyType = Building->GetCompanyType();
+	if ((IsProjectType(CompanyType) || IsManufacturingType(CompanyType))
+		&& !OpMgr->HasActiveOperation(BuildingIndex))
+	{
+		return EBubbleType::NoProject;
+	}
 
 	return EBubbleType::None;
 }
@@ -1982,21 +2199,13 @@ bool UInGameLayerWidget::ShouldWindowLightBeOn(ABuildingBaseActor* Building, UPr
 		return false;
 	}
 
-	// 창문 발광은 2026-07-23 부터 '유휴 표시'를 겸한다(Zzz 버블 폐기 → 어두움으로 구분).
-	// 그런데 제조업(반도체/자동차/전자)은 운영(Operation) 페이즈 자체가 없어 영원히 꺼진 채 남는다 —
-	// 정상 가동 중인 공장이 죽은 건물로 보이는 오독이라, 제조업은 상시 점등으로 뺀다.
+	// 프로젝트형은 운영 중에 점등한다. 운영 페이즈가 없는 제조업은 상시 점등한다.
 	if (IsManufacturingType(Building->GetCompanyType()))
 	{
 		return true;
 	}
 
 	return OpMgr && OpMgr->HasActiveOperation(Building->GetBuildingIndex());
-}
-
-void UInGameLayerWidget::OnRevenueCollectedForBubble(int64 Amount)
-{
-	// 수익 수령 시 어떤 건물인지 모름 → 다음 틱 전체 재평가
-	bBubbleReevalPending = true;
 }
 
 // ============================================================
@@ -2012,9 +2221,6 @@ void UInGameLayerWidget::HandleBubbleAction(int32 BuildingIndex, EBubbleType Typ
 {
 	switch (Type)
 	{
-	case EBubbleType::VaultFull:
-		ExecuteVaultCollection(BuildingIndex);
-		break;
 	case EBubbleType::ReportPending:
 		// 결산 확인 지점 — MainMap 엔 결산 UI가 없어 관리패널 진입이 동선 (오피스 입장 시 OfficeMainWidget 이 pending 결산 모달 자동 표시)
 		ExecuteBuildingInteraction(BuildingIndex);
@@ -2026,40 +2232,206 @@ void UInGameLayerWidget::HandleBubbleAction(int32 BuildingIndex, EBubbleType Typ
 	}
 }
 
-void UInGameLayerWidget::ExecuteVaultCollection(int32 BuildingIndex)
+void UInGameLayerWidget::HandleBuildingIncomeStreamed(int32 BuildingIndex, int64 Amount)
 {
-	if (CurrentCoinFlyout) return;
-
-	UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
-	if (!GI) return;
-
-	UProjectOperationManager* OpMgr = GI->GetSubsystem<UProjectOperationManager>();
-	if (!OpMgr) return;
-
-	// 수금 전에 Money 위젯 억제 — 수금 시 HandleResourceChanged 가 카운터를 즉시 풀로 점프시키는 것 방지
-	// (코인 도착마다 점진 상승시키려면 수금 순간의 갱신을 먹어야 함). 실패 경로에선 해제.
-	bSuppressMoneyUpdate = true;
-
-	// 수금 실행 (내부에서 StoreResource + 델리게이트 브로드캐스트)
-	int64 CollectedAmount = OpMgr->CollectAllWarehouseByBuilding(BuildingIndex);
-	if (CollectedAmount <= 0) { bSuppressMoneyUpdate = false; return; }
-
-	// 수거 델타는 DT Money 아이콘/색의 전용 무음 FundsToast로 표시한다.
-	if (UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>())
+	if (Amount <= 0 || BuildingIndex == INDEX_NONE)
 	{
-		UIMgr->ShowFundsToast(CollectedAmount);
+		return;
 	}
 
-	PlayCoinFlyoutAnimation(CollectedAmount);
+	// 같은 틱에 두 번 와도 합산 — 매니저가 건물당 1회만 쏘지만, 합산이 중복 코인보다 정직하다
+	PendingIncomeByBuilding.FindOrAdd(BuildingIndex) += Amount;
+}
 
-	// 버블 제거
-	if (BubbleContainer)
+void UInGameLayerWidget::FlushPendingIncomeStream()
+{
+	if (PendingIncomeByBuilding.Num() == 0)
 	{
-		BubbleContainer->DismissBubble(BuildingIndex);
+		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[InGameLayerWidget] ExecuteVaultCollection - BuildingID=%d, Amount=%lld, Coins=%d"),
-		BuildingIndex, CollectedAmount, CoinAnimTotalCoins);
+	// ⚠ 아래 조기 반환 경로에서도 버퍼는 비운다 — 남기면 화면 밖에 오래 둔 건물이 복귀하는 순간
+	// 몇 분치 합계를 한 번에 띄워, 5초 박자라는 약속을 어기고 금액이 거짓으로 읽힌다.
+	TMap<int32, int64> Pending;
+	Swap(Pending, PendingIncomeByBuilding);
+
+	UWorld* StreamWorld = GetWorld();
+	APlayerController* PC = StreamWorld ? StreamWorld->GetFirstPlayerController() : nullptr;
+	UEntityManager* EntityMgr = StreamWorld ? StreamWorld->GetSubsystem<UEntityManager>() : nullptr;
+	// UIE_Resource_Money 는 코인의 도착점 — 없으면 코인이 갈 곳이 없다
+	if (!PC || !EntityMgr || !InGameCanvas || !UIE_Resource_Money)
+	{
+		return;
+	}
+
+	UCGGameInstance* GI = Cast<UCGGameInstance>(StreamWorld->GetGameInstance());
+	UProjectOperationManager* OpMgr = GI ? GI->GetSubsystem<UProjectOperationManager>() : nullptr;
+	if (!OpMgr)
+	{
+		return;
+	}
+
+	// BubbleContainer 의 검증된 변환: 3D -> Viewport 로컬(DPI 보정) -> Absolute -> Canvas 로컬.
+	// 지오메트리는 건물마다 다시 받지 않는다 — 한 flush 는 한 프레임이라 바뀔 수 없다.
+	const FGeometry ViewportGeo = UWidgetLayoutLibrary::GetViewportWidgetGeometry(StreamWorld);
+	const FGeometry CanvasGeo = InGameCanvas->GetCachedGeometry();
+	const FVector2D CanvasSize = CanvasGeo.GetLocalSize();
+	const FVector2D ScreenCenter = CanvasSize * 0.5;
+
+	struct FIncomePopupSource
+	{
+		FVector2D CanvasLocal = FVector2D::ZeroVector;
+		double DistSqFromCenter = 0.0;
+		int64 Amount = 0;
+		int32 BuildingIndex = INDEX_NONE;
+	};
+	TArray<FIncomePopupSource> Sources;
+	Sources.Reserve(Pending.Num());
+
+	// 건물 배열을 1회 순회하며 해시로 짝짓는다 — GetBuildingByIndex 는 선형 스캔이라 건물당 부르면 N²
+	for (ABuildingBaseActor* Building : EntityMgr->GetBuildings())
+	{
+		if (!IsValid(Building))
+		{
+			continue;
+		}
+
+		const int32 Index = Building->GetBuildingIndex();
+		const int64* Amount = Pending.Find(Index);
+		if (!Amount || *Amount <= 0)
+		{
+			continue;
+		}
+
+		// 게이지와 같은 술어(IsProjectType + 운영중) — 소수부 잔돈이 운영 종료 직후 유령 팝업이 떠오르지 않게 한다
+		if (!IsProjectType(Building->GetCompanyType()) || !OpMgr->HasActiveOperation(Index))
+		{
+			continue;
+		}
+
+		// 옥상 모듈 윗면 중심 = GetBubbleAnchorPosition(ActorZ + 총높이, 총높이는 Top_Module 로컬 바운드 포함)
+		FVector2D ViewportPos;
+		if (!UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(
+				PC, Building->GetBubbleAnchorPosition(), ViewportPos, true))
+		{
+			continue;
+		}
+
+		FIncomePopupSource Source;
+		Source.CanvasLocal = CanvasGeo.AbsoluteToLocal(ViewportGeo.LocalToAbsolute(ViewportPos));
+		if (!IsIncomePopupSourceVisible(Source.CanvasLocal, CanvasSize))
+		{
+			continue;
+		}
+
+		Source.DistSqFromCenter = FVector2D::DistSquared(Source.CanvasLocal, ScreenCenter);
+		Source.Amount = *Amount;
+		Source.BuildingIndex = Index;
+		Sources.Add(Source);
+	}
+
+	if (Sources.Num() == 0)
+	{
+		return;
+	}
+
+	EnsureStreamCoinFlyout(PC);
+	if (!StreamCoinFlyout)
+	{
+		return;
+	}
+
+	// 중앙 근접 정렬 1회. NaN 은 IsIncomePopupSourceVisible 이 이미 걷어내 strict weak ordering 이 안 깨진다.
+	Sources.Sort([](const FIncomePopupSource& A, const FIncomePopupSource& B)
+	{
+		return A.DistSqFromCenter < B.DistSqFromCenter;
+	});
+
+	// 매 박자 재계산 — 리사이즈·HUD 이동 대응 (오피스와 같은 이유)
+	UIE_Resource_Money->CalculateIconScreenPos();
+	const FVector2D TargetAbs = UIE_Resource_Money->GetCachedIconScreenPos();
+
+	StreamCoinFlyout->StreamCoinDrawSize = ResolveStreamCoinDrawSize(
+		GetVaultGaugeZoomValue(), StreamCoinSizeNear, StreamCoinSizeFar,
+		StreamCoinZoomNear, StreamCoinZoomFar);
+
+	// ⚠ 두 연출의 상한 처리 방향이 반대라 순서도 반대로 돌린다.
+	//   코인(MaxStreamCoins=30): 넘치면 **새 스폰을 버린다** -> 중앙부터 쏴야 중앙이 산다.
+	//   텍스트(MaxIncomeTexts=24): 넘치면 **오래된 것을 지운다** -> 가장자리부터 쏴야 중앙이 산다.
+	// 같은 정렬로 둘을 돌리면 한쪽은 반드시 중앙을 잃는다.
+	for (const FIncomePopupSource& Source : Sources)
+	{
+		StreamCoinFlyout->SpawnStreamCoin(
+			CanvasGeo.LocalToAbsolute(Source.CanvasLocal),
+			TargetAbs, CachedStreamCoinTexture, Source.BuildingIndex);
+	}
+
+	for (int32 i = Sources.Num() - 1; i >= 0; --i)
+	{
+		StreamCoinFlyout->SpawnIncomeText(
+			CanvasGeo.LocalToAbsolute(Sources[i].CanvasLocal),
+			Sources[i].Amount, CachedStreamCoinTexture, CachedStreamCoinColor);
+	}
+
+	// 박자당 1발 — 건물 수만큼 울리면 30겹이 되어 소리가 아니라 노이즈가 된다
+	if (UGameInstance* SoundGI = GetGameInstance())
+	{
+		if (USoundManagerSubsystem* SM = SoundGI->GetSubsystem<USoundManagerSubsystem>())
+		{
+			SM->PlayUISound(CGUISoundTags::BuildingIncome);
+		}
+	}
+}
+
+void UInGameLayerWidget::EnsureStreamCoinFlyout(APlayerController* PC)
+{
+	if (!PC || !EffectCanvas)
+	{
+		return;
+	}
+
+	// 텍스처를 실제로 받았을 때만 캐시를 확정한다 — 먼저 굳히면 한 번의 실패가 세션 내내 텍스처 없는 코인을 만든다
+	if (!bStreamCoinPresentationCached && TableMgr)
+	{
+		bool bResourceInfoOk = false;
+		const FResourceInfo ResInfo = TableMgr->GetResourceInfo(EResourceType::Money, bResourceInfoOk);
+		if (bResourceInfoOk)
+		{
+			CachedStreamCoinColor = ResInfo.UIColor;
+			if (!ResInfo.Icon.IsNull())
+			{
+				CachedStreamCoinTexture = ResInfo.Icon.LoadSynchronous();
+			}
+			bStreamCoinPresentationCached = (CachedStreamCoinTexture != nullptr);
+		}
+	}
+
+	if (StreamCoinFlyout)
+	{
+		return;
+	}
+
+	StreamCoinFlyout = CreateWidget<UCoinFlyoutContainerWidget>(PC);
+	if (!StreamCoinFlyout)
+	{
+		return;
+	}
+
+	// 코인 크기는 여기서 세우지 않는다 — FlushPendingIncomeStream 이 줌마다 다시 세우는 단일 소유자다.
+
+	// 클릭은 아래 월드/버블로 통과해야 한다 — 코인은 순수 표시물
+	StreamCoinFlyout->SetVisibility(ESlateVisibility::HitTestInvisible);
+
+	if (UCanvasPanelSlot* CoinCanvasSlot = EffectCanvas->AddChildToCanvas(StreamCoinFlyout))
+	{
+		CoinCanvasSlot->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
+		CoinCanvasSlot->SetOffsets(FMargin(0.0f));
+		CoinCanvasSlot->SetZOrder(60);   // 레이어 HUD 위, 프롬프트(팝업)는 UIBase 스택이라 항상 이 위
+	}
+	else
+	{
+		StreamCoinFlyout->AddToViewport(998);   // 캔버스 미바인딩 폴백
+	}
 }
 
 void UInGameLayerWidget::PlayCoinFlyoutAnimation(int64 CollectedAmount)
@@ -2088,7 +2460,7 @@ void UInGameLayerWidget::PlayCoinFlyoutAnimation(int64 CollectedAmount)
 	bSuppressMoneyUpdate = true;
 	if (UIE_Resource_Money)
 	{
-		UIE_Resource_Money->SetValue(CoinAnimOldMoney);
+		UIE_Resource_Money->SetValueSilent(CoinAnimOldMoney);
 	}
 
 	// 코인 수 계산: log10 스케일, 최소 3 ~ 최대 CoinFlyoutMaxIcons. 계수/상한은 UI_InGameLayer WBP 에서 PIE 튜닝 가능.
@@ -2184,9 +2556,7 @@ void UInGameLayerWidget::ExecuteAllVaultCollection()
 
 	PlayCoinFlyoutAnimation(Total);
 
-	// 개별 수거는 DismissBubble 로 특정 버블만 꺼주는데, 전체 수거는 Revenue 가 0 된 모든 건물 재평가
-	// OpMgr 내부 OnRevenueCollected 브로드캐스트 → OnRevenueCollectedForBubble → EvaluateAllBuildingBubbles 자동 호출
-	// 별도 Dismiss 불필요
+	// 금고 잔액에 걸린 버블은 더 이상 없어 수거 후 재평가·Dismiss 가 필요 없다
 
 	UE_LOG(LogTemp, Log, TEXT("[InGameLayerWidget] ExecuteAllVaultCollection - Total=%lld, Coins=%d"),
 		Total, CoinAnimTotalCoins);
@@ -2296,8 +2666,6 @@ void UInGameLayerWidget::HandleHQLevelUp(int32 NewLevel)
 void UInGameLayerWidget::RefreshBuildingCount()
 {
 	// 빌딩 추가/제거 시 새 빌딩의 버블 재평가 델리게이트도 함께 wire-up (idempotent)
-	// 만액 집합도 함께 비운다 — 파괴된 인덱스가 남으면 재사용된 인덱스의 첫 전이를 삼킨다
-	FullVaultBuildings.Reset();
 	RequestVaultGaugeReconcile(EVaultGaugeReconcileTrigger::BuildingListChanged);
 	RewireBuildingBubbleSubscriptions();
 	EvaluateAllBuildingBubbles();
@@ -2353,4 +2721,3 @@ void UInGameLayerWidget::OnProfileImageBtnClicked()
 		}
 	}
 }
-

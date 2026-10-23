@@ -1,4 +1,5 @@
 #include "Manager/RankingManagerSubsystem.h"
+#include "Global/CGDevSettings.h"
 #include "Manager/PlayFabManagerSubsystem.h"
 #include "Manager/SaveLoadManager.h"
 #include "Manager/EntityManager.h"
@@ -10,6 +11,8 @@
 #include "JsonObjectConverter.h"
 #include "Serialization/JsonSerializer.h"
 #include "Dom/JsonObject.h"
+#include "Engine/World.h"
+#include "TimerManager.h"
 
 const FString URankingManagerSubsystem::StatName_Weekly = TEXT("WeeklyRevenue");
 const FString URankingManagerSubsystem::StatName_AllTime = TEXT("MarketCap");
@@ -27,6 +30,7 @@ void URankingManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void URankingManagerSubsystem::Deinitialize()
 {
+	CancelPendingVisit();
 	FlushWeeklyRevenue(true);   // 배치 대기분 유실 방지
 	UnbindPlayFabDelegates();
 
@@ -61,6 +65,7 @@ void URankingManagerSubsystem::UnbindPlayFabDelegates()
 // SaveLoadManager::OnResourceChangedHandler 에서 MarketCap 변경 시마다 호출
 void URankingManagerSubsystem::UploadMarketCap(int64 MarketCapValue)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn()) return;
 
 	PlayFabMgr->UpdateLeaderboardScore(StatName_AllTime, MarketCapValue);
@@ -71,6 +76,7 @@ void URankingManagerSubsystem::UploadMarketCap(int64 MarketCapValue)
 // Money 자원이 증가할 때만 양수 Delta 호출 — 지출(감소) 시엔 호출 안 함
 void URankingManagerSubsystem::UploadWeeklyRevenueDelta(int64 Delta)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn()) return;
 	if (Delta <= 0) return;
 
@@ -82,6 +88,11 @@ void URankingManagerSubsystem::UploadWeeklyRevenueDelta(int64 Delta)
 
 void URankingManagerSubsystem::FlushWeeklyRevenue(bool bForce)
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		PendingWeeklyDelta = 0;
+		return;
+	}
 	if (PendingWeeklyDelta <= 0) return;
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn()) return;
 
@@ -97,6 +108,7 @@ void URankingManagerSubsystem::FlushWeeklyRevenue(bool bForce)
 // 레거시 호환 — 기존 호출부가 있을 경우 프로필 + 시총 현재값 업로드로 대체
 void URankingManagerSubsystem::UploadRevenueScore()
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>();
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn() || !SaveMgr) return;
 
@@ -113,6 +125,7 @@ void URankingManagerSubsystem::UploadRevenueScore()
 
 void URankingManagerSubsystem::ForceUploadRevenueScore()
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn()) return;
 
 	LastScoreUploadTime = FPlatformTime::Seconds();
@@ -128,12 +141,25 @@ void URankingManagerSubsystem::ForceUploadRevenueScore()
 
 void URankingManagerSubsystem::FetchLeaderboard(int32 TabIndex, int32 Count)
 {
+	if (TabIndex < 0 || TabIndex >= UE_ARRAY_COUNT(CachedLeaderboards))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RankingManager] Invalid leaderboard tab: %d"), TabIndex);
+		return;
+	}
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		LastRequestedTabIndex = TabIndex;
+		CachedLeaderboards[TabIndex].Reset();
+		OnLeaderboardLoaded.Broadcast(TabIndex, CachedLeaderboards[TabIndex]);
+		return;
+	}
+
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn())
 	{
 		return;
 	}
 
-	PendingTabIndex = TabIndex;
+	LastRequestedTabIndex = TabIndex;
 	// Tab 0 = 시총, Tab 1 = 주간매출
 	const FString& StatName = (TabIndex == 0) ? StatName_AllTime : StatName_Weekly;
 	PlayFabMgr->GetLeaderboard(StatName, Count);
@@ -141,12 +167,25 @@ void URankingManagerSubsystem::FetchLeaderboard(int32 TabIndex, int32 Count)
 
 void URankingManagerSubsystem::FetchLeaderboardAroundPlayer(int32 TabIndex, int32 Count)
 {
+	if (TabIndex < 0 || TabIndex >= UE_ARRAY_COUNT(CachedLeaderboards))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RankingManager] Invalid leaderboard tab: %d"), TabIndex);
+		return;
+	}
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		LastRequestedTabIndex = TabIndex;
+		CachedLeaderboards[TabIndex].Reset();
+		OnLeaderboardLoaded.Broadcast(TabIndex, CachedLeaderboards[TabIndex]);
+		return;
+	}
+
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn())
 	{
 		return;
 	}
 
-	PendingTabIndex = TabIndex;
+	LastRequestedTabIndex = TabIndex;
 	// Tab 0 = 시총, Tab 1 = 주간매출
 	const FString& StatName = (TabIndex == 0) ? StatName_AllTime : StatName_Weekly;
 	PlayFabMgr->GetLeaderboardAroundPlayer(StatName, Count);
@@ -156,6 +195,7 @@ void URankingManagerSubsystem::FetchLeaderboardAroundPlayer(int32 TabIndex, int3
 
 void URankingManagerSubsystem::UploadCitySnapshot()
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>();
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn() || !SaveMgr)
 	{
@@ -183,6 +223,11 @@ void URankingManagerSubsystem::UploadCitySnapshot()
 
 void URankingManagerSubsystem::FetchCitySnapshot(const FString& TargetPlayFabId)
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		OnRankingError.Broadcast(TEXT("오프라인 모드에서는 도시 정보를 조회할 수 없어요"));
+		return;
+	}
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn())
 	{
 		return;
@@ -209,7 +254,12 @@ FCitySnapshot URankingManagerSubsystem::BuildCitySnapshot() const
 		return Snapshot;
 	}
 
-	const FGameSaveData& GD = SaveData->GameData;
+	return BuildCitySnapshotFromSave(SaveData->GameData);
+}
+
+FCitySnapshot URankingManagerSubsystem::BuildCitySnapshotFromSave(const FGameSaveData& GD)
+{
+	FCitySnapshot Snapshot;
 	Snapshot.HQLevel = GD.HQLevel;
 	Snapshot.CompanyTitle = GD.CompanyTitle;
 	Snapshot.TotalRevenueEarned = GD.TotalRevenueEarned;
@@ -233,6 +283,10 @@ FCitySnapshot URankingManagerSubsystem::BuildCitySnapshot() const
 		SnapBuilding.Body_Module_Copies = BuildingEntity.BuildingData.Body_Module_Copies;
 		SnapBuilding.AppliedSkinID = BuildingEntity.BuildingData.AppliedSkinID;
 		SnapBuilding.CompanyType = BuildingEntity.BuildingData.CompanyType;
+		if (const FOfficeSaveData* OfficeData = GD.OfficeDataMap.Find(BuildingEntity.BuildingIndex))
+		{
+			SnapBuilding.LifetimeRevenueEarned = OfficeData->LifetimeRevenueEarned;
+		}
 		Snapshot.Buildings.Add(MoveTemp(SnapBuilding));
 	}
 
@@ -243,8 +297,21 @@ FCitySnapshot URankingManagerSubsystem::BuildCitySnapshot() const
 
 void URankingManagerSubsystem::EnterVisitMode(const FString& TargetPlayFabId, const FString& TargetDisplayName)
 {
+	CancelPendingVisit();
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		OnRankingError.Broadcast(TEXT("오프라인 모드에서는 도시를 방문할 수 없어요"));
+		return;
+	}
+	if (TargetPlayFabId.IsEmpty() || !PlayFabMgr || !PlayFabMgr->IsLoggedIn() || !GetWorld())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RankingManager] Cannot start city visit (ID: %s)"), *TargetPlayFabId);
+		OnRankingError.Broadcast(TEXT("도시 방문을 시작할 수 없어요"));
+		return;
+	}
 	PendingVisitPlayFabId = TargetPlayFabId;
 	PendingVisitDisplayName = TargetDisplayName;
+	GetWorld()->GetTimerManager().SetTimer(VisitTimeout, this, &URankingManagerSubsystem::HandleVisitTimeout, 15.f, false);
 
 	// 스냅샷 다운로드 요청 → HandleOtherPlayerData에서 맵 전환 처리
 	FetchCitySnapshot(TargetPlayFabId);
@@ -253,19 +320,33 @@ void URankingManagerSubsystem::EnterVisitMode(const FString& TargetPlayFabId, co
 		*TargetPlayFabId, *TargetDisplayName);
 }
 
+void URankingManagerSubsystem::CancelPendingVisit()
+{
+	if (GetWorld()) GetWorld()->GetTimerManager().ClearTimer(VisitTimeout);
+	PendingVisitPlayFabId.Empty();
+	PendingVisitDisplayName.Empty();
+}
+
+void URankingManagerSubsystem::HandleVisitTimeout()
+{
+	if (PendingVisitPlayFabId.IsEmpty()) return;
+	UE_LOG(LogTemp, Warning, TEXT("[RankingManager] City visit timed out (ID: %s)"), *PendingVisitPlayFabId);
+	CancelPendingVisit();
+	OnRankingError.Broadcast(TEXT("도시를 불러오지 못했어요. 다시 방문해 주세요"));
+}
+
 void URankingManagerSubsystem::ExitVisitMode()
 {
 	UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
-	if (!GI)
+	if (!GI || GI->IsLevelTransitionActive())
 	{
 		return;
 	}
 
+	// GI가 목적지 상태를 예약해 소스 방문 도시의 저장 차단을 월드가 교체될 때까지 유지한다.
+	GI->TransitionToLevel(TEXT("/Game/CompanyGrowth/Level/MainMap_City"));
 	GI->SetVisitMode(false);
 	GI->ClearVisitData();
-
-	// MainMap 재진입
-	GI->TransitionToLevel(TEXT("/Game/CompanyGrowth/Level/MainMap_TheRiverwalkCity"));
 
 	UE_LOG(LogTemp, Log, TEXT("[RankingManager] 방문 모드 퇴출 → 정상 MainMap 복귀"));
 }
@@ -274,6 +355,7 @@ void URankingManagerSubsystem::ExitVisitMode()
 
 void URankingManagerSubsystem::UploadRankingProfile()
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!PlayFabMgr || !PlayFabMgr->IsLoggedIn())
 	{
 		return;
@@ -372,6 +454,14 @@ FRankingEntry URankingManagerSubsystem::ParseRankingProfile(
 void URankingManagerSubsystem::HandleLeaderboardResult(
 	const FString& StatName, const TArray<FPlayFabLeaderboardEntry>& Entries)
 {
+	const int32 ResultTabIndex = StatName == StatName_AllTime ? 0 : (StatName == StatName_Weekly ? 1 : INDEX_NONE);
+	if (ResultTabIndex == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RankingManager] Ignoring unknown leaderboard: %s"), *StatName);
+		return;
+	}
+	TArray<FRankingEntry>& CachedLeaderboard = CachedLeaderboards[ResultTabIndex];
+
 	// 기본 정보로 캐시 갱신 (프로필은 별도 조회 필요하지만,
 	// 우선 리더보드 기본 정보만으로 표시)
 	CachedLeaderboard.Reset();
@@ -385,18 +475,12 @@ void URankingManagerSubsystem::HandleLeaderboardResult(
 		RankEntry.Rank = PFEntry.Rank;
 		RankEntry.TotalRevenue = PFEntry.Score;
 
-		// 레벨 탭이면 Score가 HQ Level
-		if (PendingTabIndex == 1)
-		{
-			RankEntry.HQLevel = static_cast<int32>(PFEntry.Score);
-		}
-
 		CachedLeaderboard.Add(MoveTemp(RankEntry));
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[RankingManager] 리더보드 로드 완료 (Tab=%d, %d명)"),
-		PendingTabIndex, CachedLeaderboard.Num());
-	OnLeaderboardLoaded.Broadcast(PendingTabIndex, CachedLeaderboard);
+		ResultTabIndex, CachedLeaderboard.Num());
+	OnLeaderboardLoaded.Broadcast(ResultTabIndex, CachedLeaderboard);
 
 	// 각 엔트리의 RankingProfile 가져오기 (HQLevel, 빌딩수 등 보강)
 	if (PlayFabMgr)
@@ -427,18 +511,19 @@ void URankingManagerSubsystem::HandleOtherPlayerData(
 				*PlayFabId, Snapshot.Buildings.Num());
 
 			// 방문 요청했던 상대의 스냅샷일 때만 맵 전환
-			if (PlayFabId == PendingVisitPlayFabId)
+			if (!PendingVisitPlayFabId.IsEmpty() && PlayFabId == PendingVisitPlayFabId)
 			{
+				const FString VisitPlayerId = PendingVisitPlayFabId;
+				const FString VisitDisplayName = PendingVisitDisplayName;
+				CancelPendingVisit();
 				UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
-				if (GI)
+				if (GI && !GI->IsLevelTransitionActive())
 				{
+					// 전환 요청 뒤의 방문 상태는 GI가 소스 저장 이후 목적지에 적용한다.
+					GI->TransitionToLevel(TEXT("/Game/CompanyGrowth/Level/MainMap_City"));
 					GI->SetVisitMode(true);
-					GI->SetVisitData(Snapshot, PendingVisitPlayFabId, PendingVisitDisplayName);
-					// 방문 상태 먼저 세팅 → 레벨 전환. 새 월드 LoadGameAfterLevelStart가 이 플래그로 분기
-					GI->TransitionToLevel(TEXT("/Game/CompanyGrowth/Level/MainMap_TheRiverwalkCity"));
+					GI->SetVisitData(Snapshot, VisitPlayerId, VisitDisplayName);
 				}
-				PendingVisitPlayFabId.Empty();
-				PendingVisitDisplayName.Empty();
 			}
 
 			OnCitySnapshotLoaded.Broadcast(PlayFabId, Snapshot);
@@ -446,48 +531,55 @@ void URankingManagerSubsystem::HandleOtherPlayerData(
 		else
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[RankingManager] 스냅샷 JSON 파싱 실패 (ID: %s)"), *PlayFabId);
+			if (PlayFabId == PendingVisitPlayFabId) CancelPendingVisit();
 			OnRankingError.Broadcast(TEXT("도시 스냅샷 파싱 실패"));
 		}
 	}
 
-	// RankingProfile 응답 처리 (리더보드 캐시 보강)
+	// 프로필은 플레이어 공통 데이터이므로 해당 플레이어가 있는 모든 탭을 보강한다.
 	if (const FString* ProfileJson = Data.Find(TEXT("RankingProfile")))
 	{
-		for (FRankingEntry& Entry : CachedLeaderboard)
+		TSharedPtr<FJsonObject> JsonObj;
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*ProfileJson);
+		if (!FJsonSerializer::Deserialize(Reader, JsonObj) || !JsonObj.IsValid())
 		{
-			if (Entry.PlayFabId == PlayFabId)
-			{
-				TSharedPtr<FJsonObject> JsonObj;
-				TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(*ProfileJson);
-				if (FJsonSerializer::Deserialize(Reader, JsonObj) && JsonObj.IsValid())
-				{
-					Entry.HQLevel = static_cast<int32>(JsonObj->GetNumberField(TEXT("hq")));
-					Entry.CompanyTitle = static_cast<ECompanyTitle>(static_cast<int32>(JsonObj->GetNumberField(TEXT("ct"))));
-					Entry.BuildingCount = static_cast<int32>(JsonObj->GetNumberField(TEXT("bc")));
-					// mt 는 구 프로필(빌딩 레벨 시절 mbl)에 없는 유일한 필드라 TryGet — 없으면 0, 경고 로그 없이.
-		double MtValue = 0.0;
-		JsonObj->TryGetNumberField(TEXT("mt"), MtValue);
-		Entry.MaxTier = static_cast<int32>(MtValue);
-					Entry.EmployeeCount = static_cast<int32>(JsonObj->GetNumberField(TEXT("ec")));
-					if (JsonObj->HasField(TEXT("pi")))
-					{
-						Entry.ProfileImageID = static_cast<int32>(JsonObj->GetNumberField(TEXT("pi")));
-					}
-
-					UE_LOG(LogTemp, Log, TEXT("[RankingManager] 프로필 보강: %s → HQ Lv.%d"),
-						*PlayFabId, Entry.HQLevel);
-				}
-				break;
-			}
+			UE_LOG(LogTemp, Warning, TEXT("[RankingManager] Invalid RankingProfile JSON (ID: %s)"), *PlayFabId);
+			return;
 		}
 
-		// 프로필 업데이트 후 UI 갱신
-		OnLeaderboardLoaded.Broadcast(PendingTabIndex, CachedLeaderboard);
+		for (int32 ProfileTabIndex = 0; ProfileTabIndex < UE_ARRAY_COUNT(CachedLeaderboards); ++ProfileTabIndex)
+		{
+			TArray<FRankingEntry>& TabEntries = CachedLeaderboards[ProfileTabIndex];
+			bool bUpdated = false;
+			for (FRankingEntry& Entry : TabEntries)
+			{
+				if (Entry.PlayFabId != PlayFabId)
+				{
+					continue;
+				}
+
+				double Value = 0.0;
+				if (JsonObj->TryGetNumberField(TEXT("hq"), Value)) Entry.HQLevel = static_cast<int32>(Value);
+				if (JsonObj->TryGetNumberField(TEXT("ct"), Value)) Entry.CompanyTitle = static_cast<ECompanyTitle>(static_cast<int32>(Value));
+				if (JsonObj->TryGetNumberField(TEXT("bc"), Value)) Entry.BuildingCount = static_cast<int32>(Value);
+				if (JsonObj->TryGetNumberField(TEXT("mt"), Value)) Entry.MaxTier = static_cast<int32>(Value);
+				if (JsonObj->TryGetNumberField(TEXT("ec"), Value)) Entry.EmployeeCount = static_cast<int32>(Value);
+				if (JsonObj->TryGetNumberField(TEXT("pi"), Value)) Entry.ProfileImageID = static_cast<int32>(Value);
+				bUpdated = true;
+			}
+
+			if (bUpdated)
+			{
+				UE_LOG(LogTemp, Verbose, TEXT("[RankingManager] Profile enriched (ID: %s, Tab: %d)"), *PlayFabId, ProfileTabIndex);
+				OnLeaderboardLoaded.Broadcast(ProfileTabIndex, TabEntries);
+			}
+		}
 	}
 }
 
 void URankingManagerSubsystem::HandlePlayFabError(const FString& ErrorMsg)
 {
+	CancelPendingVisit();
 	UE_LOG(LogTemp, Warning, TEXT("[RankingManager] PlayFab 에러: %s"), *ErrorMsg);
 	OnRankingError.Broadcast(ErrorMsg);
 }

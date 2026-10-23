@@ -2,12 +2,15 @@
 
 #include "Player/Components/WallPlacementHandler.h"
 #include "Office/DecorationActor.h"
+#include "Office/OfficeInterior.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/CameraComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 
 UWallPlacementHandler::UWallPlacementHandler()
 {
@@ -173,6 +176,24 @@ void UWallPlacementHandler::OnTouchTriggered(const FInputActionValue& Value)
 
 bool UWallPlacementHandler::CanPlaceAt(const FVector& WorldLocation) const
 {
+	if (const AOfficeInterior* Interior = Cast<AOfficeInterior>(
+		UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass())))
+	{
+		FVector LocalMin, LocalMax;
+		Interior->GetWallPlacementBoundsLocal(TargetWall, LocalMin, LocalMax);
+		const FVector LocalPosition = Interior->GetActorTransform().InverseTransformPosition(WorldLocation);
+		if (!PreviewActor || !PreviewActor->MeshComponent || !PreviewActor->MeshComponent->GetStaticMesh()) return false;
+		FTransform ProposedMeshTransform = PreviewActor->MeshComponent->GetComponentTransform();
+		ProposedMeshTransform.AddToTranslation(WorldLocation - PreviewActor->GetActorLocation());
+		const FBox LocalMeshBounds = PreviewActor->MeshComponent->GetStaticMesh()->GetBoundingBox().TransformBy(
+			ProposedMeshTransform.GetRelativeTransform(Interior->GetActorTransform()));
+		if (Interior->IsRecruitmentEntranceBlocked(LocalMeshBounds) || Interior->IsTelevisionPlacementBlocked(LocalMeshBounds)) return false;
+		return LocalPosition.X >= LocalMin.X - 0.01 && LocalPosition.X <= LocalMax.X + 0.01
+			&& LocalPosition.Y >= LocalMin.Y - 0.01 && LocalPosition.Y <= LocalMax.Y + 0.01
+			&& LocalPosition.Z >= LocalMin.Z && LocalPosition.Z <= LocalMax.Z
+			&& !IsOverlapping(WorldLocation);
+	}
+
 	// 벽 범위 내에 있는지 체크
 	if (WorldLocation.X < WallXMin || WorldLocation.X > WallXMax)
 	{
@@ -221,6 +242,19 @@ bool UWallPlacementHandler::ScreenToWallLocation(const FVector2D& ScreenPosition
 	if (!PC->DeprojectScreenPositionToWorld(ScreenPosition.X, ScreenPosition.Y, WorldPosition, WorldDirection))
 	{
 		return false;
+	}
+
+
+	if (const AOfficeInterior* Interior = Cast<AOfficeInterior>(
+		UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass())))
+	{
+		const FVector Normal = Interior->GetWallNormal(TargetWall);
+		const double Denominator = FVector::DotProduct(WorldDirection, Normal);
+		if (FMath::IsNearlyZero(Denominator)) return false;
+		const double Distance = FVector::DotProduct(Interior->GetWallLocation(TargetWall) - WorldPosition, Normal) / Denominator;
+		if (Distance < 0.0) return false;
+		OutWorldLocation = Interior->ConstrainWallDecorationLocation(TargetWall, WorldPosition + WorldDirection * Distance);
+		return true;
 	}
 
 	// 벽의 Y 좌표 (왼쪽 또는 오른쪽)
@@ -281,6 +315,12 @@ void UWallPlacementHandler::CreatePreviewActor()
 		return;
 	}
 
+	if (const AOfficeInterior* Interior = Cast<AOfficeInterior>(
+		UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass())))
+	{
+		PreviewActor->SetActorScale3D(PreviewActor->GetActorScale3D() * Interior->GetActorScale3D());
+	}
+
 	// 미리보기 모드 설정 (반투명, 충돌 비활성화 등)
 	PreviewActor->SetActorEnableCollision(false);
 
@@ -324,6 +364,11 @@ void UWallPlacementHandler::UpdatePreviewLocation(const FVector& WorldLocation)
 	{
 		Rotation.Yaw = -90.0f;  // 오른쪽 벽을 향함
 	}
+	if (const AOfficeInterior* Interior = Cast<AOfficeInterior>(
+		UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass())))
+	{
+		Rotation.Yaw += Interior->GetActorRotation().Yaw;
+	}
 	PreviewActor->SetActorRotation(Rotation);
 }
 
@@ -331,7 +376,7 @@ void UWallPlacementHandler::UpdatePreviewLocation(const FVector& WorldLocation)
 
 void UWallPlacementHandler::PlaceDecoration(const FVector& WorldLocation)
 {
-	if (!DecorationClassToPlace)
+	if (!DecorationClassToPlace || !CanPlaceAt(WorldLocation))
 	{
 		return;
 	}
@@ -342,6 +387,7 @@ void UWallPlacementHandler::PlaceDecoration(const FVector& WorldLocation)
 	// 장식품 스폰
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+	SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
 
 	FRotator Rotation = FRotator::ZeroRotator;
 	if (TargetWall == EWallSide::Left)
@@ -355,8 +401,7 @@ void UWallPlacementHandler::PlaceDecoration(const FVector& WorldLocation)
 
 	ADecorationActor* NewDecoration = GetWorld()->SpawnActor<ADecorationActor>(
 		DecorationClassToPlace,
-		WorldLocation,
-		Rotation,
+		FTransform(PreviewActor ? PreviewActor->GetActorRotation() : Rotation, WorldLocation, PreviewActor ? PreviewActor->GetActorScale3D() : FVector::OneVector),
 		SpawnParams
 	);
 

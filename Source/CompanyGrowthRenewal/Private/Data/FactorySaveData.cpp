@@ -12,9 +12,12 @@ void FFactorySaveData::InitializeUpgradeData()
 	UpgradeData.Add(EFactoryUpgradeType::HoldProductionAmount,
 		FFactoryUpgradeData(1, FFactoryUpgradeConfig::GetInitialValue(EFactoryUpgradeType::HoldProductionAmount)));
 
-	UpgradeData.Add(EFactoryUpgradeType::AutoCollection,
-		FFactoryUpgradeData(1, FFactoryUpgradeConfig::GetInitialValue(EFactoryUpgradeType::AutoCollection)));
+	UpgradeData.Add(EFactoryUpgradeType::LaborerCount,
+		FFactoryUpgradeData(1, FFactoryUpgradeConfig::GetInitialValue(EFactoryUpgradeType::LaborerCount)));
 
 	UpgradeData.Add(EFactoryUpgradeType::AutoCollectionCapacity,
 		FFactoryUpgradeData(1, FFactoryUpgradeConfig::GetInitialValue(EFactoryUpgradeType::AutoCollectionCapacity)));
+
+	// 증축의 생산 배율은 런타임에 외형 테이블의 해당 레벨에서 계산한다.
+	UpgradeData.Add(EFactoryUpgradeType::FactoryExpansion, FFactoryUpgradeData(1, 0.f));
 }

@@ -11,13 +11,18 @@
 #include "Player/Components/PlacementHandler.h"
 #include "Components/SphereComponent.h"
 #include "Entity/InteractableBaseActor.h"
+#include "Entity/Ambient/AmbientAircraftFlyby.h"
 #include "Interfaces/IInputHandler.h"
 #include "Entity/Factory/BrickFactory.h"
 #include "Kismet/GameplayStatics.h"
 #include "Util/CoordinateUtils.h"
 #include "Input/InputPriorities.h"
 #include "Office/WorkstationActorBase.h"
+#include "Player/OfficeCameraPawn.h"
 #include "Office/DecorationActor.h"
+#include "Entity/Officeworker/Officeworker.h"
+#include "Entity/Officeworker/EmployeeReactionComponent.h"
+#include "EngineUtils.h"
 #include "Core/CGGameInstance.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/UIManagerSubsystem.h"
@@ -28,8 +33,39 @@
 #include "Player/Components/InteractableDragPolicy.h"
 #include "UI/Panel/FactoryPanelWidget.h"
 #include "UI/Panel/WorkstationInfoWidget.h"
+#include "UI/Panel/OfficeEmployeePanelWidget.h"
 #include "Enum/WidgetType.h"
+#include "Global/GlobalUtilFunctions.h"
 #include "TimerManager.h"
+#include "Entity/Plot/CityPlotActor.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
+
+namespace
+{
+    // 32dp = 손끝 접촉면 반경 근사. 멀리서 본 건물은 화면에서 손가락보다 작아진다.
+    constexpr float PlacementTouchSlopDp = 32.f;
+
+    // 광선이 빗나가도 배치 대상의 화면 투영 사각형(+여유) 안이면 그 대상을 누른 것으로 본다.
+    bool IsTouchNearPlacementTarget(const APlayerController* PC, const AActor* Target,
+        const FVector2D& ScreenPos, float SlopPx)
+    {
+        if (!PC || !IsValid(Target)) { return false; }
+        const FBox Bounds = Target->GetComponentsBoundingBox();
+        if (!Bounds.IsValid || Bounds.Min.ContainsNaN() || Bounds.Max.ContainsNaN()) { return false; }
+
+        FBox2D ScreenRect(ForceInit);
+        for (int32 Corner = 0; Corner < 8; ++Corner)
+        {
+            const FVector Point(
+                (Corner & 1) ? Bounds.Max.X : Bounds.Min.X,
+                (Corner & 2) ? Bounds.Max.Y : Bounds.Min.Y,
+                (Corner & 4) ? Bounds.Max.Z : Bounds.Min.Z);
+            FVector2D Projected;
+            if (PC->ProjectWorldLocationToScreen(Point, Projected, false)) { ScreenRect += Projected; }
+        }
+        return ScreenRect.bIsValid && ScreenRect.ExpandBy(SlopPx).IsInside(ScreenPos);
+    }
+}
 
 UInteractableInputHandler::UInteractableInputHandler()
 {
@@ -121,6 +157,7 @@ void UInteractableInputHandler::SetupPlayerInputComponent(UInputComponent* Playe
 
 void UInteractableInputHandler::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+    FinishEmployeeCarryPress();
     ResetFactoryPressState();
     Super::EndPlay(EndPlayReason);
 }
@@ -130,10 +167,18 @@ void UInteractableInputHandler::OnInteractionStarted(const FInputActionValue& Va
     if (!CoordinateUtils::SingleTouchCheck())
         return;
 
+    SavedTouchAbsolutePos = UGlobalUtilFunctions::GetPointerAbsolutePosition();
+
     // 터치 위치 저장
-    FVector2D screenPos;
-    FVector worldPos;
-    if (CoordinateUtils::ProjectTouchToGroundPlane(screenPos, worldPos))
+    FVector2D screenPos = CoordinateUtils::GetLastTouchEventPosition();
+    FVector worldPos = FVector::ZeroVector;
+    bHasPressScreenPosition = CoordinateUtils::ProjectTouchToGroundPlane(screenPos, worldPos);
+    if (!bHasPressScreenPosition)
+    {
+        // 짧은 탭은 처리 시점에 이미 뗀 상태라 위 조회가 실패한다 — 이번 누름 이벤트 위치로 투영한다.
+        bHasPressScreenPosition = CoordinateUtils::ProjectScreenPosToGroundPlane(screenPos, worldPos);
+    }
+    if (bHasPressScreenPosition)
     {
         SavedTouchScreenPos = screenPos;
         SavedTouchWorldPos = worldPos;
@@ -155,11 +200,23 @@ void UInteractableInputHandler::OnInteractionStarted(const FInputActionValue& Va
     // Collision으로 감지된 액터 확인 (저장된 터치 위치 사용)
     AActor* collisionActor = GetOverlappingActor(screenPos);
     LastHitActor = collisionActor;
+	if (AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(Owner))
+	{
+		bOfficeEditSelectionPress = OfficePawn->IsOfficePlacementEditing();
+		if (bOfficeEditSelectionPress && !OfficePawn->GetOfficeEditSelection())
+		{
+			if (!OfficePawn->SelectOfficeEditActor(collisionActor)) return;
+			// 선택이 BuildPlace로 전환한 뒤 같은 누름을 아래 배치 드래그 경로로 넘긴다.
+			currentMode = Owner->GetPlayerController()->GetCurrentInputMode();
+		}
+	}
+    BeginEmployeeCarryPress(currentMode == EInputMode::Normal ? collisionActor : nullptr);
 
     if (currentMode == EInputMode::BuildPlace)
     {
         // BuildPlace 모드 처리 - 건물, 업무공간, 장식품 배치 대상 확인
         AActor* PlacementTarget = nullptr;
+        bool bCityPlacement = false;
 
         if (Owner->PlacementHandler->IsWorkstationMode())
         {
@@ -172,6 +229,17 @@ void UInteractableInputHandler::OnInteractionStarted(const FInputActionValue& Va
         else
         {
             PlacementTarget = Cast<AActor>(Owner->PlacementHandler->GetPlacementTargetEntity());
+            bCityPlacement = true;
+        }
+
+        if (bCityPlacement && PlacementTarget && collisionActor != PlacementTarget
+            && IsTouchNearPlacementTarget(Owner->GetPlayerController(), PlacementTarget, screenPos,
+                PlacementTouchSlopDp * UWidgetLayoutLibrary::GetViewportScale(this)))
+        {
+            UE_LOG(LogTemp, Log, TEXT("[PlacementTouch] near-miss grabbed %s (ray hit %s)"),
+                *PlacementTarget->GetName(), collisionActor ? *collisionActor->GetName() : TEXT("None"));
+            collisionActor = PlacementTarget;
+            LastHitActor = PlacementTarget;
         }
 
         if (collisionActor && collisionActor == PlacementTarget)
@@ -222,6 +290,11 @@ void UInteractableInputHandler::OnInteractionStarted(const FInputActionValue& Va
                 return;
             }
 
+            if (collisionActor->ActorHasTag("Factory"))
+            {
+                FactoryPressPhase = CGRFactoryTapHoldPolicy::EPhase::Holding;
+            }
+
             APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
             IInputHandler::Execute_OnInteract(LastHitActor, PC);
             GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, TEXT("Interactable clicked"));
@@ -230,8 +303,24 @@ void UInteractableInputHandler::OnInteractionStarted(const FInputActionValue& Va
     }
 }
 
+bool UInteractableInputHandler::TryGetFactoryHoldAnchor(FVector2D& OutAbsolutePosition) const
+{
+    if (FactoryPressPhase != CGRFactoryTapHoldPolicy::EPhase::Holding)
+    {
+        return false;
+    }
+
+    OutAbsolutePosition = SavedTouchAbsolutePos;
+    return true;
+}
+
 void UInteractableInputHandler::OnInteractionTriggered(const FInputActionValue& Value)
 {
+    if (bEmployeeCarryPress)
+    {
+        UpdateEmployeeCarryPress();
+    }
+
     // 실제 드래그 거리로 판단
     FVector2D currentScreenPos;
     FVector currentWorldPos;
@@ -239,7 +328,7 @@ void UInteractableInputHandler::OnInteractionTriggered(const FInputActionValue& 
     if (CoordinateUtils::ProjectTouchToGroundPlane(currentScreenPos, currentWorldPos))
     {
         float dragDistance = FVector2D::Distance(SavedTouchScreenPos, currentScreenPos);
-        const float DragThreshold = 30.0f; // 작게 설정해서 민감하게 반응
+        const float DragThreshold = CGRInteractableDragPolicy::DragThresholdPixels;
         const EInputMode currentMode = Owner->GetPlayerController()->GetCurrentInputMode();
         const bool bShouldCancelFactoryHold = CGRInteractableDragPolicy::ShouldCancelFactoryHold(
             bIsDragging,
@@ -257,24 +346,10 @@ void UInteractableInputHandler::OnInteractionTriggered(const FInputActionValue& 
             {
                 ResetFactoryPressState();
             }
-            else if (FactoryDragAction == CGRFactoryTapHoldPolicy::EDragAction::StopProduction)
-            {
-                const bool bImplementsInputHandler = IsValid(LastHitActor)
-                    && LastHitActor->GetClass()->ImplementsInterface(UInputHandler::StaticClass());
-                CGRInteractableDragPolicy::TryCancelFactoryHold(
-                    true,
-                    LastHitActor,
-                    bImplementsInputHandler,
-                    [this](AActor* FactoryActor)
-                    {
-                        APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
-                        IInputHandler::Execute_OnEndInteract(FactoryActor, PC);
-                    });
-                ResetFactoryPressState();
-            }
 
             bIsDragging = true;
 
+            // KeepProduction 은 여기 들어오면 안 된다 — 모드가 Factory 인 동안은 이 경로가 무조건 생산을 끊는다.
             if (FactoryDragAction == CGRFactoryTapHoldPolicy::EDragAction::None)
             {
                 const bool bImplementsInputHandler = IsValid(LastHitActor)
@@ -300,9 +375,23 @@ void UInteractableInputHandler::OnInteractionTriggered(const FInputActionValue& 
     }
 }
 
+bool UInteractableInputHandler::FinishOfficeEditSelectionPress()
+{
+	if (!bOfficeEditSelectionPress) return false;
+	bOfficeEditSelectionPress = false;
+	Owner->PlacementHandler->StopDragging();
+	Owner->PlacementHandler->ReleasePlacementIMC();
+	LastHitActor = nullptr;
+	bIsDragging = false;
+	Owner->MovementInputHandler->InitDragMoveIMC();
+	return true;
+}
+
 void UInteractableInputHandler::OnInteractionFinish(const FInputActionValue& Value)
 {
-    UE_LOG(LogTemp, Error, TEXT("[UInteractableInputHandler] Click-Release"));
+	if (FinishOfficeEditSelectionPress()) return;
+	if (FinishEmployeeCarryPress()) return;
+    UE_LOG(LogTemp, Verbose, TEXT("[UInteractableInputHandler] Click-Release"));
 
     // 배치 드래그 상태 해제
     Owner->PlacementHandler->StopDragging();
@@ -315,6 +404,11 @@ void UInteractableInputHandler::OnInteractionFinish(const FInputActionValue& Val
         return;
     }
 
+    if (ShouldCancelAircraftTap())
+    {
+        LastHitActor = nullptr;
+        bIsDragging = true;
+    }
     EInputMode currentMode = Owner->GetPlayerController()->GetCurrentInputMode();
 
     if (LastHitActor && LastHitActor->GetClass()->ImplementsInterface(UInputHandler::StaticClass()))
@@ -345,6 +439,10 @@ void UInteractableInputHandler::OnInteractionFinish(const FInputActionValue& Val
         {
             OpenWorkstationPanel(Workstation);
         }
+        else if (AOfficeworker* Worker = Cast<AOfficeworker>(LastHitActor))
+        {
+            HandleEmployeeTap(Worker);
+        }
     }
     // 정리
     Owner->MovementInputHandler->InitDragMoveIMC();
@@ -354,7 +452,9 @@ void UInteractableInputHandler::OnInteractionFinish(const FInputActionValue& Val
 
 void UInteractableInputHandler::OnInteractionCanceled(const FInputActionValue& Value)
 {
-    UE_LOG(LogTemp, Error, TEXT("[OnInteractionCanceled] Quick release - 0.2 second"));
+	if (FinishOfficeEditSelectionPress()) return;
+	if (FinishEmployeeCarryPress()) return;
+    UE_LOG(LogTemp, Verbose, TEXT("[OnInteractionCanceled] Quick release - 0.2 second"));
 
     if (FinishFactoryPress())
     {
@@ -363,6 +463,11 @@ void UInteractableInputHandler::OnInteractionCanceled(const FInputActionValue& V
         return;
     }
 
+    if (ShouldCancelAircraftTap())
+    {
+        LastHitActor = nullptr;
+        bIsDragging = true;
+    }
     EInputMode currentMode = Owner->GetPlayerController()->GetCurrentInputMode();
 
     // Interactable 객체 처리
@@ -395,6 +500,10 @@ void UInteractableInputHandler::OnInteractionCanceled(const FInputActionValue& V
         {
             OpenWorkstationPanel(Workstation);
         }
+        else if (AOfficeworker* Worker = Cast<AOfficeworker>(LastHitActor))
+        {
+            HandleEmployeeTap(Worker);
+        }
     }
 
     // 정리
@@ -402,8 +511,49 @@ void UInteractableInputHandler::OnInteractionCanceled(const FInputActionValue& V
     LastHitActor = nullptr;
 }
 
+bool UInteractableInputHandler::ShouldCancelAircraftTap() const
+{
+    if (!Cast<AAmbientAircraftFlyby>(LastHitActor))
+    {
+        return false;
+    }
+    const AMainMapPlayerController* MainMapPC = Owner ? Owner->GetPlayerController() : nullptr;
+    FVector2D ReleasePosition = SavedTouchScreenPos;
+    bool bValidReleasePosition = false;
+    if (MainMapPC)
+    {
+        if (MainMapPC->GetCurrentInputType() == EInputType::Touch)
+        {
+            double TouchX = 0.0, TouchY = 0.0;
+            bool bTouchPressed = false;
+            // PlayerInput는 Ended 이벤트에서도 마지막 X/Y를 유지한다.
+            MainMapPC->GetInputTouchState(ETouchIndex::Touch1, TouchX, TouchY, bTouchPressed);
+            ReleasePosition = FVector2D(TouchX, TouchY);
+            bValidReleasePosition = MainMapPC->PlayerInput != nullptr;
+        }
+        else if (MainMapPC->GetCurrentInputType() == EInputType::KeyMouse)
+        {
+            double MouseX = 0.0, MouseY = 0.0;
+            bValidReleasePosition = MainMapPC->GetMousePosition(MouseX, MouseY);
+            ReleasePosition = FVector2D(MouseX, MouseY);
+        }
+        else
+        {
+            bValidReleasePosition = true;
+        }
+    }
+    return CGRInteractableDragPolicy::ShouldCancelAircraftTap(
+        bIsDragging, bHasPressScreenPosition && bValidReleasePosition, SavedTouchScreenPos, ReleasePosition);
+}
+
 void UInteractableInputHandler::OnTapCompleted(const FInputActionValue& Value)
 {
+	if (FinishOfficeEditSelectionPress()) return;
+	if (FinishEmployeeCarryPress()) return;
+	if (AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(Owner))
+	{
+		if (OfficePawn->IsOfficePlacementEditing() && !LastHitActor) return;
+	}
     EInputMode currentMode = Owner->GetPlayerController()->GetCurrentInputMode();
 
     // BuildPlace 모드: 탭하면 해당 위치로 이동
@@ -460,6 +610,12 @@ AActor* UInteractableInputHandler::GetOverlappingActor(const FVector2D& ScreenPo
     // → LastHitActor 가 null 이 되어 업무공간/빌딩/장식/롱프레스 다운스트림 분기가 전부 no-op.
     if (!bIsPlacementMode && IsOfficeFocusLocked())
     {
+        // 직원만은 맞힌다 — 일하는 직원 찌르기 연출용. 패널은 HandleEmployeeTap 이 계속 막는다.
+        FHitResult WorkerHit;
+        if (GetWorld()->LineTraceSingleByChannel(WorkerHit, WorldLocation, TraceEnd, ECC_GameTraceChannel1, QueryParams))
+        {
+            return Cast<AOfficeworker>(WorkerHit.GetActor());
+        }
         return nullptr;
     }
 
@@ -482,6 +638,18 @@ AActor* UInteractableInputHandler::GetOverlappingActor(const FVector2D& ScreenPo
         return nullptr;
     }
 
+    // 배치 편집 중엔 앉은 직원이 책상 클릭을 가리지 않게 광선에서 뺀다
+    if (const AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(Owner))
+    {
+        if (OfficePawn->IsOfficePlacementEditing())
+        {
+            for (TActorIterator<AOfficeworker> It(GetWorld()); It; ++It)
+            {
+                QueryParams.AddIgnoredActor(*It);
+            }
+        }
+    }
+
     // 일반 모드: Single 레이캐스트
     FHitResult HitResult;
     bool bHit = GetWorld()->LineTraceSingleByChannel(
@@ -491,6 +659,22 @@ AActor* UInteractableInputHandler::GetOverlappingActor(const FVector2D& ScreenPo
         ECC_GameTraceChannel1,
         QueryParams
     );
+
+    // 부지 상자는 지면 위 5m 까지 솟아 있어, 그 위에 선 건물 아래쪽을 누르면 부지가 먼저 맞는다.
+    if (bHit && Cast<ACityPlotActor>(HitResult.GetActor()))
+    {
+        FCollisionQueryParams BehindPlotParams = QueryParams;
+        BehindPlotParams.AddIgnoredActor(HitResult.GetActor());
+        FHitResult BehindHit;
+        if (GetWorld()->LineTraceSingleByChannel(BehindHit, WorldLocation, TraceEnd, ECC_GameTraceChannel1, BehindPlotParams))
+        {
+            const AActor* BehindActor = BehindHit.GetActor();
+            if (Cast<AInteractableBaseActor>(BehindActor) && !Cast<ACityPlotActor>(BehindActor))
+            {
+                HitResult = BehindHit;
+            }
+        }
+    }
 
     UE_LOG(LogTemp, Warning, TEXT("[GetOverlappingActor] bHit=%d, Actor=%s, Component=%s"),
         bHit,
@@ -531,6 +715,12 @@ AActor* UInteractableInputHandler::GetOverlappingActor(const FVector2D& ScreenPo
             return DecorationActor;
         }
 
+        // 직원 — 맞은 컴포넌트는 전용 ClickVolume 뿐이다 (이동 캡슐은 클릭 채널 Ignore)
+        if (AOfficeworker* Worker = Cast<AOfficeworker>(HitActor))
+        {
+            return Worker;
+        }
+
         // 인터페이스 기반 일반 인터랙터블 (AInteractableBaseActor 비파생 — 예: 도시 인수 클릭 프록시)
         if (HitActor->ActorHasTag("Interactable") &&
             HitActor->GetClass()->ImplementsInterface(UInputHandler::StaticClass()))
@@ -542,7 +732,105 @@ AActor* UInteractableInputHandler::GetOverlappingActor(const FVector2D& ScreenPo
     return nullptr;
 }
 
-void UInteractableInputHandler::OpenWorkstationPanel(AWorkstationActorBase* Workstation)
+void UInteractableInputHandler::HandleEmployeeTap(AOfficeworker* Worker)
+{
+    // 초상화 촬영용·로딩 중 숨긴 직원은 클릭 대상이 아니다
+    if (!IsValid(Worker) || Worker->bIsPortraitMode || Worker->IsHidden())
+    {
+        return;
+    }
+    // 개발 중 잠금은 그대로 — 패널 대신 일하는 직원의 짧은 반응만 보여 준다
+    if (IsOfficeFocusLocked())
+    {
+        if (UEmployeeReactionComponent* Reaction = Worker->FindComponentByClass<UEmployeeReactionComponent>())
+        {
+            Reaction->PlayWorkPoke();
+        }
+        return;
+    }
+    if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
+    {
+        if (GI->IsVisitMode()) return;
+    }
+
+    Worker->PlayTapReaction();
+
+    // 사무실 직원 패널 — 위젯 클래스 미등록(DT 행 없음)이면 아래 책상 패널 경로로 폴백
+    if (UOfficeEmployeePanelWidget::PushForEmployee(this, Worker->GetEmployeeID()))
+    {
+        return;
+    }
+
+    if (AWorkstationActorBase* Desk = Worker->GetAssignedWorkstation())
+    {
+        OpenWorkstationPanel(Desk, Worker->GetEmployeeID());
+    }
+}
+
+void UInteractableInputHandler::BeginEmployeeCarryPress(AActor* PressedActor)
+{
+    bEmployeeCarryPress = false;
+    CarryPressReaction.Reset();
+
+    AOfficeworker* Worker = Cast<AOfficeworker>(PressedActor);
+    UEmployeeReactionComponent* Reaction = Worker ? Worker->FindComponentByClass<UEmployeeReactionComponent>() : nullptr;
+    if (!Reaction || !Owner || !Owner->MovementInputHandler || !IsOfficeFocusLocked() || !Reaction->CanBeginCarry())
+    {
+        return;
+    }
+    bEmployeeCarryPress = true;
+    CarryPressReaction = Reaction;
+    // 직원 위에서 시작한 누름은 카메라를 끌지 않는다 — 떼는 쪽(FinishEmployeeCarryPress)이 다시 켠다
+    Owner->MovementInputHandler->ReleaseDragMoveIMC();
+}
+
+void UInteractableInputHandler::UpdateEmployeeCarryPress()
+{
+    UEmployeeReactionComponent* Reaction = CarryPressReaction.Get();
+    if (!Reaction || Reaction->IsCarryActive())
+    {
+        return;
+    }
+    // 문턱은 UI 단위 — 절대(픽셀) 이동량을 뷰포트 DPI 배율로 나눈다
+    const FVector2D Pointer = UGlobalUtilFunctions::GetPointerAbsolutePosition();
+    if (Pointer.IsNearlyZero() || SavedTouchAbsolutePos.IsNearlyZero())
+    {
+        return;
+    }
+    const float ViewportScale = FMath::Max(UWidgetLayoutLibrary::GetViewportScale(this), KINDA_SMALL_NUMBER);
+    if ((Pointer - SavedTouchAbsolutePos).Size() / ViewportScale < UEmployeeReactionComponent::CarryDragThresholdUnits)
+    {
+        return;
+    }
+    Reaction->BeginCarry(true);
+}
+
+bool UInteractableInputHandler::FinishEmployeeCarryPress()
+{
+    if (!bEmployeeCarryPress)
+    {
+        return false;
+    }
+    bEmployeeCarryPress = false;
+    UEmployeeReactionComponent* Reaction = CarryPressReaction.Get();
+    CarryPressReaction.Reset();
+    if (Owner && Owner->MovementInputHandler)
+    {
+        Owner->MovementInputHandler->InitDragMoveIMC();
+    }
+
+    // 끌지 않은 짧은 탭은 기존 해제 경로가 처리한다(폭주 직원 탭 = 지금처럼 무반응, 잡기는 캐치 링)
+    if (!Reaction || !Reaction->IsCarryActive())
+    {
+        return false;
+    }
+    Reaction->ReleaseCarry();
+    bIsDragging = false;
+    LastHitActor = nullptr;
+    return true;
+}
+
+void UInteractableInputHandler::OpenWorkstationPanel(AWorkstationActorBase* Workstation, int32 FocusEmployeeID)
 {
     if (!Workstation || !Owner)
     {
@@ -593,9 +881,9 @@ void UInteractableInputHandler::OpenWorkstationPanel(AWorkstationActorBase* Work
     UCommonActivatableWidget* PushedWidget = UIBase->PushBottomClass(PanelClass.Get());
     if (UWorkstationInfoWidget* InfoWidget = Cast<UWorkstationInfoWidget>(PushedWidget))
     {
-        // v1 = seat 0 기준 (더블 책상 좌석별 선택은 보류)
+        // 책상 클릭은 0번 좌석 기준, 직원 클릭은 그 직원 좌석 기준
         InfoWidget->SetWorkstationData(Workstation);
-        InfoWidget->SetEmployeeData(Workstation->GetAssignedEmployeeID(0));
+        InfoWidget->SetEmployeeData(FocusEmployeeID != INDEX_NONE ? FocusEmployeeID : Workstation->GetAssignedEmployeeID(0));
 
         if (AMainMapPlayerController* MainPC = Owner->GetPlayerController())
         {
@@ -648,6 +936,10 @@ bool UInteractableInputHandler::FinishFactoryPress()
         {
             FactoryPanel->RequestClose();
         }
+        else
+        {
+            HandleFactoryTapOpen();
+        }
     }
     else if (ReleaseAction == CGRFactoryTapHoldPolicy::EReleaseAction::StopProduction)
     {
@@ -668,6 +960,32 @@ bool UInteractableInputHandler::FinishFactoryPress()
     return true;
 }
 
+void UInteractableInputHandler::HandleFactoryTapOpen()
+{
+    if (!IsValid(Cast<ABrickFactory>(LastHitActor)))
+    {
+        return;
+    }
+
+    UUIManagerSubsystem* UIMgr = GetWorld() ? GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+    if (!UIMgr)
+    {
+        return;
+    }
+
+    // 오픈 절차는 UBuildOpenWidget::OnFactoryOpenButtonClicked 과 같다
+    UTableManagerSubsystem* TableMgr = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+    UUIBase* UIBase = UIMgr->GetUIBase();
+    if (!TableMgr || !UIBase)
+    {
+        return;
+    }
+    if (TSubclassOf<UUserWidget> PanelClass = TableMgr->GetWidgetClass(EWidgetType::FactoryPanel))
+    {
+        UIBase->PushBottomClass(PanelClass.Get());
+    }
+}
+
 void UInteractableInputHandler::ResetFactoryPressState()
 {
     if (UWorld* HandlerWorld = GetWorld())
@@ -680,6 +998,7 @@ void UInteractableInputHandler::ResetFactoryPressState()
     }
 
     FactoryPressPhase = CGRFactoryTapHoldPolicy::EPhase::None;
+    SavedTouchAbsolutePos = FVector2D::ZeroVector;
     LastHitActor = nullptr;
 }
 

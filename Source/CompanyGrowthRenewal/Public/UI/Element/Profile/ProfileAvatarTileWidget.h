@@ -11,7 +11,7 @@ class UImage;
  * 프로필 이미지 격자의 타일 1칸
  * 선택 표시는 CommonButtonGroupBase 가 몰아주는 Selected 상태에만 반응한다.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UProfileAvatarTileWidget : public UCommonButtonBase
 {
 	GENERATED_BODY()

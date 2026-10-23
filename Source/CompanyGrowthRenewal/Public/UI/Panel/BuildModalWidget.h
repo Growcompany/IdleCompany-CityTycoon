@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "CommonActivatableWidget.h"
+#include "UI/AnimatedActivatableWidget.h"
 #include "Enum/CompanyType.h"
 #include "Enum/LootBoxRarity.h"
 #include "Table/BuildableCardTable.h"
@@ -11,12 +11,13 @@ class UIndustryButtonWidget;
 class UTabButtonWidget;
 class UButtonWidget;
 class UBuildEntityCardWidget;
-class UCloseButtonWidget;
+class UModalFrameWidget;
 class UTileView;
 class UButton;
 class UTableManagerSubsystem;
 class UCommonButtonGroupBase;
 class UCommonButtonBase;
+class UCommonTextBlock;
 
 /**
  * 빌드 모달 (Build 1.1) — 중앙 프롬프트 모달.
@@ -25,11 +26,25 @@ class UCommonButtonBase;
  * 산업은 모달 진입 시 기본 선택(Game) → 카드 탭 시 함께 넘겨 배치 확정 시 건물에 CompanyType 베이크.
  */
 UCLASS()
-class COMPANYGROWTHRENEWAL_API UBuildModalWidget : public UCommonActivatableWidget
+class COMPANYGROWTHRENEWAL_API UBuildModalWidget : public UAnimatedActivatableWidget
 {
 	GENERATED_BODY()
 
 public:
+	// 카드 표시·결제와 성장 안내가 공유하는 보유 채수별 건설비 계산.
+	static void ApplyBuildCostProgression(TArray<FBuildableCardTable>& InOutCards, int32 OwnedBuildings);
+
+	// 현재 표시된 해금·활성 건물 카드가 있을 때 자유 선택 목록을 안내 앵커로 제공한다.
+	UWidget* GetBuildGuideCatalogWidget() const;
+	// 가상화된 엔트리의 반환 순서 대신 목록의 실제 첫 항목에 연결된 카드를 찾는다.
+	UWidget* GetBuildGuideFirstCardWidget() const;
+	// 해금·구매 가능한 카드 중 수익 보너스가 가장 큰 카드 ― 본사 성장으로 막 열린 건물을 짚는다. 못 고르면 첫 카드
+	UWidget* GetBuildGuideBestCardWidget(FText* OutName = nullptr) const;
+	UWidget* GetBuildGuideIndustryWidget() const;
+	// 튜토리얼 산업 지정 건설(M22 게임사·M30 IT) — 잠겼거나 안 보이면 nullptr
+	UWidget* GetIndustryTileWidget(ECompanyType Industry) const;
+	// 버튼 그룹에서 지금 골라진 산업(잠긴 타일이면 None)
+	ECompanyType GetSelectedIndustry() const;
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeOnActivated() override;
@@ -60,10 +75,9 @@ protected:
 	UTileView* BuildItemListView;
 
 	// ── 닫기 / 딤 ──
-	// 닫기는 필수 기능이라 required. Optional 이던 시절 WBP 이름(UIE_CloseButton)과
-	// 달라 조용히 null 이 되어 X 버튼이 아무 반응도 없었다.
+	// 공통 셸과 제목 영역은 필수 바인딩이다.
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidget))
-	UCloseButtonWidget* UIE_CloseButton;
+	TObjectPtr<UModalFrameWidget> ModalFrame;
 
 	// 풀스크린 투명 딤 — 클릭 시 닫기 (ProductSellModal 패턴)
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
@@ -73,14 +87,9 @@ protected:
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
 	UWidget* EmptyStatePrompt;
 
-	// 카드 [일반]/[특수] 탭 — WBP 미배치 가능성이 있어 Optional. 둘 다 존재할 때만 키스톤 필터/탭 그룹 활성.
-	// 타입은 BuildingManagePanel 의 탭 래퍼(UTabButtonWidget)와 동일.
-	// 일반/특수 = 프로젝트 표준 필터토글(UI_Element_Button + CUI_Style2_TapButton_Blue). UButtonWidget=CommonButtonBase 파생이라 그룹 직접 등록.
-	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
-	UButtonWidget* NormalCardTab;
-
-	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
-	UButtonWidget* SpecialCardTab;
+	// 건물 개수 칩 글자 ― Office 카탈로그 개수 칩과 같은 부품
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidget))
+	TObjectPtr<UCommonTextBlock> CatalogCount;
 
 private:
 	friend class FCGRBuildModalSelectionTest;
@@ -91,10 +100,6 @@ private:
 	// 산업 타일 배타선택 변경 핸들러 (UCommonButtonGroupBase)
 	UFUNCTION()
 	void OnIndustryTileSelected(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
-
-	// 카드 [일반](0)/[특수](1) 탭 배타선택 변경 핸들러 — 인덱스 저장 후 카드 재필터.
-	UFUNCTION()
-	void OnCardTabSelectionChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
 
 	// ListView 엔트리 생성 시 카드 선택 델리게이트 연결 (재활용 대비)
 	void HandleEntryGenerated(UUserWidget& EntryWidget);
@@ -113,12 +118,15 @@ private:
 	// 건물 카드 리스트 채우기 (등급순 정렬 — BuildPanel 이식)
 	void RefreshBuildingCards();
 
+	// 목록을 다시 채운 뒤 개수 칩과 오른쪽 끝 흐림을 맞춘다
+	void RefreshListChrome();
+
 	void CloseModal();
 
 	// 산업 타일 잠금 재평가 (매 오픈 — HQ 레벨은 모달이 열려 있는 동안 변하지 않음)
 	void RefreshIndustryLocks();
 
-	// 잠긴 타일 탭 안내 토스트 (OnClicked 페이로드 바인딩 — 잠금 아닐 땐 no-op)
+	// 잠긴 타일은 토스트, 열린 타일의 실제 클릭은 미션에 알린다(산업 지정 튜토리얼이 목표 산업 클릭을 기다린다).
 	void OnIndustryTileClicked(UIndustryButtonWidget* Tile);
 
 	UPROPERTY()
@@ -127,13 +135,6 @@ private:
 	// 산업 타일 배타선택 그룹 (탭 정석 — NativeConstruct 셋업)
 	UPROPERTY()
 	UCommonButtonGroupBase* IndustryButtonGroup = nullptr;
-
-	// 카드 [일반]/[특수] 탭 배타선택 그룹 (두 탭 모두 존재할 때만 NativeConstruct 에서 셋업).
-	UPROPERTY()
-	UCommonButtonGroupBase* CardTabButtonGroup = nullptr;
-
-	// 현재 카드 탭 인덱스. 0=일반(비키스톤), 1=특수(키스톤 모뉴먼트).
-	int32 CurrentCardTabIndex = 0;
 
 	UPROPERTY()
 	TArray<UIndustryButtonWidget*> AllTiles;

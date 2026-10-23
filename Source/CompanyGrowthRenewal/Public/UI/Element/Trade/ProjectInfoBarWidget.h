@@ -15,7 +15,7 @@ class UImage;
  * - 개발 중: "수주 - 점프왕 개발 중" / "자체개발 - 점프왕 개발 중"
  * - 운영 중: "프로젝트1 - 점프왕 [A] 운영 중"
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UProjectInfoBarWidget : public UUserWidget
 {
 	GENERATED_BODY()

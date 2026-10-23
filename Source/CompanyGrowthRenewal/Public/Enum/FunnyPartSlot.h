@@ -14,11 +14,15 @@ enum class EFunnyPartSlot : uint8
 	Hair		UMETA(DisplayName = "헤어"),
 	Eyebrow		UMETA(DisplayName = "눈썹"),
 	Glasses		UMETA(DisplayName = "안경"),
+	Mustache	UMETA(DisplayName = "수염"),
+	Glove		UMETA(DisplayName = "장갑"),
+	Headwear	UMETA(DisplayName = "모자"),
+	Back		UMETA(DisplayName = "등 장식"),
 
 	Max			UMETA(Hidden)
 };
 
-// 헤어만 성별로 갈린다. 나머지 슬롯은 전부 Any.
+// 헤어·수염만 성별로 갈린다. 나머지 슬롯은 전부 Any.
 UENUM(BlueprintType)
 enum class EFunnyPartGender : uint8
 {

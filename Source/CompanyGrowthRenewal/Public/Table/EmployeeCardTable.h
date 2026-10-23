@@ -30,11 +30,11 @@ struct FEmployeeCardTable : public FTableRowBase
 	TSoftObjectPtr<UTexture2D> UIIcon;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Display")
-	FColor InfoBackgroundColor;
+	FColor InfoBackgroundColor = FColor::Transparent;
 
 	// 직원 부서
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Employee")
-	EEmployeeDepartment Department;
+	EEmployeeDepartment Department = EEmployeeDepartment::None;
 
 	// 고용 비용
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cost")

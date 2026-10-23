@@ -2,12 +2,12 @@
 
 
 #include "GameMode/MainMenuGameModeBase.h"
-#include "AsyncLoadingScreenLibrary.h"
+#include "MoviePlayer.h"
 
 void AMainMenuGameModeBase::StartPlay()
 {
 	Super::StartPlay();
 
 	// 로딩 화면 종료
-	UAsyncLoadingScreenLibrary::StopLoadingScreen();
+	GetMoviePlayer()->StopMovie();
 }

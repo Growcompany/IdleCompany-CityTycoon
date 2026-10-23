@@ -2,9 +2,12 @@
 
 
 #include "Manager/TableManagerSubsystem.h"
+#include "Entity/Officeworker/FunnyPartPicker.h"  // GetFunnyPartPool 의 성별 필터
 #include "Engine/Engine.h"
 #include "Table/WidgetDataTable.h"
 #include "Table/ConstructionCost.h"
+#include "Data/AttendanceRules.h"  // 출석 행 검증의 CycleLength
+#include "Global/KoreanJosa.h"  // 리뷰 코멘트 토큰 뒤 조사 교정
 #include "Blueprint/UserWidget.h"
 #include "Engine/AssetManager.h"
 
@@ -17,6 +20,27 @@
 
 UTableManagerSubsystem::UTableManagerSubsystem()
 {
+    static ConstructorHelpers::FObjectFinder<UDataTable> EquipmentDefinitionFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_EmployeeEquipmentDefinition.DT_EmployeeEquipmentDefinition'"));
+    if (EquipmentDefinitionFinder.Succeeded()) EmployeeEquipmentDefinitionDataTable = EquipmentDefinitionFinder.Object;
+    static ConstructorHelpers::FObjectFinder<UDataTable> EquipmentEffectFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_EmployeeEquipmentEffect.DT_EmployeeEquipmentEffect'"));
+    if (EquipmentEffectFinder.Succeeded()) EmployeeEquipmentEffectDataTable = EquipmentEffectFinder.Object;
+    static ConstructorHelpers::FObjectFinder<UDataTable> EquipmentAppearanceFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_EmployeeEquipmentAppearance.DT_EmployeeEquipmentAppearance'"));
+    if (EquipmentAppearanceFinder.Succeeded()) EmployeeEquipmentAppearanceDataTable = EquipmentAppearanceFinder.Object;
+    static ConstructorHelpers::FObjectFinder<UDataTable> EquipmentGradeFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_EmployeeEquipmentGrade.DT_EmployeeEquipmentGrade'"));
+    if (EquipmentGradeFinder.Succeeded()) EmployeeEquipmentGradeDataTable = EquipmentGradeFinder.Object;
+    static ConstructorHelpers::FObjectFinder<UDataTable> EquipmentSlotFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_EmployeeEquipmentSlot.DT_EmployeeEquipmentSlot'"));
+    if (EquipmentSlotFinder.Succeeded()) EmployeeEquipmentSlotDataTable = EquipmentSlotFinder.Object;
+    static ConstructorHelpers::FObjectFinder<UDataTable> EquipmentBannerFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_EmployeeEquipmentBanner.DT_EmployeeEquipmentBanner'"));
+    if (EquipmentBannerFinder.Succeeded()) EmployeeEquipmentBannerDataTable = EquipmentBannerFinder.Object;
+    static ConstructorHelpers::FObjectFinder<UDataTable> EquipmentEconomyFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_EmployeeEquipmentEconomy.DT_EmployeeEquipmentEconomy'"));
+    if (EquipmentEconomyFinder.Succeeded()) EmployeeEquipmentEconomyDataTable = EquipmentEconomyFinder.Object;
     static ConstructorHelpers::FObjectFinder<UDataTable> DT(
         TEXT("DataTable'/Game/CompanyGrowth/Table/UI/DT_WidgetClass.DT_WidgetClass'")
     );
@@ -31,6 +55,13 @@ UTableManagerSubsystem::UTableManagerSubsystem()
     if (UIVFXT.Succeeded())
     {
         UIVFXTexDataTable = UIVFXT.Object;
+    }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> PanelThemeFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/UI/DT_PanelTheme.DT_PanelTheme'"));
+    if (PanelThemeFinder.Succeeded())
+    {
+        PanelThemeDataTable = PanelThemeFinder.Object;
     }
 
     static ConstructorHelpers::FObjectFinder<UDataTable> LLBT(
@@ -145,39 +176,6 @@ UTableManagerSubsystem::UTableManagerSubsystem()
         FirstNameDataTable = FNT.Object;
     }
 
-    // Character Appearance DataTables
-    static ConstructorHelpers::FObjectFinder<UDataTable> HPT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_HairPart.DT_HairPart'")
-    );
-    if (HPT.Succeeded())
-    {
-        HairPartDataTable = HPT.Object;
-    }
-
-    static ConstructorHelpers::FObjectFinder<UDataTable> RCT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_RankClothing.DT_RankClothing'")
-    );
-    if (RCT.Succeeded())
-    {
-        RankClothingDataTable = RCT.Object;
-    }
-
-    static ConstructorHelpers::FObjectFinder<UDataTable> HPGT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_HairPartGirl.DT_HairPartGirl'")
-    );
-    if (HPGT.Succeeded())
-    {
-        HairPartGirlDataTable = HPGT.Object;
-    }
-
-    static ConstructorHelpers::FObjectFinder<UDataTable> RCGT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_RankClothingGirl.DT_RankClothingGirl'")
-    );
-    if (RCGT.Succeeded())
-    {
-        RankClothingGirlDataTable = RCGT.Object;
-    }
-
     // Worker Cosmetic (스틱맨 직원 외형: 색 + 안경)
     static ConstructorHelpers::FObjectFinder<UDataTable> WrkCosmeticT(
         TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_WorkerCosmetic.DT_WorkerCosmetic'")
@@ -187,36 +185,52 @@ UTableManagerSubsystem::UTableManagerSubsystem()
         WorkerCosmeticDataTable = WrkCosmeticT.Object;
     }
 
-    static ConstructorHelpers::FObjectFinder<UDataTable> ECT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_EyeColor.DT_EyeColor'")
+    // Funny Worker 3종. 에셋 미생성 상태에서는 Succeeded()==false 로 조용히 통과하고 접근자가 빈 결과를 준다.
+    static ConstructorHelpers::FObjectFinder<UDataTable> FunnyCosT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_FunnyWorkerCosmetic.DT_FunnyWorkerCosmetic'")
     );
-    if (ECT.Succeeded())
+    if (FunnyCosT.Succeeded())
     {
-        EyeColorDataTable = ECT.Object;
+        FunnyWorkerCosmeticDataTable = FunnyCosT.Object;
     }
 
-    static ConstructorHelpers::FObjectFinder<UDataTable> SCT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_SkinColor.DT_SkinColor'")
+    static ConstructorHelpers::FObjectFinder<UDataTable> FunnyPoolT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_FunnyPartPool.DT_FunnyPartPool'")
     );
-    if (SCT.Succeeded())
+    if (FunnyPoolT.Succeeded())
     {
-        SkinColorDataTable = SCT.Object;
+        FunnyPartPoolDataTable = FunnyPoolT.Object;
     }
 
-    static ConstructorHelpers::FObjectFinder<UDataTable> HCT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_HairColor.DT_HairColor'")
+    static ConstructorHelpers::FObjectFinder<UDataTable> FunnyWardrobeT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_FunnyWardrobe.DT_FunnyWardrobe'")
     );
-    if (HCT.Succeeded())
+    if (FunnyWardrobeT.Succeeded())
     {
-        HairColorDataTable = HCT.Object;
+        FunnyWardrobeDataTable = FunnyWardrobeT.Object;
     }
 
-    static ConstructorHelpers::FObjectFinder<UDataTable> CBMT(
-        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_CharacterBaseMesh.DT_CharacterBaseMesh'")
+    static ConstructorHelpers::FObjectFinder<UDataTable> FunnyGarmentT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_FunnyGarmentStyle.DT_FunnyGarmentStyle'")
     );
-    if (CBMT.Succeeded())
+    if (FunnyGarmentT.Succeeded())
     {
-        CharacterBaseMeshDataTable = CBMT.Object;
+        FunnyGarmentStyleDataTable = FunnyGarmentT.Object;
+    }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> FunnyExprT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_FunnyExpression.DT_FunnyExpression'")
+    );
+    if (FunnyExprT.Succeeded())
+    {
+        FunnyExpressionDataTable = FunnyExprT.Object;
+    }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> FunnyFaceStyleT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Employee/DT_FunnyFaceStyle.DT_FunnyFaceStyle'"));
+    if (FunnyFaceStyleT.Succeeded())
+    {
+        FunnyFaceStyleDataTable = FunnyFaceStyleT.Object;
     }
 
     // Resource DataTable
@@ -247,6 +261,10 @@ UTableManagerSubsystem::UTableManagerSubsystem()
     }
 
     // Decoration DataTables
+    static ConstructorHelpers::FObjectFinder<UDataTable> CatalogDT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Office/DT_DecorationCatalog.DT_DecorationCatalog'"));
+    if (CatalogDT.Succeeded()) DecorationCatalogDataTable = CatalogDT.Object;
+
     static ConstructorHelpers::FObjectFinder<UDataTable> DCT(
         TEXT("DataTable'/Game/CompanyGrowth/Table/Office/DT_DecorationCard.DT_DecorationCard'")
     );
@@ -288,6 +306,10 @@ UTableManagerSubsystem::UTableManagerSubsystem()
     {
         WorkstationSetupLevelDataTable = WSLT.Object;
     }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> WUT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Office/DT_WorkstationUpgrade.DT_WorkstationUpgrade'"));
+    if (WUT.Succeeded()) WorkstationUpgradeDataTable = WUT.Object;
 
     // UIIcon DataTable
     static ConstructorHelpers::FObjectFinder<UDataTable> UIIT(
@@ -384,6 +406,11 @@ UTableManagerSubsystem::UTableManagerSubsystem()
     );
     if (MBT.Succeeded()) { MarketBalanceDataTable = MBT.Object; }
 
+    static ConstructorHelpers::FObjectFinder<UDataTable> IFT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/WorldMap/DT_InstantFinishBalance.DT_InstantFinishBalance'")
+    );
+    if (IFT.Succeeded()) { InstantFinishBalanceDataTable = IFT.Object; }
+
     // VFX DataTable
     static ConstructorHelpers::FObjectFinder<UDataTable> VFXT(
         TEXT("DataTable'/Game/CompanyGrowth/Table/VFX/DT_VFX.DT_VFX'")
@@ -448,9 +475,69 @@ UTableManagerSubsystem::UTableManagerSubsystem()
         TEXT("DataTable'/Game/CompanyGrowth/Table/Mission/DT_Goal.DT_Goal'"));
     if (GT.Succeeded()) { GoalDataTable = GT.Object; }
 
+    static ConstructorHelpers::FObjectFinder<UDataTable> QT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/LiveOps/DT_Quest.DT_Quest'"));
+    if (QT.Succeeded()) { QuestDataTable = QT.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> ATT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/LiveOps/DT_Attendance.DT_Attendance'"));
+    if (ATT.Succeeded()) { AttendanceDataTable = ATT.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> BTC(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/SideContent/DT_BusinessTripCard.DT_BusinessTripCard'"));
+    if (BTC.Succeeded()) { BusinessTripCardDataTable = BTC.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> CFU(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/SideContent/DT_CompanyFeatureUnlock.DT_CompanyFeatureUnlock'"));
+    if (CFU.Succeeded()) { CompanyFeatureUnlockDataTable = CFU.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> SDL(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/SideContent/DT_SideDungeonLoot.DT_SideDungeonLoot'"));
+    if (SDL.Succeeded()) { SideDungeonLootDataTable = SDL.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> TCT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/SideContent/DT_TrainingCourse.DT_TrainingCourse'"));
+    if (TCT.Succeeded()) { TrainingCourseDataTable = TCT.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> TTT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/SideContent/DT_TrainingTopic.DT_TrainingTopic'"));
+    if (TTT.Succeeded()) { TrainingTopicDataTable = TTT.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> SKF(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/SideContent/DT_SkylineFloor.DT_SkylineFloor'"));
+    if (SKF.Succeeded()) { SkylineFloorDataTable = SKF.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> FUP(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/SideContent/DT_FusionProject.DT_FusionProject'"));
+    if (FUP.Succeeded()) { FusionProjectDataTable = FUP.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> LOET(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/LiveOps/DT_LiveOpsEvent.DT_LiveOpsEvent'"));
+    if (LOET.Succeeded()) { LiveOpsEventDataTable = LOET.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> LONT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/LiveOps/DT_LiveOpsNotice.DT_LiveOpsNotice'"));
+    if (LONT.Succeeded()) { LiveOpsNoticeDataTable = LONT.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> LOMT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/LiveOps/DT_LiveOpsMail.DT_LiveOpsMail'"));
+    if (LOMT.Succeeded()) { LiveOpsMailDataTable = LOMT.Object; }
+
     static ConstructorHelpers::FObjectFinder<UDataTable> PNIT(
         TEXT("DataTable'/Game/CompanyGrowth/Table/UI/DT_PanelIntro.DT_PanelIntro'"));
     if (PNIT.Succeeded()) { PanelIntroDataTable = PNIT.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> HLPT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/UI/DT_Help.DT_Help'"));
+    if (HLPT.Succeeded()) { HelpDataTable = HLPT.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> CETT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Cloud/DT_CloudErrorText.DT_CloudErrorText'"));
+    if (CETT.Succeeded()) { CloudErrorTextDataTable = CETT.Object; }
+
+    static ConstructorHelpers::FObjectFinder<UDataTable> LTPT(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/UI/DT_LoadingTip.DT_LoadingTip'"));
+    if (LTPT.Succeeded()) { LoadingTipDataTable = LTPT.Object; }
 
     // Recipe DataTables (제조업 타입별)
     static ConstructorHelpers::FObjectFinder<UDataTable> RHT(
@@ -630,6 +717,13 @@ UTableManagerSubsystem::UTableManagerSubsystem()
         FactoryUpgradeDefinitionDataTable = FUDT.Object;
     }
 
+    static ConstructorHelpers::FObjectFinder<UDataTable> FactoryAppearanceFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Factory/DT_FactoryAppearance.DT_FactoryAppearance'"));
+    if (FactoryAppearanceFinder.Succeeded())
+    {
+        FactoryAppearanceDataTable = FactoryAppearanceFinder.Object;
+    }
+
     // Building Trait DataTable (BUILDING_TRAIT_SYSTEM v1.1 — 105행)
     static ConstructorHelpers::FObjectFinder<UDataTable> BTDT(
         TEXT("DataTable'/Game/CompanyGrowth/Table/Building/DT_BuildingTrait.DT_BuildingTrait'")
@@ -658,6 +752,13 @@ UTableManagerSubsystem::UTableManagerSubsystem()
     );
     if (IMPT.Succeeded()) { IndustryMoodPaletteDataTable = IMPT.Object; }
 
+    static ConstructorHelpers::FObjectFinder<UDataTable> GachaBoxVisualFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/UI/DT_GachaBoxVisual.DT_GachaBoxVisual'"));
+    if (GachaBoxVisualFinder.Succeeded()) { GachaBoxVisualDataTable = GachaBoxVisualFinder.Object; }
+    static ConstructorHelpers::FObjectFinder<UDataTable> GachaIconBoundsFinder(
+        TEXT("DataTable'/Game/CompanyGrowth/Table/Gacha/DT_GachaIconBounds.DT_GachaIconBounds'"));
+    if (GachaIconBoundsFinder.Succeeded()) { GachaIconBoundsDataTable = GachaIconBoundsFinder.Object; }
+
 }
 
 void UTableManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -669,23 +770,18 @@ void UTableManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     InitializeEmployeeCardTable();
     InitializeInteractableTable();
     InitializeBuildingTable();
-    InitializeHairPartTable();
-    InitializeRankClothingTable();
-    InitializeHairPartGirlTable();
-    InitializeRankClothingGirlTable();
     InitializeWorkerCosmeticTable();
-    InitializeEyeColorTable();
-    InitializeSkinColorTable();
-    InitializeHairColorTable();
-    InitializeCharacterBaseMeshTable();
+    InitializeFunnyTables();
     InitializeResourceTable();
     InitializeBuildingSkinTable();
     InitializeBuildingLightTable();
     InitializeDecorationCardTable();
+    InitializeDecorationCatalog();
     InitializeDecorationDataTable();
     InitializeWorkstationCardTable();
     InitializeWorkstationItemSkinTable();
     InitializeWorkstationSetupLevelTable();
+    InitializeWorkstationUpgradeTable();
     InitializeUIIconTable();
     InitializeMoneyVFXTable();
     InitializeGameProjectTable();
@@ -697,12 +793,20 @@ void UTableManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     InitializeBoostGambleTable();
     InitializeTradeOrderBalanceTable();
     InitializeMarketBalanceTable();
+    InitializeInstantFinishBalanceTable();
     InitializeVFXTable();
     InitializeTierUnlockTable();
     InitializeCountryInfoTable();
     InitializeMissionTable();
     InitializeGoalTable();
+    InitializeQuestTables();
+    InitializeAttendanceTable();
+    InitializeSideContentTables();
+    InitializeLiveOpsTables();
     InitializePanelIntroTable();
+    InitializeHelpTable();
+    InitializeCloudErrorTextTable();
+    InitializeLoadingTipTable();
     InitializeCountryDemandTable();
     InitializeCountryMarketRoleTable();
     InitializeCompanyInfoTable();
@@ -714,13 +818,16 @@ void UTableManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     InitializeStepDisplayNameTable();
     InitializeDisciplineDisplayTable();
     InitializeUIVFXTexTable();
+    InitializePanelThemeTable();
     InitializeLaunchLootBandTable();
     InitializeShopItemTable();
+    InitializeEmployeeEquipmentTables();
     InitializeLaunchLootTable();
     InitializeBuildingEnhancementDefinitionTable();
     InitializeWorldFactoryUpgradeDefinitionTable();
     InitializeMineUpgradeDefinitionTable();
     InitializeFactoryUpgradeDefinitionTable();
+    InitializeFactoryAppearanceTable();
     InitializeBuildingTraitTable();
     InitializeBuildingTraitSetBonusTable();
     InitializeOfficeStarterPresetTable();
@@ -735,17 +842,14 @@ void UTableManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
     InitializeCityPlotTable();
     InitializeCityDressingTable();
     InitializeCityCompanyTable();
+    InitializeGachaBoxVisualTable();
+    InitializeGachaIconBoundsTable();
 
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] Widget Table Initialized (%d entries)"), WidgetTable.Num());
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] BuildTable Table Initialized (%d entries)"), BuildTable.Num());
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] EmployeeCardTable Table Initialized (%d entries)"), EmployeeCardTable.Num());
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] InteractableTable Table Initialized (%d entries)"), InteractableTable.Num());
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] BuildingTable Table Initialized (%d entries)"), BuildingTable.Num());
-    UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] HairCombinationTable Initialized (%d entries)"), HairPartTable.Num());
-    UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] RankClothingTable Initialized (%d entries)"), RankClothingTable.Num());
-    UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] EyeColorTable Initialized (%d entries)"), EyeColorTable.Num());
-    UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] SkinColorTable Initialized (%d entries)"), SkinColorTable.Num());
-    UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] HairColorTable Initialized (%d entries)"), HairColorTable.Num());
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] ResourceTable Initialized (%d entries)"), ResourceTable.Num());
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] BuildingSkinTable Initialized (%d entries)"), BuildingSkinTable.Num());
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] BuildingLightTable Initialized (%d entries)"), BuildingLightTable.Num());
@@ -884,306 +988,6 @@ void UTableManagerSubsystem::InitializeBuildingTable()
     UE_LOG(LogTemp, Log, TEXT("InitializeBuildingTable: Loaded %d building entries."), BuildingTable.Num());
 }
 
-void UTableManagerSubsystem::InitializeHairPartTable()
-{
-    if (!HairPartDataTable)
-    {
-        UE_LOG(LogTemp, Error, TEXT("InitializeHairPartTable: HairPartDataTable is not set!"));
-        return;
-    }
-
-    TArray<FHairPartTable*> Rows;
-    HairPartDataTable->GetAllRows<FHairPartTable>(TEXT("InitializeHairPartTable"), Rows);
-
-    // 1단계: 먼저 HairPartTable에 Row 추가
-    for (FHairPartTable* Row : Rows)
-    {
-        if (Row)
-        {
-            HairPartTable.Add(FName(*Row->PartName), *Row);
-        }
-    }
-
-    // 2단계: 비동기 로딩을 위한 경로 수집
-    TArray<FSoftObjectPath> AssetsToLoad;
-    for (FHairPartTable* Row : Rows)
-    {
-        if (Row && Row->HairMesh.ToSoftObjectPath().IsValid())
-        {
-            AssetsToLoad.Add(Row->HairMesh.ToSoftObjectPath());
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("Starting async load for %d hair meshes (Male)..."), AssetsToLoad.Num());
-
-    // StreamableManager로 비동기 로딩 시작
-    HairMeshLoadHandle = StreamableManager.RequestAsyncLoad(
-        AssetsToLoad,
-        FStreamableDelegate::CreateUObject(this, &UTableManagerSubsystem::OnHairMeshesLoaded),
-        FStreamableManager::AsyncLoadHighPriority
-    );
-
-    UE_LOG(LogTemp, Log, TEXT("InitializeHairPartTable (Male): %d parts registered, meshes loading async..."),
-        HairPartTable.Num());
-}
-
-void UTableManagerSubsystem::InitializeRankClothingTable()
-{
-    if (!RankClothingDataTable)
-    {
-        UE_LOG(LogTemp, Error, TEXT("InitializeRankClothingTable: RankClothingDataTable is not set!"));
-        return;
-    }
-
-    TArray<FRankClothingTable*> Rows;
-    RankClothingDataTable->GetAllRows<FRankClothingTable>(TEXT("InitializeRankClothingTable"), Rows);
-
-    // 중복 제거를 위해 unique mesh path만 수집
-    TSet<FSoftObjectPath> UniqueTopMeshes;
-    TSet<FSoftObjectPath> UniqueAccessoryMeshes;
-    TSet<FSoftObjectPath> UniqueShoeMeshes;
-
-    // 1단계: 모든 Rank의 mesh path 수집 (중복 제거)
-    for (FRankClothingTable* Row : Rows)
-    {
-        if (Row)
-        {
-            if (Row->TopMeshes.ToSoftObjectPath().IsValid())
-            {
-                UniqueTopMeshes.Add(Row->TopMeshes.ToSoftObjectPath());
-            }
-            if (Row->AccessoryMeshes.ToSoftObjectPath().IsValid())
-            {
-                UniqueAccessoryMeshes.Add(Row->AccessoryMeshes.ToSoftObjectPath());
-            }
-            for (const TSoftObjectPtr<USkeletalMesh>& ShoeMesh : Row->ShoeMeshes)
-            {
-                if (ShoeMesh.ToSoftObjectPath().IsValid())
-                {
-                    UniqueShoeMeshes.Add(ShoeMesh.ToSoftObjectPath());
-                }
-            }
-        }
-    }
-
-    // 2단계: 비동기 Preload 시작
-    TArray<FSoftObjectPath> AssetsToLoad;
-    AssetsToLoad.Append(UniqueTopMeshes.Array());
-    AssetsToLoad.Append(UniqueAccessoryMeshes.Array());
-    AssetsToLoad.Append(UniqueShoeMeshes.Array());
-
-    UE_LOG(LogTemp, Log, TEXT("Starting async load for %d clothing meshes (Male)..."), AssetsToLoad.Num());
-
-    // StreamableManager로 비동기 로딩 시작
-    ClothingMeshLoadHandle = StreamableManager.RequestAsyncLoad(
-        AssetsToLoad,
-        FStreamableDelegate::CreateUObject(this, &UTableManagerSubsystem::OnClothingMeshesLoaded),
-        FStreamableManager::AsyncLoadHighPriority
-    );
-
-    // 3단계: RankClothingTable에 Row 추가 (메시는 비동기 로딩 중)
-    for (FRankClothingTable* Row : Rows)
-    {
-        if (Row)
-        {
-            RankClothingTable.Add(FName(*FString::Printf(TEXT("Rank_%d"), (int32)Row->Rank)), *Row);
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("InitializeRankClothingTable (Male): %d ranks registered, meshes loading async..."),
-        Rows.Num());
-}
-
-void UTableManagerSubsystem::InitializeHairPartGirlTable()
-{
-    if (!HairPartGirlDataTable)
-    {
-        UE_LOG(LogTemp, Error, TEXT("InitializeHairPartGirlTable: HairPartGirlDataTable is not set!"));
-        return;
-    }
-
-    TArray<FHairPartTable*> Rows;
-    HairPartGirlDataTable->GetAllRows<FHairPartTable>(TEXT("InitializeHairPartGirlTable"), Rows);
-
-    // 1단계: 먼저 HairPartGirlTable에 Row 추가
-    for (FHairPartTable* Row : Rows)
-    {
-        if (Row)
-        {
-            HairPartGirlTable.Add(FName(*Row->PartName), *Row);
-        }
-    }
-
-    // 2단계: 비동기 로딩을 위한 경로 수집
-    TArray<FSoftObjectPath> AssetsToLoad;
-    for (FHairPartTable* Row : Rows)
-    {
-        if (Row && Row->HairMesh.ToSoftObjectPath().IsValid())
-        {
-            AssetsToLoad.Add(Row->HairMesh.ToSoftObjectPath());
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("Starting async load for %d hair meshes (Female)..."), AssetsToLoad.Num());
-
-    // StreamableManager로 비동기 로딩 시작
-    HairGirlMeshLoadHandle = StreamableManager.RequestAsyncLoad(
-        AssetsToLoad,
-        FStreamableDelegate::CreateUObject(this, &UTableManagerSubsystem::OnHairGirlMeshesLoaded),
-        FStreamableManager::AsyncLoadHighPriority
-    );
-
-    UE_LOG(LogTemp, Log, TEXT("InitializeHairPartGirlTable (Female): %d parts registered, meshes loading async..."),
-        HairPartGirlTable.Num());
-}
-
-void UTableManagerSubsystem::InitializeRankClothingGirlTable()
-{
-    if (!RankClothingGirlDataTable)
-    {
-        UE_LOG(LogTemp, Error, TEXT("InitializeRankClothingGirlTable: RankClothingDataTable is not set!"));
-        return;
-    }
-
-    TArray<FRankClothingTable*> Rows;
-    RankClothingGirlDataTable->GetAllRows<FRankClothingTable>(TEXT("InitializeRankClothingGirlTable"), Rows);
-
-    // 중복 제거를 위해 unique mesh path만 수집
-    TSet<FSoftObjectPath> UniqueTopMeshes;
-    TSet<FSoftObjectPath> UniqueAccessoryMeshes;
-    TSet<FSoftObjectPath> UniqueShoeMeshes;
-
-    // 1단계: 모든 Rank의 mesh path 수집 (중복 제거)
-    for (FRankClothingTable* Row : Rows)
-    {
-        if (Row)
-        {
-            if (Row->TopMeshes.ToSoftObjectPath().IsValid())
-            {
-                UniqueTopMeshes.Add(Row->TopMeshes.ToSoftObjectPath());
-            }
-            if (Row->AccessoryMeshes.ToSoftObjectPath().IsValid())
-            {
-                UniqueAccessoryMeshes.Add(Row->AccessoryMeshes.ToSoftObjectPath());
-            }
-            for (const TSoftObjectPtr<USkeletalMesh>& ShoeMesh : Row->ShoeMeshes)
-            {
-                if (ShoeMesh.ToSoftObjectPath().IsValid())
-                {
-                    UniqueShoeMeshes.Add(ShoeMesh.ToSoftObjectPath());
-                }
-            }
-        }
-    }
-
-    // 2단계: 비동기 Preload 시작
-    TArray<FSoftObjectPath> AssetsToLoad;
-    AssetsToLoad.Append(UniqueTopMeshes.Array());
-    AssetsToLoad.Append(UniqueAccessoryMeshes.Array());
-    AssetsToLoad.Append(UniqueShoeMeshes.Array());
-
-    UE_LOG(LogTemp, Log, TEXT("Starting async load for %d clothing meshes (Female)..."), AssetsToLoad.Num());
-
-    // StreamableManager로 비동기 로딩 시작
-    ClothingGirlMeshLoadHandle = StreamableManager.RequestAsyncLoad(
-        AssetsToLoad,
-        FStreamableDelegate::CreateUObject(this, &UTableManagerSubsystem::OnClothingGirlMeshesLoaded),
-        FStreamableManager::AsyncLoadHighPriority
-    );
-
-    // 3단계: RankClothingGirlTable에 Row 추가 (메시는 비동기 로딩 중)
-    for (FRankClothingTable* Row : Rows)
-    {
-        if (Row)
-        {
-            RankClothingGirlTable.Add(FName(*FString::Printf(TEXT("Rank_%d"), (int32)Row->Rank)), *Row);
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("InitializeRankClothingGirlTable (Female): %d ranks registered, meshes loading async..."),
-        Rows.Num());
-}
-
-void UTableManagerSubsystem::InitializeEyeColorTable()
-{
-    if (!EyeColorDataTable)
-    {
-        UE_LOG(LogTemp, Error, TEXT("InitializeEyeColorTable: EyeColorDataTable is not set!"));
-        return;
-    }
-
-    TArray<FEyeColorTable*> Rows;
-    EyeColorDataTable->GetAllRows<FEyeColorTable>(TEXT("InitializeEyeColorTable"), Rows);
-
-    for (FEyeColorTable* Row : Rows)
-    {
-        if (Row)
-        {
-            EyeColorTable.Add(FName(*Row->ColorSetName), *Row);
-        }
-    }
-}
-
-void UTableManagerSubsystem::InitializeSkinColorTable()
-{
-    if (!SkinColorDataTable)
-    {
-        UE_LOG(LogTemp, Error, TEXT("InitializeSkinColorTable: SkinColorDataTable is not set!"));
-        return;
-    }
-
-    TArray<FSkinColorTable*> Rows;
-    SkinColorDataTable->GetAllRows<FSkinColorTable>(TEXT("InitializeSkinColorTable"), Rows);
-
-    for (FSkinColorTable* Row : Rows)
-    {
-        if (Row)
-        {
-            SkinColorTable.Add(FName(*Row->ColorSetName), *Row);
-        }
-    }
-}
-
-void UTableManagerSubsystem::InitializeHairColorTable()
-{
-    if (!HairColorDataTable)
-    {
-        UE_LOG(LogTemp, Error, TEXT("InitializeHairColorTable: HairColorDataTable is not set!"));
-        return;
-    }
-
-    TArray<FHairColorTable*> Rows;
-    HairColorDataTable->GetAllRows<FHairColorTable>(TEXT("InitializeHairColorTable"), Rows);
-
-    for (FHairColorTable* Row : Rows)
-    {
-        if (Row)
-        {
-            HairColorTable.Add(FName(*Row->ColorSetName), *Row);
-        }
-    }
-}
-
-void UTableManagerSubsystem::InitializeCharacterBaseMeshTable()
-{
-    if (!CharacterBaseMeshDataTable)
-    {
-        UE_LOG(LogTemp, Error, TEXT("InitializeCharacterBaseMeshTable: CharacterBaseMeshDataTable is not set!"));
-        return;
-    }
-
-    TArray<FCharacterBaseMeshTable*> Rows;
-    CharacterBaseMeshDataTable->GetAllRows<FCharacterBaseMeshTable>(TEXT("InitializeCharacterBaseMeshTable"), Rows);
-
-    for (FCharacterBaseMeshTable* Row : Rows)
-    {
-        if (Row)
-        {
-            CharacterBaseMeshTable.Add(Row->Gender, *Row);
-        }
-    }
-}
-
 TSubclassOf<UUserWidget> UTableManagerSubsystem::GetWidgetClass(EWidgetType Type) const
 {
     if (const TSubclassOf<UUserWidget>* Found = WidgetTable.Find(Type))
@@ -1255,73 +1059,6 @@ FBuildingData UTableManagerSubsystem::GetBuildingData(FName RowName, bool& bOutS
     return FBuildingData();
 }
 
-FHairPartTable* UTableManagerSubsystem::GetHairPartByName(const FString& PartName, EEmployeeGender Gender)
-{
-    UE_LOG(LogTemp, Warning, TEXT("GetHairPartByName: Searching for '%s', Gender=%d"), *PartName, (int32)Gender);
-
-    // 성별에 따라 다른 테이블 선택
-    TMap<FName, FHairPartTable>* TargetTable = nullptr;
-
-    if (Gender == EEmployeeGender::Female)
-    {
-        TargetTable = &HairPartGirlTable;
-        UE_LOG(LogTemp, Warning, TEXT("Using HairPartGirlTable, Size=%d"), HairPartGirlTable.Num());
-    }
-    else
-    {
-        TargetTable = &HairPartTable;
-        UE_LOG(LogTemp, Warning, TEXT("Using HairPartTable (Male), Size=%d"), HairPartTable.Num());
-    }
-
-    if (!TargetTable) return nullptr;
-
-    // 해당 테이블에서 파트명 찾기
-    for (auto& Pair : *TargetTable)
-    {
-        FHairPartTable& HairPart = Pair.Value;
-        UE_LOG(LogTemp, Warning, TEXT("  Checking Row: Key='%s', PartName='%s', HairMesh.IsValid=%d"),
-            *Pair.Key.ToString(), *HairPart.PartName, HairPart.HairMesh.IsValid());
-
-        if (HairPart.PartName == PartName)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("  FOUND: PartName matches. HairMesh='%s', IsValid=%d"),
-                *HairPart.HairMesh.ToString(), HairPart.HairMesh.IsValid());
-            return &HairPart;
-        }
-    }
-
-    UE_LOG(LogTemp, Error, TEXT("  NOT FOUND: '%s' not in table"), *PartName);
-    return nullptr;
-}
-
-FRankClothingTable* UTableManagerSubsystem::GetClothingForRank(EEmployeeRank Rank, EEmployeeGender Gender)
-{
-    // 성별에 따라 다른 테이블 선택
-    TMap<FName, FRankClothingTable>* TargetTable = nullptr;
-
-    if (Gender == EEmployeeGender::Female)
-    {
-        TargetTable = &RankClothingGirlTable; // 새로운 여성용 테이블
-    }
-    else
-    {
-        TargetTable = &RankClothingTable; // 기존 남성용 테이블
-    }
-
-    if (!TargetTable) return nullptr;
-
-    // 해당 테이블에서 랭크 찾기
-    for (auto& Pair : *TargetTable)
-    {
-        FRankClothingTable& ClothingData = Pair.Value;
-        if (ClothingData.Rank == Rank)
-        {
-            return &ClothingData;
-        }
-    }
-    return nullptr;
-}
-
 void UTableManagerSubsystem::InitializeWorkerCosmeticTable()
 {
     if (!WorkerCosmeticDataTable)
@@ -1357,47 +1094,219 @@ FWorkerCosmeticTable UTableManagerSubsystem::GetWorkerCosmeticData(FName RowName
     return FWorkerCosmeticTable();
 }
 
-FEyeColorTable* UTableManagerSubsystem::GetRandomEyeColor()
+void UTableManagerSubsystem::InitializeFunnyTables()
 {
-    if (EyeColorTable.Num() == 0) return nullptr;
-
-    TArray<FName> Keys;
-    EyeColorTable.GetKeys(Keys);
-
-    FName RandomKey = Keys[FMath::RandRange(0, Keys.Num() - 1)];
-    return &EyeColorTable[RandomKey];
-}
-
-FSkinColorTable* UTableManagerSubsystem::GetRandomSkinColor()
-{
-    if (SkinColorTable.Num() == 0) return nullptr;
-
-    TArray<FName> Keys;
-    SkinColorTable.GetKeys(Keys);
-
-    FName RandomKey = Keys[FMath::RandRange(0, Keys.Num() - 1)];
-    return &SkinColorTable[RandomKey];
-}
-
-FHairColorTable* UTableManagerSubsystem::GetRandomHairColor()
-{
-    if (HairColorTable.Num() == 0) return nullptr;
-
-    TArray<FName> Keys;
-    HairColorTable.GetKeys(Keys);
-
-    FName RandomKey = Keys[FMath::RandRange(0, Keys.Num() - 1)];
-    return &HairColorTable[RandomKey];
-}
-
-FCharacterBaseMeshTable* UTableManagerSubsystem::GetCharacterBaseMesh(EEmployeeGender Gender)
-{
-    if (CharacterBaseMeshTable.Contains(Gender))
+    FunnyWorkerCosmeticTableMap.Empty();
+    if (FunnyWorkerCosmeticDataTable)
     {
-        return &CharacterBaseMeshTable[Gender];
+        for (const FName& RowName : FunnyWorkerCosmeticDataTable->GetRowNames())
+        {
+            if (const FFunnyWorkerCosmeticTable* Row =
+                FunnyWorkerCosmeticDataTable->FindRow<FFunnyWorkerCosmeticTable>(RowName, TEXT("InitializeFunnyTables")))
+            {
+                FunnyWorkerCosmeticTableMap.Add(RowName, *Row);
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] FunnyWorkerCosmeticDataTable is NULL"));
     }
 
-    UE_LOG(LogTemp, Warning, TEXT("GetCharacterBaseMesh: Gender '%d' not found in CharacterBaseMeshTable!"), (int32)Gender);
+    FunnyPartPoolRows.Empty();
+    FunnyPartRowsById.Empty();
+    if (FunnyPartPoolDataTable)
+    {
+        // 결정성이 여기서 전이된다 — 픽커가 이 배열의 인덱스를 뽑으므로 GetRowNames() 의 TMap 순회 순서를
+        // 그대로 쓰면 실행마다 직원 외형이 뒤섞이고 픽커 테스트는 그 회귀를 잡지 못한다.
+        TArray<FName> RowNames = FunnyPartPoolDataTable->GetRowNames();
+        RowNames.Sort(FNameLexicalLess());
+        for (const FName& RowName : RowNames)
+        {
+            if (const FFunnyPartPoolTable* Row =
+                FunnyPartPoolDataTable->FindRow<FFunnyPartPoolTable>(RowName, TEXT("InitializeFunnyTables")))
+            {
+                FunnyPartPoolRows.Add(*Row);
+                FunnyPartRowsById.Add(RowName, *Row);
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] FunnyPartPoolDataTable is NULL"));
+    }
+
+    FunnyWardrobeRows.Empty();
+    FunnyWardrobeRows.SetNum(static_cast<int32>(EFunnyWardrobeCategory::Max));
+    if (FunnyWardrobeDataTable)
+    {
+        // 파츠풀과 같은 이유로 정렬한다 — GetRowNames() 순서를 그대로 쓰면 실행마다 직원 옷이 뒤바뀐다.
+        TArray<FName> WardrobeNames = FunnyWardrobeDataTable->GetRowNames();
+        WardrobeNames.Sort(FNameLexicalLess());
+        for (const FName& RowName : WardrobeNames)
+        {
+            const FFunnyWardrobeTable* Row =
+                FunnyWardrobeDataTable->FindRow<FFunnyWardrobeTable>(RowName, TEXT("InitializeFunnyTables"));
+            if (!Row || Row->Weight <= 0) { continue; }
+            const int32 Index = static_cast<int32>(Row->Category);
+            if (FunnyWardrobeRows.IsValidIndex(Index))
+            {
+                FunnyWardrobeRows[Index].Emplace(Row->Color, Row->Weight);
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] FunnyWardrobeDataTable is NULL"));
+    }
+
+    FunnyGarmentStyles.Empty();
+    if (FunnyGarmentStyleDataTable)
+    {
+        for (const FName& RowName : FunnyGarmentStyleDataTable->GetRowNames())
+        {
+            if (const FFunnyGarmentStyleTable* Row =
+                FunnyGarmentStyleDataTable->FindRow<FFunnyGarmentStyleTable>(RowName, TEXT("InitializeFunnyTables")))
+            {
+                FunnyGarmentStyles.Add(RowName, *Row);
+            }
+        }
+    }
+
+    FunnyExpressionMap.Empty();
+    BuildFunnyFaceStyles(FunnyFaceStyleDataTable, FunnyFaceStyles);
+    if (FunnyExpressionDataTable)
+    {
+        for (const FName& RowName : FunnyExpressionDataTable->GetRowNames())
+        {
+            if (const FFunnyExpressionTable* Row =
+                FunnyExpressionDataTable->FindRow<FFunnyExpressionTable>(RowName, TEXT("InitializeFunnyTables")))
+            {
+                FunnyExpressionMap.Add(Row->Expression, *Row);
+            }
+        }
+        if (FunnyExpressionMap.Num() != static_cast<int32>(EWorkerFaceExpression::Max))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] DT_FunnyExpression 행 %d/%d — CSV 재임포트 필요"),
+                FunnyExpressionMap.Num(), static_cast<int32>(EWorkerFaceExpression::Max));
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] FunnyExpressionDataTable is NULL"));
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] FunnyTables Initialized (cosmetic=%d pool=%d expr=%d)"),
+        FunnyWorkerCosmeticTableMap.Num(), FunnyPartPoolRows.Num(), FunnyExpressionMap.Num());
+}
+
+bool UTableManagerSubsystem::BuildFunnyFaceStyles(const UDataTable* DataTable, TArray<FFunnyFaceStyleTable>& OutStyles)
+{
+    OutStyles.Empty();
+    if (!DataTable || DataTable->GetRowStruct() != FFunnyFaceStyleTable::StaticStruct())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[FaceStyle] DT_FunnyFaceStyle missing or has wrong row struct"));
+        return false;
+    }
+
+    TArray<FName> RowNames = DataTable->GetRowNames();
+    if (RowNames.IsEmpty())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[FaceStyle] DT_FunnyFaceStyle has no rows"));
+        return false;
+    }
+    TArray<FFunnyFaceStyleTable> Sorted;
+    Sorted.Reserve(RowNames.Num());
+    for (const FName RowName : RowNames)
+    {
+        const FFunnyFaceStyleTable* Row = DataTable->FindRow<FFunnyFaceStyleTable>(RowName, TEXT("BuildFunnyFaceStyles"));
+        if (!Row || Row->StyleIndex < 0 || Row->EyesAtlas.IsNull() || Row->MouthAtlas.IsNull())
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[FaceStyle] Invalid row %s (index or atlas path)"), *RowName.ToString());
+            return false;
+        }
+        Sorted.Add(*Row);
+    }
+    Sorted.Sort([](const FFunnyFaceStyleTable& A, const FFunnyFaceStyleTable& B)
+    {
+        return A.StyleIndex < B.StyleIndex;
+    });
+    for (int32 Index = 0; Index < Sorted.Num(); ++Index)
+    {
+        if (Sorted[Index].StyleIndex != Index)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[FaceStyle] StyleIndex must be unique and contiguous from zero (expected %d, got %d)"),
+                Index, Sorted[Index].StyleIndex);
+            return false;
+        }
+    }
+    OutStyles = MoveTemp(Sorted);
+    return true;
+}
+
+FFunnyWorkerCosmeticTable UTableManagerSubsystem::GetFunnyWorkerCosmeticData(FName RowName, bool& bOutSuccess) const
+{
+    if (const FFunnyWorkerCosmeticTable* Found = FunnyWorkerCosmeticTableMap.Find(RowName))
+    {
+        bOutSuccess = true;
+        return *Found;
+    }
+    bOutSuccess = false;
+    UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] GetFunnyWorkerCosmeticData '%s' not found"), *RowName.ToString());
+    return FFunnyWorkerCosmeticTable();
+}
+
+FLinearColor UTableManagerSubsystem::PickWardrobeColor(EFunnyWardrobeCategory Category, int32 EmployeeID) const
+{
+    // 축마다 솔트를 달리해야 상의/하의/포인트가 서로 상관되지 않는다.
+    static const uint32 Salts[] = { 0x1B873593u, 0xCC9E2D51u, 0x85EBCA77u };
+    const int32 Index = static_cast<int32>(Category);
+    if (!FunnyWardrobeRows.IsValidIndex(Index) || FunnyWardrobeRows[Index].Num() == 0)
+    {
+        return FLinearColor::Gray;
+    }
+    const TArray<TPair<FLinearColor, int32>>& Rows = FunnyWardrobeRows[Index];
+    int32 Total = 0;
+    for (const TPair<FLinearColor, int32>& Row : Rows) { Total += Row.Value; }
+    if (Total <= 0) { return FLinearColor::Gray; }
+
+    const uint32 Salt = Salts[Index % UE_ARRAY_COUNT(Salts)];
+    int32 Roll = static_cast<int32>(FFunnyPartPicker::Hash(EmployeeID, Salt) % static_cast<uint32>(Total));
+    for (const TPair<FLinearColor, int32>& Row : Rows)
+    {
+        Roll -= Row.Value;
+        if (Roll < 0) { return Row.Key; }
+    }
+    return Rows.Last().Key;
+}
+
+TArray<FFunnyPartPoolTable> UTableManagerSubsystem::GetFunnyPartPool(EFunnyPartSlot PartSlot, EEmployeeGender Gender) const
+{
+    TArray<FFunnyPartPoolTable> Out;
+    for (const FFunnyPartPoolTable& Row : FunnyPartPoolRows)
+    {
+        if (Row.PartSlot == PartSlot && Row.Weight > 0
+            && FFunnyPartPicker::IsGenderMatch(Row.Gender, Gender))
+        {
+            Out.Add(Row);
+        }
+    }
+    return Out;
+}
+
+const FFunnyExpressionTable* UTableManagerSubsystem::GetFunnyExpressionFace(EWorkerFaceExpression Expression) const
+{
+    if (const FFunnyExpressionTable* Found = FunnyExpressionMap.Find(Expression))
+    {
+        return Found;
+    }
+    bool bAlreadyWarned = false;
+    WarnedMissingFaceExpressions.Add(Expression, &bAlreadyWarned);
+    if (!bAlreadyWarned)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] DT_FunnyExpression 에 %s 행 없음 — 얼굴 칸 미적용"),
+            *UEnum::GetValueAsString(Expression));
+    }
     return nullptr;
 }
 
@@ -1569,182 +1478,16 @@ bool UTableManagerSubsystem::IsFullyInitialized() const
                             BuildTable.Num() > 0 &&
                             EmployeeCardTable.Num() > 0;
 
-    // 캐릭터 관련 테이블들 (optional이지만 있으면 초기화되어야 함)
-    bool bCharacterTablesValid = true;
-    if (HairPartDataTable != nullptr)
-    {
-        bCharacterTablesValid = bCharacterTablesValid && HairPartTable.Num() > 0;
-    }
-    if (RankClothingDataTable != nullptr)
-    {
-        bCharacterTablesValid = bCharacterTablesValid && RankClothingTable.Num() > 0;
-    }
-
-    bool bIsInitialized = bDataTablesValid && bTablesPopulated && bCharacterTablesValid;
+    bool bIsInitialized = bDataTablesValid && bTablesPopulated;
 
     if (!bIsInitialized)
     {
-        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] Not fully initialized - DataTables: %s, Core tables: %s, Character tables: %s"),
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] Not fully initialized - DataTables: %s, Core tables: %s"),
             bDataTablesValid ? TEXT("Valid") : TEXT("Invalid"),
-            bTablesPopulated ? TEXT("Populated") : TEXT("Empty"),
-            bCharacterTablesValid ? TEXT("Valid") : TEXT("Invalid"));
+            bTablesPopulated ? TEXT("Populated") : TEXT("Empty"));
     }
 
     return bIsInitialized;
-}
-
-// ========== 비동기 로딩 콜백 함수들 ==========
-
-void UTableManagerSubsystem::OnClothingMeshesLoaded()
-{
-    if (!ClothingMeshLoadHandle.IsValid())
-    {
-        UE_LOG(LogTemp, Error, TEXT("OnClothingMeshesLoaded: Invalid load handle!"));
-        return;
-    }
-
-    // 로드된 에셋 가져오기
-    TArray<UObject*> LoadedAssets;
-    ClothingMeshLoadHandle->GetLoadedAssets(LoadedAssets);
-
-    int32 SuccessCount = 0;
-    int32 FailCount = 0;
-
-    for (UObject* Asset : LoadedAssets)
-    {
-        if (USkeletalMesh* Mesh = Cast<USkeletalMesh>(Asset))
-        {
-            // UPROPERTY 배열에 저장하여 GC 방지
-            PreloadedClothingMeshes.Add(Mesh);
-            SuccessCount++;
-            UE_LOG(LogTemp, Log, TEXT("Preloaded clothing mesh (Male): %s"), *Mesh->GetName());
-        }
-        else
-        {
-            FailCount++;
-            UE_LOG(LogTemp, Warning, TEXT("Failed to cast loaded asset to SkeletalMesh"));
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("Async preload complete (Male): %d meshes loaded, %d failed"),
-        SuccessCount, FailCount);
-
-    // 로딩 핸들 해제
-    ClothingMeshLoadHandle.Reset();
-}
-
-void UTableManagerSubsystem::OnClothingGirlMeshesLoaded()
-{
-    if (!ClothingGirlMeshLoadHandle.IsValid())
-    {
-        UE_LOG(LogTemp, Error, TEXT("OnClothingGirlMeshesLoaded: Invalid load handle!"));
-        return;
-    }
-
-    // 로드된 에셋 가져오기
-    TArray<UObject*> LoadedAssets;
-    ClothingGirlMeshLoadHandle->GetLoadedAssets(LoadedAssets);
-
-    int32 SuccessCount = 0;
-    int32 FailCount = 0;
-
-    for (UObject* Asset : LoadedAssets)
-    {
-        if (USkeletalMesh* Mesh = Cast<USkeletalMesh>(Asset))
-        {
-            // UPROPERTY 배열에 저장하여 GC 방지
-            PreloadedClothingMeshes.Add(Mesh);
-            SuccessCount++;
-            UE_LOG(LogTemp, Log, TEXT("Preloaded clothing mesh (Female): %s"), *Mesh->GetName());
-        }
-        else
-        {
-            FailCount++;
-            UE_LOG(LogTemp, Warning, TEXT("Failed to cast loaded asset to SkeletalMesh"));
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("Async preload complete (Female): %d meshes loaded, %d failed"),
-        SuccessCount, FailCount);
-
-    // 로딩 핸들 해제
-    ClothingGirlMeshLoadHandle.Reset();
-}
-
-void UTableManagerSubsystem::OnHairMeshesLoaded()
-{
-    if (!HairMeshLoadHandle.IsValid())
-    {
-        UE_LOG(LogTemp, Error, TEXT("OnHairMeshesLoaded: Invalid load handle!"));
-        return;
-    }
-
-    // 로드된 에셋 가져오기
-    TArray<UObject*> LoadedAssets;
-    HairMeshLoadHandle->GetLoadedAssets(LoadedAssets);
-
-    int32 SuccessCount = 0;
-    int32 FailCount = 0;
-
-    for (UObject* Asset : LoadedAssets)
-    {
-        if (USkeletalMesh* Mesh = Cast<USkeletalMesh>(Asset))
-        {
-            // UPROPERTY 배열에 저장하여 GC 방지
-            PreloadedHairMeshes.Add(Mesh);
-            SuccessCount++;
-            UE_LOG(LogTemp, Log, TEXT("Preloaded hair mesh (Male): %s"), *Mesh->GetName());
-        }
-        else
-        {
-            FailCount++;
-            UE_LOG(LogTemp, Warning, TEXT("Failed to cast loaded asset to SkeletalMesh"));
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("Async preload complete (Male Hair): %d meshes loaded, %d failed"),
-        SuccessCount, FailCount);
-
-    // 로딩 핸들 해제
-    HairMeshLoadHandle.Reset();
-}
-
-void UTableManagerSubsystem::OnHairGirlMeshesLoaded()
-{
-    if (!HairGirlMeshLoadHandle.IsValid())
-    {
-        UE_LOG(LogTemp, Error, TEXT("OnHairGirlMeshesLoaded: Invalid load handle!"));
-        return;
-    }
-
-    // 로드된 에셋 가져오기
-    TArray<UObject*> LoadedAssets;
-    HairGirlMeshLoadHandle->GetLoadedAssets(LoadedAssets);
-
-    int32 SuccessCount = 0;
-    int32 FailCount = 0;
-
-    for (UObject* Asset : LoadedAssets)
-    {
-        if (USkeletalMesh* Mesh = Cast<USkeletalMesh>(Asset))
-        {
-            // UPROPERTY 배열에 저장하여 GC 방지
-            PreloadedHairMeshes.Add(Mesh);
-            SuccessCount++;
-            UE_LOG(LogTemp, Log, TEXT("Preloaded hair mesh (Female): %s"), *Mesh->GetName());
-        }
-        else
-        {
-            FailCount++;
-            UE_LOG(LogTemp, Warning, TEXT("Failed to cast loaded asset to SkeletalMesh"));
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("Async preload complete (Female Hair): %d meshes loaded, %d failed"),
-        SuccessCount, FailCount);
-
-    // 로딩 핸들 해제
-    HairGirlMeshLoadHandle.Reset();
 }
 
 // ========== Decoration Card Table ==========
@@ -1768,6 +1511,21 @@ void UTableManagerSubsystem::InitializeDecorationCardTable()
             Row->RowName = RowName;  // RowName 저장
             DecorationCardTable.Add(RowName, *Row);
         }
+    }
+}
+
+void UTableManagerSubsystem::InitializeDecorationCatalog()
+{
+    DecorationCatalog.Empty();
+    if (!DecorationCatalogDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_DecorationCatalog is missing"));
+        return;
+    }
+    for (const FName RowName : DecorationCatalogDataTable->GetRowNames())
+    {
+        if (const FDecorationCatalogRow* Row = DecorationCatalogDataTable->FindRow<FDecorationCatalogRow>(RowName, TEXT("DecorationCatalog")))
+            DecorationCatalog.Add(RowName, *Row);
     }
 }
 
@@ -2042,6 +1800,46 @@ const FComputerSetupLevelData* UTableManagerSubsystem::FindWorkstationSetupLevel
             static_cast<int32>(Level) + 1);
     }
     return Found;
+}
+
+void UTableManagerSubsystem::InitializeWorkstationUpgradeTable()
+{
+    WorkstationUpgradeTable.Empty();
+    if (!WorkstationUpgradeDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] DT_WorkstationUpgrade is missing"));
+        return;
+    }
+
+    const UEnum* TypeEnum = StaticEnum<EWorkstationUpgradeType>();
+    bool bRejected = false;
+    for (const FName& RowName : WorkstationUpgradeDataTable->GetRowNames())
+    {
+        const FWorkstationUpgradeDefinition* Row = WorkstationUpgradeDataTable->FindRow<FWorkstationUpgradeDefinition>(
+            RowName, TEXT("Workstation upgrade cache"));
+        const FString ExpectedName = Row && TypeEnum
+            ? TypeEnum->GetNameStringByValue(static_cast<int64>(Row->Type)) : FString();
+        if (!Row || !Row->IsValidConfiguration() || RowName != FName(*ExpectedName)
+            || WorkstationUpgradeTable.Contains(Row->Type))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] Invalid or duplicate workstation upgrade row: %s"),
+                *RowName.ToString());
+            bRejected = true;
+            continue;
+        }
+        WorkstationUpgradeTable.Add(Row->Type, *Row);
+    }
+    if (bRejected || WorkstationUpgradeTable.Num() != static_cast<int32>(EWorkstationUpgradeType::Count))
+    {
+        UE_LOG(LogTemp, Error, TEXT("[TableManagerSubsystem] Workstation upgrades require one valid row per upgrade type"));
+        WorkstationUpgradeTable.Empty();
+    }
+}
+
+const FWorkstationUpgradeDefinition* UTableManagerSubsystem::FindWorkstationUpgradeDefinition(
+    EWorkstationUpgradeType Type) const
+{
+    return WorkstationUpgradeTable.Find(Type);
 }
 
 // UI Icon Data
@@ -2341,6 +2139,41 @@ void UTableManagerSubsystem::InitializeMarketBalanceTable()
         MarketBalanceCache.MaxMul);
 }
 
+// ========== Instant Finish Balance Table ==========
+bool UTableManagerSubsystem::GetInstantFinishBalance(FName FacilityType, FInstantFinishBalanceTable& OutData) const
+{
+    const FInstantFinishBalanceTable* Row = InstantFinishBalanceCache.Find(FacilityType);
+    if (!Row)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] Instant finish row missing: %s"), *FacilityType.ToString());
+        return false;
+    }
+    OutData = *Row;
+    return true;
+}
+
+void UTableManagerSubsystem::InitializeInstantFinishBalanceTable()
+{
+    InstantFinishBalanceCache.Empty();
+    if (!InstantFinishBalanceDataTable)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[TableManagerSubsystem] DT_InstantFinishBalance missing"));
+        return;
+    }
+    for (const FName RowName : InstantFinishBalanceDataTable->GetRowNames())
+    {
+        const FInstantFinishBalanceTable* Row = InstantFinishBalanceDataTable->FindRow<FInstantFinishBalanceTable>(
+            RowName, TEXT("InitializeInstantFinishBalanceTable"));
+        if (!Row || !FMath::IsFinite(Row->SecondsPerDiamond) || Row->SecondsPerDiamond <= 0.0 ||
+            Row->MaxCost <= 0 || Row->MaxDiscountBasisPoints < 0 || Row->MaxDiscountBasisPoints >= 10000)
+        {
+            UE_LOG(LogTemp, Error, TEXT("[TableManagerSubsystem] Invalid instant finish row: %s"), *RowName.ToString());
+            continue;
+        }
+        InstantFinishBalanceCache.Add(RowName, *Row);
+    }
+}
+
 // ========== VFX Table ==========
 
 void UTableManagerSubsystem::InitializeVFXTable()
@@ -2523,6 +2356,11 @@ void UTableManagerSubsystem::InitializeMissionTable()
         FMissionTable* Row = MissionDataTable->FindRow<FMissionTable>(RowName, TEXT("InitializeMissionTable"));
         if (Row)
         {
+            if (Row->GuideLines.Num() != Row->MentorLines.Num())
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[TableManager] Mission '%s': GuideLines/MentorLines count mismatch (%d/%d); reimport DT_Mission"),
+                    *RowName.ToString(), Row->GuideLines.Num(), Row->MentorLines.Num());
+            }
             MissionTable.Add(RowName, *Row);
         }
     }
@@ -2567,6 +2405,376 @@ void UTableManagerSubsystem::InitializeGoalTable()
     }
 }
 
+void UTableManagerSubsystem::InitializeQuestTables()
+{
+    QuestDataMap.Empty();
+    QuestRowOrder.Empty();
+    if (!QuestDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_Quest 미로드 — 퀘스트 데이터 없음"));
+    }
+    else
+    {
+        for (const FName RowName : QuestDataTable->GetRowNames())
+        {
+            if (const FQuestTable* Row = QuestDataTable->FindRow<FQuestTable>(RowName, TEXT("InitializeQuestTables"), false))
+            {
+                for (const FMissionReward& Reward : Row->Rewards)
+                {
+                    // 보상에 Money 금지 (스펙 §0.5) — 데이터 실수를 로드 시점에 크게 알린다
+                    ensureMsgf(Reward.ResourceType != EResourceType::Money, TEXT("DT_Quest %s: Money reward is forbidden"), *RowName.ToString());
+                }
+                QuestDataMap.Add(RowName, *Row);
+                QuestRowOrder.Add(RowName);
+            }
+        }
+    }
+    UE_LOG(LogTemp, Log, TEXT("[TableManager] DT_Quest %d행 로드"), QuestDataMap.Num());
+}
+
+bool UTableManagerSubsystem::GetQuestData(const FName& RowName, FQuestTable& OutData) const
+{
+    if (const FQuestTable* Found = QuestDataMap.Find(RowName))
+    {
+        OutData = *Found;
+        return true;
+    }
+    return false;
+}
+
+void UTableManagerSubsystem::InitializeSideContentTables()
+{
+    CompanyFeatureUnlockMap.Empty();
+    BusinessTripCardMap.Empty();
+    BusinessTripCardOrder.Empty();
+    SideDungeonLootMap.Empty();
+    TrainingCourseBands.Empty();
+    TrainingTopicsByCompany.Empty();
+    SkylineFloorBands.Empty();
+    FusionProjectMap.Empty();
+    FusionProjectOrder.Empty();
+
+    if (CompanyFeatureUnlockDataTable)
+    {
+        for (const FName RowName : CompanyFeatureUnlockDataTable->GetRowNames())
+        {
+            if (const FCompanyFeatureUnlockTable* Row = CompanyFeatureUnlockDataTable->FindRow<FCompanyFeatureUnlockTable>(RowName, TEXT("InitializeSideContentTables"), false))
+            {
+                CompanyFeatureUnlockMap.Add(RowName, *Row);
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_CompanyFeatureUnlock is missing; company features stay locked."));
+    }
+
+    if (FusionProjectDataTable)
+    {
+        for (const FName RowName : FusionProjectDataTable->GetRowNames())
+        {
+            if (const FFusionProjectTable* Row = FusionProjectDataTable->FindRow<FFusionProjectTable>(RowName, TEXT("InitializeSideContentTables"), false))
+            {
+                FusionProjectMap.Add(RowName, *Row);
+                FusionProjectOrder.Add(RowName);
+            }
+        }
+        FusionProjectOrder.Sort([this](const FName& A, const FName& B)
+        {
+            const int32 OrderA = FusionProjectMap.FindChecked(A).DisplayOrder;
+            const int32 OrderB = FusionProjectMap.FindChecked(B).DisplayOrder;
+            return OrderA != OrderB ? OrderA < OrderB : A.LexicalLess(B);
+        });
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_FusionProject is missing; collaboration development is unavailable."));
+    }
+
+    // 에셋이 아직 없으면 조용히 빈 표로 둔다 — 사이드 컨텐츠 진입은 HQ 게이트가 먼저 막는다
+    if (BusinessTripCardDataTable)
+    {
+        for (const FName RowName : BusinessTripCardDataTable->GetRowNames())
+        {
+            if (const FBusinessTripCardTable* Row = BusinessTripCardDataTable->FindRow<FBusinessTripCardTable>(RowName, TEXT("InitializeSideContentTables"), false))
+            {
+                BusinessTripCardMap.Add(RowName, *Row);
+                BusinessTripCardOrder.Add(RowName);
+            }
+        }
+    }
+
+    if (SideDungeonLootDataTable)
+    {
+        for (const FName RowName : SideDungeonLootDataTable->GetRowNames())
+        {
+            if (const FSideDungeonLootRow* Row = SideDungeonLootDataTable->FindRow<FSideDungeonLootRow>(RowName, TEXT("InitializeSideContentTables"), false))
+            {
+                if (Row->TableKey.IsNone()) continue;
+                SideDungeonLootMap.FindOrAdd(Row->TableKey).Add(*Row);
+            }
+        }
+    }
+
+    if (TrainingCourseDataTable)
+    {
+        for (const FName RowName : TrainingCourseDataTable->GetRowNames())
+        {
+            if (const FTrainingCourseRow* Row = TrainingCourseDataTable->FindRow<FTrainingCourseRow>(RowName, TEXT("InitializeSideContentTables"), false))
+            {
+                TrainingCourseBands.Add(*Row);
+            }
+        }
+        // 밴드 조회가 선형이라 정렬해 두면 경계가 겹쳐도 앞선 밴드가 이긴다
+        TrainingCourseBands.Sort([](const FTrainingCourseRow& A, const FTrainingCourseRow& B) { return A.MinCourse < B.MinCourse; });
+    }
+
+    if (TrainingTopicDataTable)
+    {
+        for (const FName RowName : TrainingTopicDataTable->GetRowNames())
+        {
+            if (const FTrainingTopicRow* Topic = TrainingTopicDataTable->FindRow<FTrainingTopicRow>(RowName, TEXT("InitializeSideContentTables"), false))
+            {
+                if (Topic->CompanyType == ECompanyType::None || Topic->CompanyType == ECompanyType::Max || Topic->Sequence < 1)
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("[TableManager] Invalid training topic row: %s"), *RowName.ToString());
+                    continue;
+                }
+                TrainingTopicsByCompany.FindOrAdd(Topic->CompanyType).Add(*Topic);
+            }
+        }
+        for (auto& Pair : TrainingTopicsByCompany)
+        {
+            Pair.Value.Sort([](const FTrainingTopicRow& A, const FTrainingTopicRow& B)
+            {
+                return A.Sequence < B.Sequence;
+            });
+            for (int32 Index = 0; Index < Pair.Value.Num(); ++Index)
+            {
+                if (Pair.Value[Index].Sequence != Index + 1)
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("[TableManager] Training topic sequence is incomplete for company %d"), static_cast<int32>(Pair.Key));
+                    Pair.Value.Empty();
+                    break;
+                }
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_TrainingTopic is missing."));
+    }
+
+    if (SkylineFloorDataTable)
+    {
+        for (const FName RowName : SkylineFloorDataTable->GetRowNames())
+        {
+            if (const FSkylineFloorRow* Row = SkylineFloorDataTable->FindRow<FSkylineFloorRow>(RowName, TEXT("InitializeSideContentTables"), false))
+            {
+                SkylineFloorBands.Add(*Row);
+            }
+        }
+        SkylineFloorBands.Sort([](const FSkylineFloorRow& A, const FSkylineFloorRow& B) { return A.MinFloor < B.MinFloor; });
+    }
+}
+
+bool UTableManagerSubsystem::GetFusionProject(const FName& FusionKey, FFusionProjectTable& OutData) const
+{
+    if (const FFusionProjectTable* Found = FusionProjectMap.Find(FusionKey))
+    {
+        OutData = *Found;
+        return true;
+    }
+    OutData = FFusionProjectTable();
+    return false;
+}
+
+bool UTableManagerSubsystem::GetBusinessTripCard(const FName& CardKey, FBusinessTripCardTable& OutData) const
+{
+    if (const FBusinessTripCardTable* Found = BusinessTripCardMap.Find(CardKey))
+    {
+        OutData = *Found;
+        return true;
+    }
+    return false;
+}
+
+const FTrainingCourseRow* UTableManagerSubsystem::FindTrainingCourseBand(int32 Course) const
+{
+    for (const FTrainingCourseRow& Band : TrainingCourseBands)
+    {
+        if (Course >= Band.MinCourse && Course <= Band.MaxCourse) return &Band;
+    }
+    return nullptr;
+}
+
+int32 UTableManagerSubsystem::GetTrainingMaxCourse() const
+{
+    int32 Max = 0;
+    for (const FTrainingCourseRow& Band : TrainingCourseBands) Max = FMath::Max(Max, Band.MaxCourse);
+    return Max;
+}
+
+const FSkylineFloorRow* UTableManagerSubsystem::FindSkylineFloorBand(int32 Floor) const
+{
+    for (const FSkylineFloorRow& Band : SkylineFloorBands)
+    {
+        if (Floor >= Band.MinFloor && Floor <= Band.MaxFloor) return &Band;
+    }
+    return nullptr;
+}
+
+int32 UTableManagerSubsystem::GetSkylineMaxFloor() const
+{
+    int32 Max = 0;
+    for (const FSkylineFloorRow& Band : SkylineFloorBands) Max = FMath::Max(Max, Band.MaxFloor);
+    return Max;
+}
+
+const TArray<FSideDungeonLootRow>& UTableManagerSubsystem::GetSideDungeonLootRows(const FName& TableKey) const
+{
+    static const TArray<FSideDungeonLootRow> Empty;
+    const TArray<FSideDungeonLootRow>* Found = SideDungeonLootMap.Find(TableKey);
+    return Found ? *Found : Empty;
+}
+
+void UTableManagerSubsystem::InitializeAttendanceTable()
+{
+    AttendanceRows.Empty();
+    if (!AttendanceDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_Attendance 미로드 — 출석 보상표 없음"));
+        return;
+    }
+    for (const FName RowName : AttendanceDataTable->GetRowNames())
+    {
+        if (const FAttendanceTable* Row = AttendanceDataTable->FindRow<FAttendanceTable>(RowName, TEXT("InitializeAttendanceTable"), false))
+        {
+            // Day 가 키라 범위 밖/중복이면 순환에 빈 칸이 생긴다 — 로드 시점에 드러낸다
+            if (Row->Day < 1 || Row->Day > FAttendanceRules::CycleLength)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_Attendance %s: Day=%d 가 1~%d 밖 — 건너뜀"), *RowName.ToString(), Row->Day, FAttendanceRules::CycleLength);
+                continue;
+            }
+            if (AttendanceRows.Contains(Row->Day))
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_Attendance %s: Day=%d 중복 — 뒤 행으로 덮어씀"), *RowName.ToString(), Row->Day);
+            }
+            for (const FMissionReward& Reward : Row->Rewards)
+            {
+                // 보상에 Money 금지 (스펙 §0.5) — 데이터 실수를 로드 시점에 크게 알린다
+                ensureMsgf(Reward.ResourceType != EResourceType::Money, TEXT("DT_Attendance %s: Money reward is forbidden"), *RowName.ToString());
+            }
+            AttendanceRows.Add(Row->Day, *Row);
+        }
+    }
+    if (AttendanceRows.Num() != FAttendanceRules::CycleLength)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_Attendance %d행 — %d행이어야 순환에 빈 칸이 없다"), AttendanceRows.Num(), FAttendanceRules::CycleLength);
+    }
+    UE_LOG(LogTemp, Log, TEXT("[TableManager] DT_Attendance %d행 로드"), AttendanceRows.Num());
+}
+
+bool UTableManagerSubsystem::GetAttendanceRow(int32 Day, FAttendanceTable& OutData) const
+{
+    if (const FAttendanceTable* Found = AttendanceRows.Find(Day))
+    {
+        OutData = *Found;
+        return true;
+    }
+    return false;
+}
+
+void UTableManagerSubsystem::InitializeLiveOpsTables()
+{
+    LiveOpsEvents.Empty();
+    LiveOpsNotices.Empty();
+    LiveOpsMails.Empty();
+
+    // 진행도 세이브가 Id 를 키로 쓰므로 표 안에서 Id 가 겹치면 진행이 덮인다
+    TSet<FString> SeenEventIds;
+    TSet<FString> SeenNoticeIds;
+    TSet<FString> SeenMailIds;
+
+    if (!LiveOpsEventDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_LiveOpsEvent 미로드 — 이벤트 기본값 없음"));
+    }
+    else
+    {
+        for (const FName RowName : LiveOpsEventDataTable->GetRowNames())
+        {
+            if (const FLiveOpsEventDef* Row = LiveOpsEventDataTable->FindRow<FLiveOpsEventDef>(RowName, TEXT("InitializeLiveOpsTables"), false))
+            {
+                ensureMsgf(!SeenEventIds.Contains(Row->Id), TEXT("DT_LiveOpsEvent %s: duplicate Id %s"), *RowName.ToString(), *Row->Id);
+                SeenEventIds.Add(Row->Id);
+
+                for (const FLiveOpsMilestone& Milestone : Row->Milestones)
+                {
+                    for (const FMissionReward& Reward : Milestone.Rewards)
+                    {
+                        // 보상에 Money 금지 (스펙 §0.5) — 데이터 실수를 로드 시점에 크게 알린다
+                        ensureMsgf(Reward.ResourceType != EResourceType::Money, TEXT("DT_LiveOpsEvent %s: Money reward is forbidden"), *RowName.ToString());
+                    }
+                }
+                for (const FLiveOpsHotTimeWindow& Window : Row->HotTime)
+                {
+                    // 규칙이 조용히 무시하기 전에 데이터 실수를 로드 시점에 크게 알린다
+                    ensureMsgf(Window.StartHourKst >= 0 && Window.StartHourKst <= 23 && Window.EndHourKst >= 0 && Window.EndHourKst <= 23,
+                        TEXT("DT_LiveOpsEvent %s: hot time hour out of [0, 23]"), *RowName.ToString());
+                    ensureMsgf(Window.EndHourKst != Window.StartHourKst, TEXT("DT_LiveOpsEvent %s: hot time End == Start"), *RowName.ToString());
+                    ensureMsgf(Window.Multiplier > 0.0f, TEXT("DT_LiveOpsEvent %s: hot time Multiplier must be > 0"), *RowName.ToString());
+                }
+                LiveOpsEvents.Add(*Row);
+            }
+        }
+    }
+
+    if (!LiveOpsNoticeDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_LiveOpsNotice 미로드 — 공지 기본값 없음"));
+    }
+    else
+    {
+        for (const FName RowName : LiveOpsNoticeDataTable->GetRowNames())
+        {
+            if (const FLiveOpsNoticeDef* Row = LiveOpsNoticeDataTable->FindRow<FLiveOpsNoticeDef>(RowName, TEXT("InitializeLiveOpsTables"), false))
+            {
+                ensureMsgf(!SeenNoticeIds.Contains(Row->Id), TEXT("DT_LiveOpsNotice %s: duplicate Id %s"), *RowName.ToString(), *Row->Id);
+                SeenNoticeIds.Add(Row->Id);
+
+                LiveOpsNotices.Add(*Row);
+            }
+        }
+    }
+
+    if (!LiveOpsMailDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_LiveOpsMail 미로드 — 글로벌 메일 기본값 없음"));
+    }
+    else
+    {
+        for (const FName RowName : LiveOpsMailDataTable->GetRowNames())
+        {
+            if (const FLiveOpsMailDef* Row = LiveOpsMailDataTable->FindRow<FLiveOpsMailDef>(RowName, TEXT("InitializeLiveOpsTables"), false))
+            {
+                ensureMsgf(!SeenMailIds.Contains(Row->Id), TEXT("DT_LiveOpsMail %s: duplicate Id %s"), *RowName.ToString(), *Row->Id);
+                SeenMailIds.Add(Row->Id);
+
+                for (const FMissionReward& Reward : Row->Rewards)
+                {
+                    // 보상에 Money 금지 (스펙 §0.5) — 데이터 실수를 로드 시점에 크게 알린다
+                    ensureMsgf(Reward.ResourceType != EResourceType::Money, TEXT("DT_LiveOpsMail %s: Money reward is forbidden"), *RowName.ToString());
+                }
+                LiveOpsMails.Add(*Row);
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[TableManager] DT_LiveOpsEvent %d행 / DT_LiveOpsNotice %d행 / DT_LiveOpsMail %d행 로드"),
+        LiveOpsEvents.Num(), LiveOpsNotices.Num(), LiveOpsMails.Num());
+}
+
 void UTableManagerSubsystem::InitializePanelIntroTable()
 {
     PanelIntroMap.Empty();
@@ -2592,6 +2800,83 @@ void UTableManagerSubsystem::InitializePanelIntroTable()
             return A.StepIndex < B.StepIndex;
         });
     }
+}
+
+void UTableManagerSubsystem::InitializeHelpTable()
+{
+    HelpMap.Empty();
+    if (!HelpDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_Help 미로드 ― 도움말 팝오버 없음"));
+        return;
+    }
+    for (const auto& Pair : HelpDataTable->GetRowMap())
+    {
+        const FHelpTable* Row = reinterpret_cast<const FHelpTable*>(Pair.Value);
+        if (!Row || Row->HelpKey.IsNone())
+        {
+            continue;
+        }
+        HelpMap.Add(Row->HelpKey, *Row);
+    }
+    UE_LOG(LogTemp, Log, TEXT("[TableManager] DT_Help %d행 로드"), HelpMap.Num());
+}
+
+void UTableManagerSubsystem::InitializeCloudErrorTextTable()
+{
+    CloudErrorTextMap.Empty();
+    if (!CloudErrorTextDataTable)
+    {
+        // 미로드면 모든 코드가 공통 폴백 문구로 떨어진다 ― 조용히 빈 안내가 뜨는 것보다 낫다
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_CloudErrorText 미로드 ― 서버 오류 안내가 공통 문구로만 표시됨"));
+        return;
+    }
+    for (const auto& Pair : CloudErrorTextDataTable->GetRowMap())
+    {
+        const FCloudErrorTextTable* Row = reinterpret_cast<const FCloudErrorTextTable*>(Pair.Value);
+        if (!Row)
+        {
+            continue;
+        }
+        // Code 셀이 비면 RowName 을 코드로 본다 ― 행 이름 = 부록 A 코드가 임포트 규약이다
+        const FName Code = Row->Code.IsNone() ? Pair.Key : Row->Code;
+        if (Code.IsNone() || Row->Message.IsEmpty())
+        {
+            continue;
+        }
+        CloudErrorTextMap.Add(Code, Row->Message);
+    }
+    UE_LOG(LogTemp, Log, TEXT("[TableManager] DT_CloudErrorText %d행 로드"), CloudErrorTextMap.Num());
+}
+
+void UTableManagerSubsystem::InitializeLoadingTipTable()
+{
+    LoadingTipRows.Empty();
+    if (!LoadingTipDataTable)
+    {
+        // 미로드면 전환 하단 밴드가 FLoadingTipRules::LastResort 한 줄로만 뜬다
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_LoadingTip 미로드 ― 전환 팁이 공통 문구로만 표시됨"));
+        return;
+    }
+    for (const auto& Pair : LoadingTipDataTable->GetRowMap())
+    {
+        const FLoadingTipTable* Row = reinterpret_cast<const FLoadingTipTable*>(Pair.Value);
+        if (!Row || Row->Body.IsEmpty())
+        {
+            continue;
+        }
+        FLoadingTipTable Entry = *Row;
+        // TipKey 셀이 비면 RowName 을 키로 본다 ― 행 이름 = 키가 임포트 규약이다
+        if (Entry.TipKey.IsNone())
+        {
+            Entry.TipKey = Pair.Key;
+        }
+        LoadingTipRows.Add(MoveTemp(Entry));
+    }
+    // GetRowMap 순회 순서는 보장되지 않는다 ― 가중 추첨이 재현 가능해야 하니 키로 정렬
+    LoadingTipRows.Sort([](const FLoadingTipTable& A, const FLoadingTipTable& B)
+        { return A.TipKey.LexicalLess(B.TipKey); });
+    UE_LOG(LogTemp, Log, TEXT("[TableManager] DT_LoadingTip %d행 로드"), LoadingTipRows.Num());
 }
 
 bool UTableManagerSubsystem::GetGoalData(const FName& RowName, FGoalTable& OutData) const
@@ -3148,7 +3433,7 @@ void UTableManagerSubsystem::InitializeQualityGradeDisplayTable()
         if (!Row) continue;
 
         const FIntPoint Key = FQualityGradeDisplayRow::MakeKey(Row->CompanyType, Row->Grade);
-        QualityGradeDisplayMap.Add(Key, Row->DisplayName);
+        QualityGradeDisplayMap.Add(Key, *Row);
     }
 
     UE_LOG(LogTemp, Log, TEXT("[TableManagerSubsystem] QualityGradeDisplay Table Initialized (%d entries)"), QualityGradeDisplayMap.Num());
@@ -3159,14 +3444,44 @@ FText UTableManagerSubsystem::GetQualityGradeLabel(ECompanyType CompanyType, EQu
     if (CompanyType == ECompanyType::None) return FText::GetEmpty();
 
     const FIntPoint Key = FQualityGradeDisplayRow::MakeKey(CompanyType, Grade);
-    if (const FText* Found = QualityGradeDisplayMap.Find(Key))
+    if (const FQualityGradeDisplayRow* Found = QualityGradeDisplayMap.Find(Key))
     {
-        return *Found;
+        return Found->DisplayName;
     }
 
     UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] QualityGradeLabel 미매핑: Company=%d, Grade=%d — DT_QualityGradeDisplay row 누락"),
         static_cast<int32>(CompanyType), static_cast<int32>(Grade));
     return FText::GetEmpty();
+}
+
+bool UTableManagerSubsystem::GetCompanyFeatureUnlock(FName FeatureKey, FCompanyFeatureUnlockTable& OutData) const
+{
+    OutData = FCompanyFeatureUnlockTable();
+    if (const FCompanyFeatureUnlockTable* Found = CompanyFeatureUnlockMap.Find(FeatureKey))
+    {
+        if (Found->RequiredCompanyLevel > 0)
+        {
+            OutData = *Found;
+            return true;
+        }
+    }
+    UE_LOG(LogTemp, Warning, TEXT("[TableManager] Missing or invalid company feature unlock row: %s"), *FeatureKey.ToString());
+    return false;
+}
+
+bool UTableManagerSubsystem::GetQualityGradeDisplayData(ECompanyType CompanyType, EQualityGrade Grade, FQualityGradeDisplayRow& OutData) const
+{
+    OutData = FQualityGradeDisplayRow();
+    const FIntPoint Key = FQualityGradeDisplayRow::MakeKey(CompanyType, Grade);
+    if (const FQualityGradeDisplayRow* Found = QualityGradeDisplayMap.Find(Key))
+    {
+        OutData = *Found;
+        return true;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] QualityGradeDisplay 미매핑: Company=%d, Grade=%d — DT_QualityGradeDisplay row 누락"),
+        static_cast<int32>(CompanyType), static_cast<int32>(Grade));
+    return false;
 }
 
 // ========== Employee Potential / Additional Option Display ==========
@@ -3347,7 +3662,9 @@ void UTableManagerSubsystem::InitializeDisciplineDisplayTable()
         if (const FDisciplineDisplayRow* Row = DisciplineDisplayDataTable->FindRow<FDisciplineDisplayRow>(RowName, TEXT("InitializeDisciplineDisplayTable")))
         {
             const ECompanyType Company = StringToCompanyType(Row->CompanyType);
-            if (Company == ECompanyType::None)
+            // None 은 "미인식"과 "미배치(산업 없음)" 둘 다의 값이다 — 문자열이 명시적으로 "None" 인 행은
+            // 사무실 진입처럼 산업이 없는 맥락의 표시명이라 등록하고, 그 외 미인식만 스킵한다
+            if (Company == ECompanyType::None && !Row->CompanyType.Equals(TEXT("None"), ESearchCase::IgnoreCase))
             {
                 UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] DisciplineDisplay row '%s' CompanyType '%s' 미인식 - 스킵"), *RowName.ToString(), *Row->CompanyType);
                 continue;
@@ -3401,13 +3718,68 @@ void UTableManagerSubsystem::InitializeUIVFXTexTable()
 
 bool UTableManagerSubsystem::GetUIVFXTexRow(FName Key, FUIVFXTexRow& OutRow) const
 {
-    if (const FUIVFXTexRow* Found = UIVFXTexMap.Find(Key))
+    // 디자이너는 GameInstance 캐시가 없다. 같은 생성자 로드 DT를 읽어 재임포트도 프리뷰에 반영한다.
+    const FUIVFXTexRow* Found = HasAnyFlags(RF_ClassDefaultObject)
+        ? (UIVFXTexDataTable ? UIVFXTexDataTable->FindRow<FUIVFXTexRow>(Key, TEXT("GetUIVFXTexRow"), false) : nullptr)
+        : UIVFXTexMap.Find(Key);
+    if (Found)
     {
         OutRow = *Found;
         return true;
     }
 
     UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] UIVFXTex row not found: %s"), *Key.ToString());
+    return false;
+}
+
+const FTrainingTopicRow* UTableManagerSubsystem::FindTrainingTopic(ECompanyType Company, int32 Course, int32& OutLevel) const
+{
+    OutLevel = 0;
+    const TArray<FTrainingTopicRow>* Topics = TrainingTopicsByCompany.Find(Company);
+    if (Course < 1 || !Topics || Topics->IsEmpty())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] Training topic missing for company %d, course %d"), static_cast<int32>(Company), Course);
+        return nullptr;
+    }
+
+    const int32 TopicCount = Topics->Num();
+    OutLevel = (Course - 1) / TopicCount + 1;
+    return &(*Topics)[(Course - 1) % TopicCount];
+}
+
+void UTableManagerSubsystem::InitializePanelThemeTable()
+{
+    PanelThemeMap.Empty();
+    if (!PanelThemeDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] DT_PanelTheme is missing"));
+        return;
+    }
+
+    for (const FName& RowName : PanelThemeDataTable->GetRowNames())
+    {
+        if (const FPanelThemeRow* Row = PanelThemeDataTable->FindRow<FPanelThemeRow>(RowName, TEXT("InitializePanelThemeTable")))
+        {
+            PanelThemeMap.Add(RowName, *Row);
+        }
+    }
+}
+
+bool UTableManagerSubsystem::GetPanelThemeRow(FName Key, FPanelThemeRow& OutRow) const
+{
+    OutRow = FPanelThemeRow();
+    if (Key.IsNone()) { return false; }
+
+    const FPanelThemeRow* Found = HasAnyFlags(RF_ClassDefaultObject)
+        ? (PanelThemeDataTable ? PanelThemeDataTable->FindRow<FPanelThemeRow>(Key, TEXT("GetPanelThemeRow"), false) : nullptr)
+        : PanelThemeMap.Find(Key);
+    if (Found)
+    {
+        OutRow = *Found;
+        return true;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] PanelTheme row not found: %s"), *Key.ToString());
     return false;
 }
 
@@ -3466,6 +3838,7 @@ void UTableManagerSubsystem::InitializeLaunchLootTable()
             {
                 UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] LaunchLoot row '%s' 지급량 범위 이상 (Min=%lld Max=%lld) - 0/음수는 UI 카드까지 새어나간다"),
                     *RowName.ToString(), Row->AmountMin, Row->AmountMax);
+                continue;   // 롤 풀에 넣으면 RandRange(Min>Max) 와 0/음수 지급이 그대로 나간다(출석·워크스테이션 선례와 동일 처리)
             }
 
             LaunchLootMap.FindOrAdd(Row->TableKey).Add(*Row);
@@ -3510,6 +3883,26 @@ UTexture2D* UTableManagerSubsystem::GetItemIcon(EItemType ItemType, bool& bOutFo
         }
     }
     UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] GetItemIcon: DT_ShopItem 에 아이콘 없음 (ItemType=%d)"), (int32)ItemType);
+    return nullptr;
+}
+
+UObject* UTableManagerSubsystem::GetItemIconResource(EItemType ItemType, bool& bOutFound) const
+{
+    bOutFound = false;
+    if (ItemType == EItemType::None)
+    {
+        return nullptr;
+    }
+    for (const TPair<FName, FShopItemTable>& Pair : ShopItemMap)
+    {
+        if (Pair.Value.Item != ItemType) { continue; }
+        if (UObject* Resource = Pair.Value.ResolveIconResource())
+        {
+            bOutFound = true;
+            return Resource;
+        }
+    }
+    UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] GetItemIconResource: DT_ShopItem 에 아이콘 없음 (ItemType=%d)"), (int32)ItemType);
     return nullptr;
 }
 
@@ -3834,6 +4227,49 @@ TArray<FMineUpgradeDefinition> UTableManagerSubsystem::GetAllMineUpgradeDefiniti
 }
 
 // ===== Factory Upgrade Definition =====
+
+void UTableManagerSubsystem::InitializeFactoryAppearanceTable()
+{
+    FactoryAppearanceTable.Reset();
+    if (!FactoryAppearanceDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] DT_FactoryAppearance is missing"));
+        return;
+    }
+
+    FFactoryUpgradeDefinition ExpansionDefinition;
+    if (!GetFactoryUpgradeDefinition(EFactoryUpgradeType::FactoryExpansion, ExpansionDefinition)
+        || ExpansionDefinition.MaxLevel < 1)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] FactoryExpansion definition is missing or invalid"));
+        return;
+    }
+
+    for (const FName& RowName : FactoryAppearanceDataTable->GetRowNames())
+    {
+        const FFactoryAppearanceRow* Row = FactoryAppearanceDataTable->FindRow<FFactoryAppearanceRow>(
+            RowName, TEXT("Factory appearance cache"));
+        if (!Row || Row->Level < 1 || Row->Level > ExpansionDefinition.MaxLevel || Row->Mesh.IsNull()
+            || Row->LaborerCapacity <= 0
+            || FactoryAppearanceTable.Contains(Row->Level))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[TableManager] Invalid factory appearance row: %s"), *RowName.ToString());
+            FactoryAppearanceTable.Reset();
+            return;
+        }
+        FactoryAppearanceTable.Add(Row->Level, *Row);
+    }
+    if (FactoryAppearanceTable.Num() != ExpansionDefinition.MaxLevel)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[TableManager] Factory appearance levels are incomplete"));
+        FactoryAppearanceTable.Reset();
+    }
+}
+
+const FFactoryAppearanceRow* UTableManagerSubsystem::FindFactoryAppearance(int32 Level) const
+{
+    return FactoryAppearanceTable.Find(Level);
+}
 
 void UTableManagerSubsystem::InitializeFactoryUpgradeDefinitionTable()
 {
@@ -4266,23 +4702,6 @@ FText UTableManagerSubsystem::PickProjectName(ECompanyType Industry, FName Genre
     return FText::GetEmpty();
 }
 
-FProjectData UTableManagerSubsystem::GetProjectByGenreMaterial(ECompanyType Industry, FName Genre, FName Material, bool& bOutSuccess) const
-{
-    const int32 IndustryInt = static_cast<int32>(Industry);
-    for (const auto& Pair : AllProjectTable)
-    {
-        if (Pair.Key.X != IndustryInt) continue;
-        const FProjectData& Data = Pair.Value;
-        if (Data.Genre == Genre && Data.Material == Material)
-        {
-            bOutSuccess = true;
-            return Data;
-        }
-    }
-    bOutSuccess = false;
-    return FProjectData();
-}
-
 TArray<FProjectGenreRow> UTableManagerSubsystem::GetGenresForIndustry(ECompanyType Industry) const
 {
     TArray<FProjectGenreRow> Result;
@@ -4298,20 +4717,6 @@ TArray<FProjectGenreRow> UTableManagerSubsystem::GetGenresForIndustry(ECompanyTy
         if (A.UnlockTier != B.UnlockTier) { return A.UnlockTier < B.UnlockTier; }
         return A.Complexity < B.Complexity;
     });
-    return Result;
-}
-
-TArray<FName> UTableManagerSubsystem::GetMaterialsForIndustry(ECompanyType Industry) const
-{
-    // 소재 전용 테이블이 없다 — 프로젝트 행이 소재의 단일 출처. 소재 미태깅 산업은 빈 목록(= 트렌드 없음).
-    const int32 IndustryInt = static_cast<int32>(Industry);
-    TArray<FName> Result;
-    for (const auto& Pair : AllProjectTable)
-    {
-        if (Pair.Key.X != IndustryInt) { continue; }
-        if (Pair.Value.Material.IsNone()) { continue; }
-        Result.AddUnique(Pair.Value.Material);
-    }
     return Result;
 }
 
@@ -4400,11 +4805,12 @@ void UTableManagerSubsystem::InitializeReviewCommentTable()
 FString UTableManagerSubsystem::ApplyReviewTokens(const FString& In, const FReviewTokenValues& Tokens)
 {
     FString Out = In;
-    Out.ReplaceInline(TEXT("{프로젝트}"), *Tokens.ProjectName);
-    Out.ReplaceInline(TEXT("{장르}"), *Tokens.GenreText);
-    Out.ReplaceInline(TEXT("{최고분야}"), *Tokens.BestStepName);
-    Out.ReplaceInline(TEXT("{최저분야}"), *Tokens.WorstStepName);
-    Out.ReplaceInline(TEXT("{산업}"), *Tokens.IndustryText);
+    // 토큰 뒤 조사까지 받침에 맞춰 교정 — CSV 는 "{최저분야}가" 처럼 한 쪽만 적는다("기획가" 방지)
+    KoreanJosa::ReplaceTokenWithJosa(Out, TEXT("{프로젝트}"), Tokens.ProjectName);
+    KoreanJosa::ReplaceTokenWithJosa(Out, TEXT("{장르}"), Tokens.GenreText);
+    KoreanJosa::ReplaceTokenWithJosa(Out, TEXT("{최고분야}"), Tokens.BestStepName);
+    KoreanJosa::ReplaceTokenWithJosa(Out, TEXT("{최저분야}"), Tokens.WorstStepName);
+    KoreanJosa::ReplaceTokenWithJosa(Out, TEXT("{산업}"), Tokens.IndustryText);
     return Out;
 }
 
@@ -4535,4 +4941,128 @@ bool UTableManagerSubsystem::GetLaunchLootBand(FName Key, FLaunchLootBandRow& Ou
     }
     UE_LOG(LogTemp, Warning, TEXT("[TableManagerSubsystem] LaunchLootBand row missing: %s"), *Key.ToString());
     return false;
+}
+
+void UTableManagerSubsystem::InitializeEmployeeEquipmentTables()
+{
+    EmployeeEquipmentDefinitions.Reset();
+    if (EmployeeEquipmentDefinitionDataTable)
+    {
+        for (const FName& RowId : EmployeeEquipmentDefinitionDataTable->GetRowNames())
+            if (const FEmployeeEquipmentDefinitionRow* Row = EmployeeEquipmentDefinitionDataTable->FindRow<FEmployeeEquipmentDefinitionRow>(RowId, TEXT("EquipmentCatalog"))) EmployeeEquipmentDefinitions.Add(RowId, *Row);
+    }
+    else UE_LOG(LogTemp, Warning, TEXT("[EquipmentCatalog] Missing DT_EmployeeEquipmentDefinition"));
+    EmployeeEquipmentEffects.Reset();
+    if (EmployeeEquipmentEffectDataTable)
+    {
+        for (const FName& RowId : EmployeeEquipmentEffectDataTable->GetRowNames())
+            if (const FEmployeeEquipmentEffectRow* Row = EmployeeEquipmentEffectDataTable->FindRow<FEmployeeEquipmentEffectRow>(RowId, TEXT("EquipmentCatalog"))) EmployeeEquipmentEffects.Add(RowId, *Row);
+    }
+    else UE_LOG(LogTemp, Warning, TEXT("[EquipmentCatalog] Missing DT_EmployeeEquipmentEffect"));
+    EmployeeEquipmentAppearances.Reset();
+    if (EmployeeEquipmentAppearanceDataTable)
+    {
+        for (const FName& RowId : EmployeeEquipmentAppearanceDataTable->GetRowNames())
+            if (const FEmployeeEquipmentAppearanceRow* Row = EmployeeEquipmentAppearanceDataTable->FindRow<FEmployeeEquipmentAppearanceRow>(RowId, TEXT("EquipmentCatalog"))) EmployeeEquipmentAppearances.Add(RowId, *Row);
+    }
+    else UE_LOG(LogTemp, Warning, TEXT("[EquipmentCatalog] Missing DT_EmployeeEquipmentAppearance"));
+    EmployeeEquipmentGrades.Reset();
+    if (EmployeeEquipmentGradeDataTable)
+    {
+        for (const FName& RowId : EmployeeEquipmentGradeDataTable->GetRowNames())
+            if (const FEmployeeEquipmentGradeRow* Row = EmployeeEquipmentGradeDataTable->FindRow<FEmployeeEquipmentGradeRow>(RowId, TEXT("EquipmentCatalog"))) EmployeeEquipmentGrades.Add(RowId, *Row);
+    }
+    else UE_LOG(LogTemp, Warning, TEXT("[EquipmentCatalog] Missing DT_EmployeeEquipmentGrade"));
+    EmployeeEquipmentSlots.Reset();
+    if (EmployeeEquipmentSlotDataTable)
+    {
+        for (const FName& RowId : EmployeeEquipmentSlotDataTable->GetRowNames())
+            if (const FEmployeeEquipmentSlotRow* Row = EmployeeEquipmentSlotDataTable->FindRow<FEmployeeEquipmentSlotRow>(RowId, TEXT("EquipmentCatalog"))) EmployeeEquipmentSlots.Add(RowId, *Row);
+    }
+    else UE_LOG(LogTemp, Warning, TEXT("[EquipmentCatalog] Missing DT_EmployeeEquipmentSlot"));
+    EmployeeEquipmentBanners.Reset();
+    if (EmployeeEquipmentBannerDataTable)
+    {
+        for (const FName& RowId : EmployeeEquipmentBannerDataTable->GetRowNames())
+            if (const FEmployeeEquipmentBannerRow* Row = EmployeeEquipmentBannerDataTable->FindRow<FEmployeeEquipmentBannerRow>(RowId, TEXT("EquipmentCatalog"))) EmployeeEquipmentBanners.Add(RowId, *Row);
+    }
+    else UE_LOG(LogTemp, Warning, TEXT("[EquipmentCatalog] Missing DT_EmployeeEquipmentBanner"));
+    EmployeeEquipmentEconomies.Reset();
+    if (EmployeeEquipmentEconomyDataTable)
+    {
+        for (const FName& RowId : EmployeeEquipmentEconomyDataTable->GetRowNames())
+            if (const FEmployeeEquipmentEconomyRow* Row = EmployeeEquipmentEconomyDataTable->FindRow<FEmployeeEquipmentEconomyRow>(RowId, TEXT("EquipmentCatalog"))) EmployeeEquipmentEconomies.Add(RowId, *Row);
+    }
+    else UE_LOG(LogTemp, Warning, TEXT("[EquipmentCatalog] Missing DT_EmployeeEquipmentEconomy"));
+}
+
+void UTableManagerSubsystem::InitializeGachaBoxVisualTable()
+{
+    GachaBoxVisualTable.Empty();
+    if (!GachaBoxVisualDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[GachaBoxVisual] DT_GachaBoxVisual 없음 — 뽑기 상자 그림이 빈 칸으로 나옵니다"));
+        return;
+    }
+
+    for (const FName RowName : GachaBoxVisualDataTable->GetRowNames())
+    {
+        const FGachaBoxVisualRow* Row = GachaBoxVisualDataTable->FindRow<FGachaBoxVisualRow>(RowName, TEXT("InitializeGachaBoxVisualTable"));
+        if (!Row)
+        {
+            continue;
+        }
+        if (GachaBoxVisualTable.Contains(Row->BoxType))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[GachaBoxVisual] %s 행이 %s 를 다시 정의해 무시합니다"),
+                *RowName.ToString(), *UEnum::GetValueAsString(Row->BoxType));
+            continue;
+        }
+        GachaBoxVisualTable.Add(Row->BoxType, *Row);
+    }
+}
+
+const FGachaBoxVisualRow* UTableManagerSubsystem::GetGachaBoxVisual(EGachaBoxType BoxType) const
+{
+    if (const FGachaBoxVisualRow* Found = GachaBoxVisualTable.Find(BoxType))
+    {
+        return Found;
+    }
+    UE_LOG(LogTemp, Warning, TEXT("[GachaBoxVisual] %s 행 없음 — DT_GachaBoxVisual 재임포트 필요(상자 그림 빈 칸)"),
+        *UEnum::GetValueAsString(BoxType));
+    return nullptr;
+}
+
+
+void UTableManagerSubsystem::InitializeGachaIconBoundsTable()
+{
+    GachaIconBoundsTable.Empty();
+    if (!GachaIconBoundsDataTable)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[GachaIconBounds] DT_GachaIconBounds 없음 — 카드 아이콘을 비웁니다"));
+        return;
+    }
+    for (const FName RowName : GachaIconBoundsDataTable->GetRowNames())
+    {
+        const FGachaIconBoundsRow* Row = GachaIconBoundsDataTable->FindRow<FGachaIconBoundsRow>(RowName, TEXT("InitializeGachaIconBoundsTable"));
+        if (!Row || !Row->HasValidBounds())
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[GachaIconBounds] %s 텍스처/UV 오류"), *RowName.ToString());
+            continue;
+        }
+        const FSoftObjectPath TexturePath = Row->Texture.ToSoftObjectPath();
+        if (GachaIconBoundsTable.Contains(TexturePath))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[GachaIconBounds] %s 중복 텍스처: %s"), *RowName.ToString(), *TexturePath.ToString());
+            continue;
+        }
+        GachaIconBoundsTable.Add(TexturePath, *Row);
+    }
+}
+
+const FGachaIconBoundsRow* UTableManagerSubsystem::GetGachaIconBounds(const FSoftObjectPath& TexturePath) const
+{
+    if (const FGachaIconBoundsRow* Found = GachaIconBoundsTable.Find(TexturePath)) return Found;
+    UE_LOG(LogTemp, Warning, TEXT("[GachaIconBounds] 행 없음: %s — DT_GachaIconBounds 재임포트 필요"), *TexturePath.ToString());
+    return nullptr;
 }

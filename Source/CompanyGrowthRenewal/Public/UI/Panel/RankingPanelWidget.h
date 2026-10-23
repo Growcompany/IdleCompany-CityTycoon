@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "CommonActivatableWidget.h"
+#include "UI/AnimatedActivatableWidget.h"
 #include "Data/RankingData.h"
 #include "RankingPanelWidget.generated.h"
 
@@ -9,23 +9,25 @@ class UScrollBox;
 class UWidgetSwitcher;
 class UCommonButtonBase;
 class UCommonButtonGroupBase;
-class UButtonWidget;
-class UTabButtonWidget;
 class UButton;
 class URankingManagerSubsystem;
 class UTableManagerSubsystem;
-class UCloseButtonWidget;
+class UPanelHeaderWidget;
 class URankingEntryCardWidget;
+class URankingBuildingPreviewRenderer;
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
 
-/**
- * 랭킹 메인 패널
- * - 매출/레벨 탭 전환 (WidgetSwitcher)
- * - 각 탭에 리더보드 스크롤 + 본인 카드 상단 고정
- */
 UCLASS()
-class COMPANYGROWTHRENEWAL_API URankingPanelWidget : public UCommonActivatableWidget
+class COMPANYGROWTHRENEWAL_API URankingPanelWidget : public UAnimatedActivatableWidget
 {
 	GENERATED_BODY()
+
+public:
+	URankingPanelWidget();
+	// 실데이터와 UI 검증이 같은 표시 경로를 사용하며 네트워크 조회를 일으키지 않는다.
+	void ApplyLeaderboard(int32 TabIndex, const TArray<FRankingEntry>& Entries, const FRankingEntry& OwnEntry, bool bOwnScoreAvailable = true);
+	void ApplyPodiumSnapshot(const FString& PlayerId, const FCitySnapshot& Snapshot);
 
 protected:
 	virtual void NativeConstruct() override;
@@ -33,78 +35,63 @@ protected:
 	virtual void NativeOnActivated() override;
 	virtual void NativeOnDeactivated() override;
 
-	// 매출 탭 — 내 카드 (상단 고정)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<URankingEntryCardWidget> MyRankingEntryCard = nullptr;
-
-	// 매출 리더보드 스크롤
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UScrollBox> RevenueLeaderboardScrollBox = nullptr;
-
-	// 레벨 탭 — 내 카드 (상단 고정)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<URankingEntryCardWidget> MyLevelRankingEntryCard = nullptr;
-
-	// 레벨 리더보드 스크롤
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UScrollBox> LevelLeaderboardScrollBox = nullptr;
-
-	// 탭 전환 스위처
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UWidgetSwitcher> ContentSwitcher = nullptr;
-
-	// 탭 버튼 (UIE_PillTabButton = UTabButtonWidget 합성 래퍼) — 시총 / 주간 매출 2탭
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	TObjectPtr<UTabButtonWidget> MarketCapTab = nullptr;
-
+	TObjectPtr<UCommonButtonBase> MarketCapTab = nullptr;
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	TObjectPtr<UTabButtonWidget> WeeklyRevenueTab = nullptr;
-
-	// 닫기 버튼
+	TObjectPtr<UCommonButtonBase> WeeklyRevenueTab = nullptr;
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	TObjectPtr<UCloseButtonWidget> UIE_CloseButton = nullptr;
-
-	// 배경 클릭 닫기
+	TObjectPtr<UPanelHeaderWidget> PanelHeader;
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UButton> BackgroundBtn = nullptr;
 
 private:
-	UPROPERTY()
-	URankingManagerSubsystem* RankingMgr = nullptr;
+	UPROPERTY() TObjectPtr<URankingManagerSubsystem> RankingMgr = nullptr;
+	UPROPERTY() TObjectPtr<UTableManagerSubsystem> TableMgr = nullptr;
+	UPROPERTY() TObjectPtr<UCommonButtonGroupBase> TabButtonGroup = nullptr;
+	UPROPERTY() TObjectPtr<URankingBuildingPreviewRenderer> BuildingPreview = nullptr;
+	UPROPERTY() TMap<FString, TObjectPtr<UMaterialInstanceDynamic>> PreviewMaterials;
+	UPROPERTY() TObjectPtr<UMaterialInterface> PreviewMaterialBase = nullptr;
 
-	UPROPERTY()
-	UTableManagerSubsystem* TableMgr = nullptr;
-
-	// 현재 선택된 탭 인덱스 (0=시총, 1=주간 매출)
+	TArray<FRankingEntry> PodiumEntries[2];
+	TArray<TPair<int32, FString>> ListEntryIdentities[2];
+	FString OwnPlayerIds[2];
+	TSet<FString> RequestedSnapshotIds;
+	TSet<FString> CompletedSnapshotIds;
+	TMap<FString, FText> SnapshotStatuses;
+	TMap<FString, FTimerHandle> SnapshotTimeouts;
+	FTimerHandle LeaderboardTimeouts[2];
+	void FailLeaderboardRequest(int32 TabIndex);
+	FTimerHandle ListLoadingPulse;
+	int32 ListLoadingPhase = 0;
+	int32 ListLoadingTab = INDEX_NONE;
+	FLinearColor ListMessageInkDefault = FLinearColor::White;
+	void StartListLoadingPulse(int32 TabIndex);
+	void AdvanceListLoadingPulse();
+	void StopListLoadingPulse(int32 TabIndex);
+	bool bTabLoaded[2] = {false, false};
+	bool bTabRequested[2] = {false, false};
+	bool bSessionActive = false;
 	int32 CurrentTabIndex = 0;
 
-	// 탭 버튼 그룹 (배타적 선택 관리)
-	UPROPERTY()
-	UCommonButtonGroupBase* TabButtonGroup = nullptr;
-
-	// 탭 선택 변경 콜백 (ButtonGroup에서 호출)
-	UFUNCTION()
-	void OnTabSelectionChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
-
-	// 탭 직접 클릭 콜백 (OnClicked 바인딩)
-	UFUNCTION()
-	void OnMarketCapTabClicked();
-
-	UFUNCTION()
-	void OnWeeklyRevenueTabClicked();
-
-	UFUNCTION()
-	void OnCloseButtonClicked();
-
-	UFUNCTION()
-	void OnBackgroundClicked();
-
-	// 리더보드 로드 콜백
+	UFUNCTION() void OnTabSelectionChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
+	UFUNCTION() void OnCloseButtonClicked();
+	UFUNCTION() void OnBackgroundClicked();
 	void HandleLeaderboardLoaded(int32 TabIndex, const TArray<FRankingEntry>& Entries);
-
-	// 스크롤박스에 카드 채우기 (본인 카드 상단 고정)
-	void PopulateScrollBox(UScrollBox* ScrollBox, const TArray<FRankingEntry>& Entries);
-
-	// 탭 전환
+	void HandleRankingError(const FString& ErrorMessage);
+	void PopulateScrollBox(UScrollBox* ScrollBox, const TArray<FRankingEntry>& Entries, const FString& OwnPlayerId);
 	void SwitchToTab(int32 TabIndex);
+	void RefreshPodium(int32 TabIndex);
+	void RequestPodiumSnapshots(int32 TabIndex);
+	void VisitEntry(const FRankingEntry& Entry, const FString& OwnPlayerId);
+	void ReleasePresentation();
 };

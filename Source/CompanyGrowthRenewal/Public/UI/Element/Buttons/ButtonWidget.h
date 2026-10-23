@@ -28,7 +28,7 @@ public:
 	FOnButtonIsSelectedChanged OnIsSelectedChanged;
 
 protected:
-	UPROPERTY(EditAnywhere, meta = (BindWidget))
+	UPROPERTY(EditAnywhere, meta = (BindWidgetOptional))
 	UCommonTextBlock* ButtonText;
 
 	UPROPERTY(EditAnywhere, Category = "Button")
@@ -58,6 +58,14 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Button|Outline", meta = (EditCondition = "bEnableTextOutline"))
 	FLinearColor OutlineColor = FLinearColor::Black;
 
+	// 텍스트 포함 버튼은 스케일 금지 R29 ― 출석 CTA 처럼 라벨이 큰 버튼은 인스턴스에서 끈다
+	UPROPERTY(EditAnywhere, Category = "Button")
+	bool bPressPunchEnabled = true;
+
+	// 탭처럼 소유 패널이 전환음을 따로 내는 버튼은 끈다 — 한 액션 한 사운드
+	UPROPERTY(EditAnywhere, Category = "Button")
+	bool bPlayClickSound = true;
+
 	virtual void NativePreConstruct() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 	virtual void NativeOnClicked() override;
@@ -66,6 +74,13 @@ protected:
 	virtual void NativeOnDeselected(bool bBroadcast) override;
 
 public:
+	// Slate 생성 전에도 버튼 인스턴스에 설정된 텍스트 표현을 읽는다.
+	float GetTextSize() const { return TextSize; }
+	FSlateColor GetTextColor() const { return TextColor; }
+	bool GetTextOutlineEnabled() const { return bEnableTextOutline; }
+	float GetTextOutlineSize() const { return OutlineSize; }
+	FLinearColor GetTextOutlineColor() const { return OutlineColor; }
+
 	UFUNCTION(BlueprintCallable, Category = "Button")
 	void SetButtonText(const FText& NewText);
 
@@ -76,6 +91,9 @@ public:
 	// 텍스트 패딩 설정
 	UFUNCTION(BlueprintCallable, Category = "Button")
 	void SetTextPadding(FMargin NewPadding);
+
+	UFUNCTION(BlueprintPure, Category = "Button")
+	FMargin GetTextPadding() const { return TextPadding; }
 
 	// 텍스트 색상 설정
 	UFUNCTION(BlueprintCallable, Category = "Button")
@@ -97,10 +115,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Button")
 	void SetPulseEnabled(bool bEnabled);
 
+	void SetPlayClickSound(bool bEnabled) { bPlayClickSound = bEnabled; }
+
+	virtual bool ShouldPlayClickSound() const override { return bPlayClickSound; }
+
 	/**
 	 * 비활성(SetIsEnabled(false)) 대신 쓰는 거부 모드.
 	 * 버튼은 활성 상태를 유지하되 클릭을 삼키고 사유를 알린다 — 왜 안 되는지 모른 채 무반응인 상황을 없앤다.
-	 * 재화 부족처럼 "지금은 안 되지만 곧 가능한" 조건에만 쓸 것. MAX/미해금 같은 구조적 불가는 비활성이 맞다.
+	 * 재화 부족·해금 대기처럼 "지금은 안 되지만 곧 가능한" 조건에 쓸 것. MAX 같은 영구 불가는 비활성이 맞다.
 	 * 선택형(탭) 버튼에는 쓰지 말 것 — 선택 토글은 클릭 삼킴보다 먼저 일어난다.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Button|Reject")
@@ -115,6 +137,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Button|Reject")
 	bool HasRejectReason() const;
+
+	// 뒤로가기가 이 버튼을 누른 것으로 처리할 때 ― 실제 클릭과 같은 경로(누를 수 있는지 판정·클릭음·OnClicked)
+	void SimulateClick() { HandleButtonClicked(); }
 
 private:
 	// 거부 사유 — 둘 중 하나만 활성. bRejectInsufficient 면 클릭 시점에 부족분을 계산한다.

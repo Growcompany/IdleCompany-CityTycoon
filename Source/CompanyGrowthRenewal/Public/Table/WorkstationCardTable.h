@@ -58,6 +58,10 @@ struct FWorkstationCardTable : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties")
 	FIntPoint GridSize = FIntPoint(1, 1);
 
+	// 책상과 의자를 포함한 점유 사각형 중심. 액터 로컬 좌표이며 회전/스케일을 함께 적용한다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Properties")
+	FVector2D GridCenterOffset = FVector2D::ZeroVector;
+
 	// ========== 기본 스탯 (책상 자체 보너스) ==========
 
 	// 기본 업무 효율 보너스

@@ -7,14 +7,28 @@
 #include "Enum/ProjectMode.h"
 #include "Enum/ProjectLifecycle.h"
 #include "Enum/CompanyType.h"
-// UFUNCTION 파라미터 타입(FLaunchReaction)은 UHT 가 완전한 선언을 요구한다 — 전방선언 불가
-#include "Manager/LaunchReactionSubsystem.h"
+#include "Enum/OfficeExpansionType.h"
+#include "Enum/ResourceType.h"
 #include "OfficeMainWidget.generated.h"
 
 class UButtonWidget;
+class AOfficeInterior;
+class UResourceWidget;
 class UIconWithButtonWidget;
+class UOfficeFeatureButtonWidget;
 class UButton;
 class UTexture2D;
+class UEmployeeEquipmentDialogWidget;
+class UEmployeeEquipmentItemObject;
+class AWorkstationActorBase;
+class UPlacementHandler;
+class USelectionChevronWidget;
+class UCanvasPanelSlot;
+class UCanvasPanel;
+class AOfficeCameraPawn;
+class UBuildPlacementPanelWidget;
+class UConfirmCancelWidget;
+class UOfficeExpansionContentWidget;
 
 class UCommonTextBlock;
 class UBorder;
@@ -28,7 +42,7 @@ class UMaterialInstanceDynamic;
 class UOfficeStageProgressManager;
 class UProjectOperationManager;
 class UOfficeProjectCardWidget;
-class UTextGlitchEffectWidget;
+class UDevelopmentBannerWidget;
 class UWidgetSwitcher;
 class UStatRowWidget;
 class UMissionTrackerWidget;
@@ -50,6 +64,10 @@ class COMPANYGROWTHRENEWAL_API UOfficeMainWidget : public UCommonActivatableWidg
 	GENERATED_BODY()
 
 public:
+	// 패널 닫힘 후 요청한다. 하단 스택 복귀가 진행 중이면 재활성화까지 기다린다.
+	void RequestPlacementEdit(AActor* Target = nullptr);
+	void SetPlacementWorkstationMarker(AWorkstationActorBase* Workstation, UPlacementHandler* Handler);
+
 	// M4 미션 가이드 — [채용] 버튼 하이라이트 타겟
 	UWidget* GetRecruitmentButtonWidget() const;
 
@@ -59,17 +77,23 @@ public:
 	// M7 미션 가이드 — [책상 배치] 버튼 하이라이트 타겟
 	UWidget* GetWorkstationOpenButtonWidget() const;
 
-	// [꾸미기] 버튼 링 타겟 — 구 M8 가이드가 유일한 소비자였고 그 미션이 미션판 G7 로 이관돼 현재 미참조
+	// 채용 창 [책상 배치] 바로가기 — 하단 [책상] 버튼과 같은 경로(배치 패널 push + 미션 알림).
+	void OpenWorkstationPanel() { OnWorkstationButtonClicked(); }
+
+	// [꾸미기] 버튼 링 타겟 (현재 미사용)
 	UWidget* GetDecorationOpenButtonWidget() const;
 
 	// M9 미션 가이드 — 도크 [직원] 버튼 하이라이트 타겟
 	UWidget* GetEmployeeButtonWidget() const;
+	// 튜토리얼 M18 — 직원 패널 안에 뽑기 진입이 없을 때 쓰는 도크 [장비] 버튼
+	UWidget* GetEquipmentGachaButtonWidget() const;
 
-	// M10 미션 가이드 — 개발 스트립 행 하이라이트 타겟. 활성 칸 수가 프로젝트 weight 에 따라 달라 개별 칸 대신 행을 가리킨다.
-	UWidget* GetStripRowWidget() const;
-
-	// M10 관찰 페이즈의 둘째 구멍 — 배속 토글. 점수만 비추면 개발을 앞당길 수단이 딤에 묻힌다.
+	// 첫 개발 관찰 단계에서 강조할 배속 버튼.
 	UWidget* GetStripSpeedButtonWidget() const;
+	// 개발 요구점수 6칸을 감싸는 행.
+	UWidget* GetStripRequirementRowWidget() const;
+	// 운영 중 「남은 시간」 숫자 ― 다음 기획안을 기다리는 동안 안내가 붙는다.
+	UWidget* GetStripOperationTimeWidget() const;
 
 	// 좌레일 상단에 배치된 미션 트래커 (없으면 nullptr → MissionManager 가 폴백 생성)
 	UMissionTrackerWidget* GetMissionTracker() const { return MissionTracker; }
@@ -80,10 +104,22 @@ protected:
 	virtual void NativeOnActivated() override;
 	virtual void NativeOnDeactivated() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+	void TryPlayManufacturingIntro();
+	FTimerHandle ManufacturingIntroTimer;
+	TWeakObjectPtr<class UPanelIntroOverlayWidget> ManufacturingIntroOverlay;
 
 	// 대기 상태에서 [기획안 보기] CTA 를 은은히 펄스 → 다음 행동 유도 (RefreshOfficeUI 가 bIdlePulse 세팅)
 	bool bIdlePulse = false;
 	float IdlePulseElapsed = 0.0f;
+
+	// 대기 CTA 위를 주기 횡단하는 광택 띠 — 버튼 Overlay 안, ClipToBounds 전제.
+	// 버튼 자체를 움직이면 지글거림/계단을 피할 수 없어 장식 이미지만 움직인다(HQ claim 샤인과 같은 방식).
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	UImage* CtaShineImage = nullptr;
+
+	static constexpr float CtaShinePeriod = 3.0f;     // 스윕 주기(이동 + 휴지)
+	static constexpr float CtaShineTravel = 0.65f;    // 횡단 시간
+	static constexpr float CtaShineSweepHalf = 250.f; // 횡단 반폭 — 버튼 폭 480 기준, 캡처로 튜닝
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UIconWithButtonWidget* WorkstationOpenButton;
@@ -91,14 +127,25 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButtonWidget* DecorationOpenButton;
 
+	// 기술 연구소 진입. Optional 인 이유는 OfficeDockTray 와 같다 — WBP 주입과 C++ 리빌드 타이밍이
+	// 어긋나도 오피스 전체가 깨지지 않게. 널이면 버튼이 없을 뿐 나머지는 그대로 돈다.
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UOfficeFeatureButtonWidget> TrainingCenterOpenButton = nullptr;
+
+	// 출장 진입. 위와 같은 이유로 Optional 이다.
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UOfficeFeatureButtonWidget> BusinessTripOpenButton = nullptr;
+
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButtonWidget* EmployeeButton;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UButtonWidget* OfficeUpgradeButton;
+	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButtonWidget> EquipmentManualButton;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButtonWidget* RecruitmentButton;
+
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UButtonWidget> EquipmentGachaButton;
 
 	// 도감 버튼 — 클리어한 프로젝트 목록 열람
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -108,9 +155,12 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UImage* FeverScreenTint;
 
-	// 타이머 텍스트 (링 중앙)
+	// 남은 시간은 상단 한 자리에서 라벨/단위를 함께 읽는다.
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* ProcessTimeText;
+	UPROPERTY(meta = (BindWidgetOptional))
+	UCommonTextBlock* ProcessTimeLabel = nullptr;
+	void UpdateDevelopmentEffectArea();
 
 	// 카운트다운 링 — 남은시간/전체 비율을 형태로. 스트립의 가로 바 6개와 형태를 갈라 "점수 아님"을 즉시 구분.
 	// required: 데이터 주입 대상이라 조용히 null 이 되면 안 된다 (구 ProgressBar 가 Optional 이라 트리에 없는 채 방치됐던 선례)
@@ -130,11 +180,18 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UOfficeProjectCardWidget* UI_OfficeProjectCardCurrent;
 
-	// ========== 좌측 프로젝트 슬롯 (대기 CTA ↔ 운영 중 카드) ==========
-
-	// Index 0: 대기 CTA, Index 1: 운영 중 카드
+	// ========== 진행 줄 페이지 (Index 0: 대기 안내, Index 1: 개발 · 제조) ==========
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UWidgetSwitcher* ProjectWidgetSwitcher;
+
+	// 운영 카드(오른쪽 열) ― 운영 중에만 보인다. 안의 표지·이름·수익·그래프·남은 시간·종료 버튼은 아래 Op*·RevPerSecText·
+	// TotalRevText·SalesCurve·StripStopButton 바인딩 그대로라 갱신 경로가 바뀌지 않는다
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UWidget> OpCard = nullptr;
+
+	// 카드 머리 「운영 중」 ― 결과 대기(ReportPending)에는 접는다
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UWidget> OpCardStatusRow = nullptr;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UButtonWidget* OpenBoardButton;
@@ -170,7 +227,7 @@ protected:
 	UCommonTextBlock* DevGenreBadge;
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UBorder* DevGenreBadgeBox;
-	// 운영 페이지: 이름 + 등급 배지 + 수익 메트릭 + 운영종료
+	// 운영 카드: 이름 + 등급 배지 + 수익 메트릭 + 운영종료
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* OpProjectName;
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -228,24 +285,49 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	UImage* StripLine = nullptr;
 	FVector2D LastStripMatSize = FVector2D::ZeroVector;
+	UPROPERTY(Transient)
+	TObjectPtr<UBorder> StageTray = nullptr;
+	FVector2D LastStageTrayMatSize = FVector2D::ZeroVector;
 	void UpdateStripShellMaterialSize();
 
-	// 개발 페이지 스테이지 셀 ― BindWidget 대신 GetWidgetFromName 으로 캐시(Stage{1..6}Cell/Name/Val/Bar/Done). NativeConstruct 에서 채움.
+	// 개발·운영 중 왼쪽 위 미션판이 표시줄과 겹치지 않게 표시줄 아래로 내린다(대기 중엔 제자리).
+	UPROPERTY(Transient)
+	TObjectPtr<UWidget> StripRootWidget = nullptr;
+	UPROPERTY(Transient)
+	TObjectPtr<UWidget> MissionAnchor = nullptr;
+	float MissionAnchorShiftY = 0.0f;
+	static constexpr float MissionAnchorGap = 18.0f;
+	void UpdateMissionAnchorBelowStrip(float DeltaTime);
+
+	// 진행 줄 칸(StripRailColumn) 위 여백 ― WBP 값 = 회사 블록 아래. 개발 구간에는 회사 블록을 숨기고 그 자리로 올린다
+	// (진행 줄 판은 칸보다 20 위로 붙어 있어 칸 위 70 = 판 위 50 = 회사 블록 위)
+	void ApplyStripRailPlacement(bool bStripOnTop);
+	float StripRailTopBelowBlock = -1.0f;
+	static constexpr float StripRailTopFocus = 70.0f;
+
+	// 운영 카드 = 운영 중(제조 제외), 배치 편집 중에는 숨김. 카드는 대기 전용 오른쪽 열(OfficeContentRail) 밖의 형제라 편집 숨김도 따로 건다
+	void RefreshOpCardVisibility(EProjectLifecycle State);
+
+	// 개발 페이지 스테이지 셀과 직능 아이콘/목표 테두리는 NativeConstruct에서 트리 이름으로 캐시한다.
 	UPROPERTY(Transient)
 	TArray<UWidget*> StripStageCells;
-	// 개발 스트립 행 — 6개 스테이지 셀의 부모. M10 가이드가 스트립 전체를 가리킬 때 쓴다.
-	UPROPERTY(Transient)
-	UWidget* StripRow = nullptr;
 	UPROPERTY(Transient)
 	TArray<UCommonTextBlock*> StripStageNames;
 	UPROPERTY(Transient)
 	TArray<UCommonTextBlock*> StripStageVals;
 	UPROPERTY(Transient)
 	TArray<UProgressBar*> StripStageBars;
-	// 달성 배지(Stage{N}Done) ― 가시성만 토글한다. 색/패딩/브러시는 WBP 소유.
-	// 상태는 저장하지 않는다: ApplyStripStageVisual 이 Pct 에서 매번 파생시킨다.
 	UPROPERTY(Transient)
-	TArray<UWidget*> StripStageDoneBadges;
+	TObjectPtr<UWidget> StripRequirementRow = nullptr;
+	UPROPERTY(Transient)
+	TArray<UImage*> StripStageDisciplineIcons;
+	UPROPERTY(Transient)
+	TArray<UImage*> StripStageGoalRings;
+	FVector2D StripStageRingMatSize[6];
+	// 표시 점수의 문턱을 통과할 때만 셀 팝과 금색 테두리를 재생한다.
+	uint8 StripStageVisualState[6] = {};
+	float StripStageGoalElapsed[6] = { 99.f, 99.f, 99.f, 99.f, 99.f, 99.f };
+	static constexpr float StripGoalDuration = 0.72f;
 
 	// 스테이지 바 부드러운 채움 — raw ProgressBar SetPercent은 즉시라 툭툭 점프. NativeTick에서 Shown→Target 을 0.3초 count-up으로 lerp (옛 UStatRowWidget 방식 이식).
 	float StripStageShownPct[6] = { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f };
@@ -271,8 +353,52 @@ protected:
 	static constexpr float StripFlashDecayTime = 0.15f;
 
 private:
+	void BuildPlacementEditControls();
+	void BeginPendingPlacementEdit();
+	bool bPendingPlacementEdit = false;
+	TWeakObjectPtr<AActor> PendingPlacementEditTarget;
+	void BindPlacementEditControls();
+	void UnbindPlacementEditControls();
+	UFUNCTION() void RefreshPlacementEditControls();
+	UFUNCTION() void HandlePlacementEditToggle();
+	void HandlePlacementEditFeedback(const FText& Message);
+	TWeakObjectPtr<AOfficeCameraPawn> PlacementEditPawn;
+	UPROPERTY(Transient) TObjectPtr<UCanvasPanel> PlacementEditCanvas;
+	UPROPERTY(meta = (BindWidget)) TObjectPtr<UButtonWidget> PlacementEditDoneButton;
+	UPROPERTY(Transient) TObjectPtr<UBuildPlacementPanelWidget> PlacementEditPanel;
+	UPROPERTY(Transient) TObjectPtr<UCommonTextBlock> PlacementEditHint;
+	bool bPlacementEditSuppressedHud = false;
+	ESlateVisibility PlacementEditPreviousDockVisibility = ESlateVisibility::SelfHitTestInvisible;
+	bool bPlacementEditPreviousRightEnabled = true;
+	bool bPlacementEditPreviousEquipmentEnabled = true;
+
+	void UpdatePlacementWorkstationMarker(float DeltaTime);
+	TWeakObjectPtr<AWorkstationActorBase> PlacementMarkerWorkstation;
+	TWeakObjectPtr<UPlacementHandler> PlacementMarkerHandler;
+	UPROPERTY(Transient) TObjectPtr<USelectionChevronWidget> PlacementChevron;
+	UPROPERTY(Transient) TObjectPtr<UCanvasPanelSlot> PlacementChevronSlot;
+	UPROPERTY(Transient) TObjectPtr<UCanvasPanel> PlacementMarkerCanvas;
+	float PlacementMarkerElapsed = 0.f;
+
+	void RefreshEquipmentManualButton();
+	void ShowEquipmentManualEmployees();
+	void HandleEquipmentManualEmployee(UObject* Item);
+	void HandleEquipmentManualDiscipline(UObject* Item);
+	void CloseEquipmentManualDialog();
+	UPROPERTY() TObjectPtr<UEmployeeEquipmentDialogWidget> EquipmentManualDialog;
+	UPROPERTY() TArray<TObjectPtr<UEmployeeEquipmentItemObject>> EquipmentManualEntries;
+	int32 EquipmentManualEmployeeId = INDEX_NONE;
+
 	UFUNCTION()
 	void OnWorkstationButtonClicked();
+
+	UFUNCTION()
+	void OnTrainingCenterButtonClicked();
+	void OnBusinessTripButtonClicked();
+	void RefreshCompanyFeatureButtons();
+	bool CanOpenCompanyFeature(FName FeatureKey);
+	UFUNCTION()
+	void OnCompanyTierUnlocked(int32 NewTier);
 
 	// 업무공간 뱃지 갱신
 	void UpdateWorkstationBadge();
@@ -284,10 +410,8 @@ private:
 	void OnEmployeeButtonClicked();
 
 	UFUNCTION()
-	void OnOfficeUpgradeButtonClicked();
-
-	UFUNCTION()
 	void OnRecruitmentButtonClicked();
+	void OnEquipmentGachaButtonClicked();
 
 	UFUNCTION()
 	void OnCollectionBtnClicked();
@@ -326,18 +450,13 @@ private:
 	UFUNCTION()
 	void OnProgressDataRestoredReceived();
 
-	// Step 시작 이펙트 콜백 (BlindMaskSweep + TextGlitch)
+	// 개발 시작 배너 콜백
 	UFUNCTION()
 	void OnStepStartEffectReceived();
 
 	// Score Orb 비행 연출
 	UFUNCTION()
-	void OnScoreOrbRequestedReceived(FVector WorldPos, int32 StepNumber, float Score, bool bIsCritical, int32 OrbCount);
-
-	// 개발 스펙터클 — 기여를 "타격/루트", 크리를 "크리 팝"으로 승격.
-	// orb 비행과 별개로 직원 WorldPos에서 월드 Niagara(평타/크리 스파이크)를 터뜨리고, 크리는 카메라 셰이크 + 전용 음.
-	// 점수 수학은 불변(연출 전용) — VFX 에셋 미배치(DT_VFX 빈 행)여도 null 가드로 안전.
-	void PlayDevSpectacleFeedback(const FVector& WorldPos, bool bIsCritical);
+	void OnScoreOrbRequestedReceived(FVector WorldPos, int32 StepNumber, float Score, bool bIsCritical, int32 OrbCount, bool bPlaySpectacle);
 
 	// ===== 피버타임 연출 (dev-spectacle Phase 2) =====
 	// 매니저 OnFeverChanged 수신 → 진입 시 레전드 번개 버스트 + 화염 틴트 페이드인 + 음, 종료 시 페이드아웃.
@@ -367,13 +486,10 @@ private:
 	void ResetLastSpurtVisual();
 
 	// 타이머 종료 "완료!" 시점의 출시 클라이맥스 한 방 (품질 등급 비례)
-	void PlayLaunchClimax();
+	void PlayLaunchClimax(bool bManufacturingSuccess = false);
 
 	UPROPERTY()
 	UScoreOrbContainerWidget* ScoreOrbContainer = nullptr;
-
-	// Progress bar 색상 업데이트 (초록→노랑→빨강)
-	void UpdateTimerRingColor(float RemainingTime);
 
 	// 프로젝트 카드 스테이지 점수 업데이트
 	void UpdateProjectCardProgress();
@@ -428,30 +544,13 @@ private:
 
 	// ========== Step 시작 이펙트 ==========
 
-	void ShowStepStartEffect(int32 StepNumber);
+	void ShowStepStartEffect();
 	void RemoveStepStartEffect();
 
 	UPROPERTY()
-	UUserWidget* BlindMaskSweepWidget = nullptr;
-
-	UPROPERTY()
-	UTextGlitchEffectWidget* StepStartGlitchWidget = nullptr;
+	TObjectPtr<UDevelopmentBannerWidget> StepStartBannerWidget;
 
 	FTimerHandle StepEffectTimerHandle;
-
-	UPROPERTY()
-	UMaterialInstanceDynamic* BlindMaskMID = nullptr;
-
-	FTimerHandle BlindMaskAnimTimerHandle;
-	float BlindMaskAnimElapsed = 0.0f;
-	static constexpr float BlindMaskAnimDuration = 2.0f;
-
-	void UpdateBlindMaskAnimation();
-
-	// BlindMaskSweep 사운드 looping stagger — 위젯 생존 동안 0.12s 간격 wav cycle, sin envelope 적용
-	FTimerHandle BlindSweepSoundHandle;
-	int32 BlindSweepVariantIdx = 0;
-	float BlindSweepStartTime = 0.0f;
 
 	// ========== 출시 확인 모달 ==========
 
@@ -459,16 +558,6 @@ private:
 
 	UFUNCTION()
 	void OnLaunchConfirmedHandler();
-
-	// 출시 보상 리빌 — LaunchConfirm 닫힘 직후 PromptStack push (InHouse + 리뷰 있는 출시만)
-	void ShowLaunchRewardReveal(const struct FLaunchRewardRevealData& Data);
-
-	UFUNCTION()
-	void OnLaunchRevealClosed();
-
-	// 운영 중 반응 드립 수신 → 현재 건물이면 레일에 토스트
-	UFUNCTION()
-	void OnLaunchReactionReady(int32 BuildingID, const FLaunchReaction& Reaction);
 
 	UFUNCTION()
 	void OnLaunchCancelledHandler();
@@ -517,6 +606,24 @@ private:
 	// 우레일 대기존 묶음 (힌트박스 + 착수 CTA) — 대기에만 표시
 	UPROPERTY(meta = (BindWidgetOptional))
 	UVerticalBox* RightIdleZone;
+	UPROPERTY(meta = (BindWidget)) TObjectPtr<UCommonTextBlock> ManufacturingExperienceSummary;
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UCommonTextBlock> IdleHintText;
+	void RefreshManufacturingPointsStatus();
+	void OnManufacturingPointsChanged(int32 BuildingID);
+	void TryShowManufacturingResearchResult();
+	void TryOpenManufacturingQuantity();
+	UFUNCTION() void OnManufacturingResearchResultClosed(bool bOpenQuantity);
+	FTimerHandle ManufacturingResultTimer;
+	FTimerHandle ManufacturingQuantityTimer;
+	bool bManufacturingResearchObserved = false;
+	bool bManufacturingResearchWasActive = false;
+	bool bHandlingManufacturingResult = false;
+	int32 ManufacturingResultBuildingID = INDEX_NONE;
+	int32 ManufacturingResultProjectIndex = INDEX_NONE;
+	TWeakObjectPtr<ULaunchConfirmWidget> ActiveManufacturingResult;
+	int32 ManufacturingQuantityProjectIndex = INDEX_NONE;
+	int32 ManufacturingQuantityBuildingID = INDEX_NONE;
+	void HandleEmployeeExperienceChanged(int32 EmployeeID);
 
 	// 상단 밴드(회사배너/트렌드칩/티어칩/포트폴리오)는 OfficeLayerWidget 로 이관 — 재화와 같은 상시 레이어.
 
@@ -549,6 +656,9 @@ private:
 	// 현재 게임 상태에서 Switcher 인덱스 재동기화 (단일 진실 공급원)
 	void RefreshLeftSlotState();
 
+	// 경제 잠금/해제 — 해제 시 서버값으로 정정된 다이아 잔액으로 컨티뉴 슬롯 재계산
+	void HandleEconomyReady(bool bReady);
+
 	// 현재 게임 상태에 맞게 ProjectNameBar 텍스트 재동기화
 	void RefreshProjectNameBar();
 
@@ -573,9 +683,51 @@ private:
 	// 착지 순간 펀치+플래시 시작 (스로틀 포함)
 	void StartStripStageJuice(int32 Index, bool bIsCritical);
 	// 특정 스테이지의 바 퍼센트/값 텍스트/색을 즉시 적용 (틱 lerp + 스냅 공용)
-	void ApplyStripStageVisual(int32 Index, float Pct);
+	void ApplyStripStageVisual(int32 Index, float Pct, bool bAnimateGoalTransition = false);
 	// 운영 수익 메트릭 (수익/초, 누적)
 	void UpdateStripOperationMetrics(const FOperationData& Data);
+	// 운영 줄 등급 = 출시 결과와 같은 공용 엠블럼. Max 는 접는다.
+	void ApplyOpGradeEmblem(EQualityGrade Grade);
+	// 공용 Apply 는 재질을 비웠다가 다시 넣어 광택을 처음부터 재생하므로, 칠한 값이 같으면 건너뛴다.
+	EQualityGrade AppliedOpGrade = EQualityGrade::Max;
+	ECompanyType AppliedOpGradeCompany = ECompanyType::None;
+	// 운영 카드 제목 크기 단계의 기준 = WBP 크기. 줄인 크기가 다음 이름의 기준이 되지 않게 처음 값을 기억한다
+	float OpTitleBaseFontSize = 0.0f;
 	// orb 목표 = 스텝 번호(1-based) → Stage{n}Bar 위젯
 	UWidget* GetStripStepBar(int32 StepNumber) const;
+	// 정적 저작 요소가 없는 빌드에서도 나머지 Office HUD는 유지한다. 누락은 바인딩 시 보고한다.
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UCanvasPanel> ExpansionLayer;
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UWidget> ExpandAnchorX;
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UWidget> ExpandAnchorY;
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UIconWithButtonWidget> ExpandHotspotX;
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UIconWithButtonWidget> ExpandHotspotY;
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UResourceWidget> ExpandCostX;
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UResourceWidget> ExpandCostY;
+	UPROPERTY(meta = (BindWidgetOptional)) TObjectPtr<UOfficeExpansionContentWidget> ExpansionConfirmContent;
+
+	void BindExpansionHotspots();
+	void UnbindExpansionHotspots();
+	void UpdateExpansionHotspots(bool bFromTick = false);
+	void RefreshExpansionValues();
+	void OnExpansionResourceChanged(EResourceType Type, int64 NewValue);
+	void OnExpansionFootprintChanged(FIntPoint TileCount);
+	void OpenExpansionConfirm(EOfficeExpandDirection Direction);
+	void CloseExpansionConfirm();
+	void ConfirmExpansion(EOfficeExpandDirection Direction, TWeakObjectPtr<AOfficeInterior> QuotedInterior,
+		FIntPoint QuotedFootprint, int64 QuotedCost);
+	TWeakObjectPtr<AOfficeInterior> ExpansionInterior;
+	TWeakObjectPtr<AOfficeInterior> LastPreviewInterior;
+	TWeakObjectPtr<UWidget> ExpansionChevrons[2];
+	FDelegateHandle ExpansionFootprintHandle;
+	TWeakObjectPtr<UConfirmCancelWidget> ExpansionDialog;
+	FDelegateHandle ExpansionConfirmHandle;
+	FDelegateHandle ExpansionCancelHandle;
+	EOfficeExpandDirection ExpansionDirection = EOfficeExpandDirection::Left;
+	bool bExpansionConfirmOpen = false;
+	bool bPushingExpansionConfirm = false;
+	bool bExpansionConfirmWasActivated = false;
+	bool bExpansionRequestPending = false;
+	bool bExpansionPreviewShown = false;
+	bool bExpansionAffordInitialized = false;
+	bool bExpansionCanAfford[2] = {false, false};
 };

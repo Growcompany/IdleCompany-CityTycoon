@@ -1,16 +1,17 @@
-// 부지 가격 배지 — WBP 기반 UUserWidget. C++ 는 가격 텍스트/색 + 클릭→인수만.
+// 부지 가격 배지의 데이터 표시와 인수 입력.
 
 #include "UI/Element/Plot/PlotPriceBadgeWidget.h"
 #include "Entity/Plot/CityPlotActor.h"
 #include "Components/Button.h"
+#include "Components/HorizontalBox.h"
+#include "Components/Image.h"
+#include "Components/SizeBox.h"
 #include "CommonTextBlock.h"
-
-namespace
-{
-	// 가격 텍스트 색 — 충분=웜화이트, 부족=뮤트 레드(형광 빨강 회피, 절제).
-	const FLinearColor PriceWhite(0.96f, 0.96f, 0.98f, 1.0f);
-	const FLinearColor PriceRed(0.92f, 0.32f, 0.30f, 1.0f);
-}
+#include "Engine/GameInstance.h"
+#include "Engine/Texture2D.h"
+#include "Enum/ResourceType.h"
+#include "Manager/TableManagerSubsystem.h"
+#include "Table/ResourceInfo.h"
 
 void UPlotPriceBadgeWidget::SetPlot(ACityPlotActor* InPlot)
 {
@@ -24,17 +25,57 @@ void UPlotPriceBadgeWidget::SetPrice(const FText& InPrice, bool bInCanAfford)
 	ApplyPriceToWidget();
 }
 
+void UPlotPriceBadgeWidget::SetAcquisitionRequired(bool bRequired)
+{
+	bAcquisitionRequired = bRequired;
+	ApplyPriceToWidget();
+}
+
 void UPlotPriceBadgeWidget::ApplyPriceToWidget()
 {
-	if (!PriceText) return;
-
-	PriceText->SetText(CachedPrice);
-	PriceText->SetColorAndOpacity(FSlateColor(bCachedCanAfford ? PriceWhite : PriceRed));
+	if (TitleText)
+	{
+		TitleText->SetText(bAcquisitionRequired
+			? NSLOCTEXT("PlotPriceBadge", "AcquisitionRequired", "회사 정리 필요")
+			: NSLOCTEXT("PlotPriceBadge", "PlotAcquisition", "부지 인수"));
+	}
+	if (ContentHBox)
+	{
+		ContentHBox->SetVisibility(bAcquisitionRequired ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+	}
+	if (BadgeSizing)
+	{
+		BadgeSizing->SetMinDesiredHeight(bAcquisitionRequired ? 0.0f : 64.0f);
+	}
+	if (PriceText)
+	{
+		PriceText->SetText(CachedPrice);
+		PriceText->SetColorAndOpacity(FSlateColor(bCachedCanAfford ? AffordablePriceColor : InsufficientPriceColor));
+	}
+	if (ShortageText)
+	{
+		ShortageText->SetVisibility(bAcquisitionRequired || bCachedCanAfford ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
 }
 
 void UPlotPriceBadgeWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+
+	if (MoneyIcon)
+	{
+		UGameInstance* OwningGameInstance = GetGameInstance();
+		UTableManagerSubsystem* TableManager = OwningGameInstance ? OwningGameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+		bool bFound = false;
+		const FResourceInfo ResourceInfo = TableManager ? TableManager->GetResourceInfo(EResourceType::Money, bFound) : FResourceInfo();
+		UTexture2D* IconTexture = bFound ? ResourceInfo.Icon.LoadSynchronous() : nullptr;
+		MoneyIcon->SetBrushFromTexture(IconTexture);
+		MoneyIcon->SetVisibility(IconTexture ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		if (!IconTexture)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[PlotPriceBadge] DT_Resource Money icon is missing"));
+		}
+	}
 
 	if (BadgeButton)
 	{

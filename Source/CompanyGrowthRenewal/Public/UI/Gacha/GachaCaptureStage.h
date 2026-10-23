@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Enum/EmployeeEquipmentTypes.h"
 #include "GachaCaptureStage.generated.h"
 
 class USceneCaptureComponent2D;
@@ -14,7 +15,7 @@ class UStaticMeshComponent;
 class USkeletalMeshComponent;
 class UMaterialInterface;
 class UTextureRenderTarget2D;
-class AStickOfficeworker;
+class AFunnyOfficeworker;
 struct FEmployeeInstance;
 
 // 무대 위 애니 모드 — 가챠 리빌=랜덤 댄스, 직원창 히어로 라이브 뷰=제자리 걷기
@@ -62,6 +63,10 @@ public:
 
 	// [다시뽑기]/선택 변경: 기존 워커 destroy 후 새 대상으로 재구성(RT 재사용).
 	UTextureRenderTarget2D* Rebuild(const FEmployeeInstance& Employee, EStageAnimMode AnimMode = EStageAnimMode::Dance);
+	bool PreviewEquipmentAppearance(EEmployeeEquipmentSlot EquipmentSlot, EEquipmentAppearanceMode Mode, FName AppearanceId);
+	void ClearEquipmentAppearancePreview();
+	// 현재 소유자의 단일 직원 라이브 뷰만 수평 회전한다.
+	bool RotatePreview(const UObject* Holder, float DeltaYaw);
 
 	// 위젯 닫힐 때: 캡처 OFF + 워커/무대 정리.
 	void EndReveal();
@@ -85,8 +90,8 @@ protected:
 	// 에디터 전용 프리뷰 직원 — 뷰포트에서 카메라/라이트 프레이밍 잡는 기준(런타임엔 숨김, 진짜 직원이 들어감)
 	UPROPERTY(VisibleAnywhere, Category = "Stage") USkeletalMeshComponent* PreviewWorker;
 
-	// 스폰할 스틱워커 BP. 생성자에서 BP_StickOfficeworker 자동 지정(수동 설정 불필요, BP 만들 필요 없음).
-	UPROPERTY(EditDefaultsOnly, Category = "Stage") TSubclassOf<AStickOfficeworker> WorkerClass;
+	// 스폰할 스틱워커 BP. 생성자에서 BP_FunnyOfficeworker 자동 지정(수동 설정 불필요, BP 만들 필요 없음).
+	UPROPERTY(EditDefaultsOnly, Category = "Stage") TSubclassOf<AFunnyOfficeworker> WorkerClass;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Stage") int32 RTWidth = 512;
 	UPROPERTY(EditDefaultsOnly, Category = "Stage") int32 RTHeight = 640;
@@ -100,7 +105,7 @@ protected:
 	int32 SideColumnPitchPx = 800;
 
 private:
-	UPROPERTY() TArray<AStickOfficeworker*> CurrentWorkers; // 단발=1개, 멀티=N개(슬롯 순서)
+	UPROPERTY() TArray<AFunnyOfficeworker*> CurrentWorkers; // 단발=1개, 멀티=N개(슬롯 순서)
 	UPROPERTY() UTextureRenderTarget2D* RT = nullptr;
 	UPROPERTY() UTextureRenderTarget2D* WideRT = nullptr;   // 멀티 전용 transient (BP 지정 RT 미오염) + GC 보호
 	TArray<FVector4> SlotUVWindows;                        // BeginRevealBatch 산출 창(슬롯 순서) — 카드가 소비
@@ -108,7 +113,7 @@ private:
 	// 현재 소유 소비처 (직원창/가챠 위젯) — ReleaseShared 판정용
 	TWeakObjectPtr<const UObject> HolderWeak;
 
-	AStickOfficeworker* SpawnAndDress(const FEmployeeInstance& Employee, EStageAnimMode AnimMode,
+	AFunnyOfficeworker* SpawnAndDress(const FEmployeeInstance& Employee, EStageAnimMode AnimMode,
 		const FVector& LocalOffset, float ActorScale);
 	void RefreshShowOnly();
 	void DestroyCurrentWorkers();

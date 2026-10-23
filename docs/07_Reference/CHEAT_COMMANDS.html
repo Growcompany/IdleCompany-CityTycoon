@@ -208,21 +208,27 @@ const CATEGORIES = {
   "프로젝트 진척": "#8b5cf6",
   "진행프리셋": "#7c3aed",
   "카메라": "#22d3ee",
+  "개발자모드": "#f59e0b",
   "튜토리얼":"#ef4444",
   "미션판": "#4ade80",
   "시간대": "#06b6d4",
   "도시인수": "#f43f5e",
   "백로그":  "#8b5cf6",
   "UI디버그": "#64748b",
+  "렌더격리": "#a16207",
+  "전환오버레이": "#60a5fa",
   "이동속도": "#fca5a5",
-  "밸런스계측": "#0891b2"
+  "밸런스계측": "#0891b2",
+  "LiveOps": "#38bdf8"
 };
 
 const COMMANDS = [
   { cat:"기본", cmd:"CheatPing", desc:"콘솔 디스패치가 작동하는지 확인 (PONG 로그 + 화면 메시지)", ctx:"어디서나", ex:"CheatPing" },
+  { cat:"기본", cmd:"DamageNumberDemo [bFreeze]", desc:"게임플레이 진행 없이 여러 자릿수·직능·크리티컬 작업 점수를 뷰포트에 표시", ctx:"어디서나", ex:"DamageNumberDemo / DamageNumberDemo 0", note:"기본값 1은 cg.DamageNumber.Freeze를 켜 정지 상태로 유지. 0은 애니메이션 재생. DamageNumberDemoClear로 제거." },
+  { cat:"기본", cmd:"DamageNumberDemoClear", desc:"작업 점수 데모 컨테이너를 제거하고 cg.DamageNumber.Freeze를 0으로 설정", ctx:"어디서나", ex:"DamageNumberDemoClear" },
 
-  { cat:"경험치", cmd:"Exp [Amount] [ID]", desc:"직원에게 경험치 추가. ID 생략 시 선택된 직원", ctx:"직원 선택 필요", ex:"Exp 100 / Exp 100 3" },
-  { cat:"경험치", cmd:"DistExp [Amount] [Grade]", desc:"현재 관리 중인 빌딩 직원들에게 분배. Grade 0=F ~ 5=S (생략=B 1.0x)", ctx:"관리 중 빌딩 필요", ex:"DistExp 50 / DistExp 100 5" },
+  { cat:"경험치", cmd:"Exp [Amount] [ID]", desc:"해당 직원의 획득 배율로 개인 경험치 추가. ID 생략 시 선택된 직원", ctx:"직원 선택 필요", ex:"Exp 100 / Exp 100 3" },
+  { cat:"경험치", cmd:"DistExp [Amount] [Grade]", desc:"현재 관리 중인 빌딩 직원 각각에게 개인 경험치 적립. Grade 0=F ~ 5=S (생략=B 1.0x)", ctx:"관리 중 빌딩 필요", ex:"DistExp 50 / DistExp 100 5" },
   { cat:"경험치", cmd:"ExpStatus", desc:"전체 직원 경험치/레벨/소속 빌딩 상태 표시", ctx:"어디서나", ex:"ExpStatus" },
 
   { cat:"자원", cmd:"Money [Amount]", desc:"돈 추가 (int64)", ctx:"어디서나", ex:"Money 10000" },
@@ -232,7 +238,7 @@ const COMMANDS = [
   { cat:"직원", cmd:"ListEmp", desc:"전체 직원 목록 표시 (선택된 직원은 >>> 표시)", ctx:"어디서나", ex:"ListEmp" },
   { cat:"직원", cmd:"SetRank [Level]", desc:"선택 직원의 강화 레벨 설정 (0-12) + 외모 갱신", ctx:"직원 선택 필요", ex:"SetRank 6", note:"0 인턴 · 1 사원 · 2 주임 · 3 대리 · 4 과장 · 5 차장 · 6 부장 · 7 이사 · 8 상무 · 9 전무 · 10 부사장 · 11 사장 · 12 회장" },
   { cat:"직원", cmd:"SetCrit [Percent]", desc:"직원 크리티컬 확률을 강제로 Percent%로 설정(트레일러용, 기본 50). -1이면 해제(정상 크리율 복귀)", ctx:"OfficeMap", ex:"SetCrit / SetCrit 50 / SetCrit -1", note:"UOfficeStageProgressManager::GetCriticalChance() 오버라이드(기본 크리율/Fortune 특성/피버 무시). 스테이지 리셋에 영향 안 받아 프로젝트 바뀌어도 유지 → 트레일러 캡처 내내 크리 자주 터짐. 직원 버프/큐브 크리 보너스는 가산되어 실제론 지정값 이상 가능. 월드 서브시스템이라 OfficeMap 세션 한정." },
-  { cat:"직원", cmd:"SetStat [StatIndex] [Value] [ID]", desc:"선택(또는 지정 ID) 직원의 6스탯 중 1개를 Value로 직접 설정. 음수는 0으로 클램프", ctx:"직원 선택 필요", ex:"SetStat 1 35 / SetStat 1 35 3", note:"StatIndex: 0 업무속도(WorkSpeed) · 1 크리티컬 확률(CritChance) · 2 침착성(Composure) · 3 경험치획득(ExpGain) · 4 체력(Stamina) · 5 수익보너스(IncomeBonus). ID 생략 시 선택된 직원(Exp와 동일 규칙). ★ 강화 반복 없이 스탯 1개의 효과만 격리 검증하기 위한 치트(Task 6~10 전제 도구)." },
+  { cat:"직원", cmd:"SetStat [StatIndex] [Value] [ID]", desc:"선택(또는 지정 ID) 직원의 6스탯 중 1개를 Value로 직접 설정. 음수는 0으로 클램프", ctx:"직원 선택 필요", ex:"SetStat 1 35 / SetStat 1 35 3", note:"StatIndex: 0 업무속도(WorkSpeed) · 1 크리티컬 확률(CritChance) · 2 침착성(Composure) · 3 경험치획득(ExpGain) · 4 체력(Stamina) · 5 크리티컬 성과(CritDamage). ID 생략 시 선택된 직원(Exp와 동일 규칙). ★ 강화 반복 없이 스탯 1개의 효과만 격리 검증하기 위한 치트(Task 6~10 전제 도구)." },
   { cat:"직원", cmd:"StatStatus [ID]", desc:"선택(또는 지정 ID) 직원의 6스탯 저장값 + 강화보너스 + 유효값 + 종합 점수 출력", ctx:"직원 선택 필요", ex:"StatStatus / StatStatus 3" },
   { cat:"직원", cmd:"EmpName [RarityValue] [Count]", desc:"이름 생성기를 Count번 호출해 로그 출력. 실제 직원 생성/세이브 없음", ctx:"어디서나", ex:"EmpName 5 100", note:"RarityValue: 0 Common · 1 Unusual · 2 Rare · 3 Epic · 4 Legendary · 5 Mythic. Count는 1~500 클램프. ★ Mythic 1%는 실제 뽑기로 검증 불가라 생성기만 격리 호출하는 검증 도구. Legendary/Mythic은 통짜 이름이라 성이 안 붙어야 정상." },
 
@@ -243,6 +249,15 @@ const COMMANDS = [
   { cat:"운영", cmd:"SetOpTime [Seconds]", desc:"현재 관리 중인 빌딩 운영 남은 시간 설정 (0 = 다음 틱 즉시 완료)", ctx:"관리 중 빌딩 필요", ex:"SetOpTime 0", note:"현재 빌딩에 진행 중인 운영이 있어야 동작. ElapsedTime도 동기화." },
   { cat:"운영", cmd:"OpStatus", desc:"진행 중인 모든 운영 상태 표시 (빌딩/품질/시간/수익)", ctx:"어디서나", ex:"OpStatus" },
   { cat:"운영", cmd:"RevenueMax [Amount]", desc:"모든 건물 금고를 건물당 Amount원(기본 500만) 절대액으로 강제 충전 → 돈 버블 전부 표시. 수거는 안 함", ctx:"어디서나", ex:"RevenueMax / RevenueMax 10000000", note:"금고 용량 무시하고 절대액 세팅 → 전체수거 시 그대로 회수돼 코인 100개 상한까지 우수수. 예전 비율 방식은 용량(수백 원)이 작아 수거액이 작았음(2026-07-13 절대액으로 변경)." },
+  { cat:"운영", cmd:"SideFillCrew [BuildingIndex] [Count]", desc:"다른 건물 소속 직원을 그 건물로 옮겨 팀 파워를 올린다. 기술 연구소 팀 파워는 소속 전원 합이라 이걸로 요구치를 넘겨 충족(그린) 화면을 만든다", ctx:"MainMap", ex:"SideFillCrew / SideFillCrew 2 5", note:"원래 건물에서 빠진다 — 되돌리려면 반대로 다시 옮길 것. 실행 후 팀 전원·팀 파워·요구치를 로그로 찍는다." },
+  { cat:"운영", cmd:"SideSetTraining [BuildingIndex] [CourseBest] [Entries]", desc:"연구·입장권을 세이브에 직접 세운다(음수=그대로). 최종 연구 화면은 정상 플레이로 못 만들어 검수 전용 통로가 필요하다", ctx:"MainMap", ex:"SideSetTraining -1 50 3", note:"상한은 GetCurrentCourse 가 잡으므로 큰 값을 넣어도 최종 연구에서 멈춘다." },
+  { cat:"운영", cmd:"SideOpenSkyline", desc:"스카이라인 전용 화면을 메뉴 시트를 거치지 않고 바로 띄운다", ctx:"MainMap", ex:"SideOpenSkyline", note:"PushMenuClass(메뉴 스택) 경로다 — 프롬프트가 아니다. 상태는 SideSetSkyline 으로 먼저 만들 것." },
+  { cat:"운영", cmd:"SideOpenFusion", desc:"콜라보 개발 창을 메뉴 시트 없이 바로 띄운다", ctx:"MainMap", ex:"SideOpenFusion", note:"PushPromptClass 경로. 진행·수령 상태는 기존 세이브를 표시한다." },
+  { cat:"운영", cmd:"SideSetFusion [FusionKey] [Level] [RemainingSeconds]", desc:"콜라보별 레벨·남은 시간을 설정한다. 숫자 음수=유지, 0초=완료 상태", ctx:"MainMap", ex:"SideSetFusion game_platform 4 0 / SideSetFusion None", note:"수령 시 서버시각 검증은 유지. None은 진행 슬롯만 비우며 다른 콜라보 레벨은 유지한다. 변경은 저장된다. 키: game_platform, fintech, console, smarthome, autodrive, autosemi, smartcar." },
+  { cat:"운영", cmd:"SideSetSkyline [BestFloor] [Entries]", desc:"스카이라인 최고 층·입장권을 세이브에 직접 세운다(음수=그대로). 보스 직전·100층 화면은 정상 플레이로 못 만든다", ctx:"MainMap", ex:"SideSetSkyline 39 2", note:"최고 층을 올리면 그 아래 층 보상은 이미 받음으로 기록된다 — 치트로 올렸다 내려도 두 번 받지 않는다." },
+  { cat:"운영", cmd:"SideOpenTrip [BuildingIndex]", desc:"그 건물의 출장 창(UI_BusinessTripPanel) 표시. 인덱스 생략 시 세이브의 첫 보유 건물", ctx:"MainMap", ex:"SideOpenTrip / SideOpenTrip 2", note:"카드 3장은 자정마다 뽑히고 슬롯 상태는 세이브가 정한다 — 진행/수령 화면은 USideContentSubsystem::Depart/ClaimDispatch 를 원격 파이썬으로 호출(둘 다 BlueprintCallable)." },
+  { cat:"운영", cmd:"SideSelectTripCard [CardSlot]", desc:"열려 있는 출장 창에서 CardSlot 번째(0-base, 화면 왼쪽부터) 카드를 고른다", ctx:"MainMap", ex:"SideSelectTripCard / SideSelectTripCard 2", note:"선발 좌석 슬롯과 판정 밴드는 카드가 선택돼야 나오는데 클릭 말고는 그 상태로 갈 길이 없었다(09-26). 카드의 공개 델리게이트를 그대로 쏘므로 실제 클릭과 같은 경로 — 패널 API 를 새로 열지 않았다. SideOpenTrip 으로 창을 먼저 띄울 것." },
+  { cat:"운영", cmd:"SideOpenTraining [BuildingIndex]", desc:"그 건물의 기술 연구소(UI_TrainingCenterPanel) 표시. 인덱스 생략 시 세이브의 첫 보유 건물", ctx:"MainMap", ex:"SideOpenTraining / SideOpenTraining 2", note:"연구·입장권 상태는 세이브가 정한다 — 바꿔 보려면 USideContentSubsystem::Challenge/SweepTraining 을 원격 파이썬으로 호출(둘 다 BlueprintCallable). 건물 이름은 폴백 '건물 N'." },
   { cat:"운영", cmd:"ShowOfflineReport [Hours] [Zero] [FakeRows]", desc:"오프라인 정산 모달 즉시 표시(60초 대기/앱 라이프사이클 없이). 기본=실제 지은 건물만(금고도 채워 [모두 수령] 검증). Hours≥12=12h캡 변주, Zero=1=적립0 변주, FakeRows>0=그 개수까지 가짜 행 패딩(레이아웃/스크롤 테스트, 최대30)", ctx:"MainMap", ex:"ShowOfflineReport / ShowOfflineReport 14 / ShowOfflineReport 3 1 / ShowOfflineReport 3 0 8", note:"실제 표시 경로(DebugSetPendingOfflineReport→TryShowOfflineReport→Consume→모달) 그대로 태워 회귀 테스트 겸용. FakeRows 가짜 행은 존재 안 하는 인덱스라 '건물 N' 폴백. [모두 수령]은 실제 금고 잔액을 수거." },
 
   { cat:"아이템", cmd:"Ticket [Amount] [Tier]", desc:"채용권 지급 (기본 10장, Normal). Tier 0=Normal · 1=Advanced · 2=Premium", ctx:"어디서나", ex:"Ticket 30 2" },
@@ -252,6 +267,7 @@ const COMMANDS = [
   { cat:"아이템", cmd:"LootRoll [TableKey] [Tier] [Count]", desc:"출시 전리품 드랍(DT_LaunchLoot) 롤 시뮬레이션. 지급 없이 분포만 로그로 확인 (기본 High · Tier 10 · 10회)", ctx:"어디서나", ex:"LootRoll / LootRoll Mid 5 50", note:"TableKey = Low(평점<24) / Mid(24~31) / High(≥32). 롤 수 = 테이블 기본(Low·Mid 2, High 3) + 티어 보너스(T4~6 +1, T7~10 +2). ScaleBasis는 개발비 100,000 고정 — 비례 엔트리(만분율) 검증용. 결과는 지급되지 않음(bGrant=false)." },
 
   { cat:"건물", cmd:"UnlockSkins [Count]", desc:"미보유 스킨 중 랜덤 해금 (기본 5개)", ctx:"어디서나", ex:"UnlockSkins 10" },
+  { cat:"건물", cmd:"BldDefaultSkins", desc:"스킨 100인 완성 건물에 종류별 고정 기본 스킨 적용·저장", ctx:"MainMap", ex:"BldDefaultSkins", note:"자기 도시에서 1회 수동 실행. 스킨100 이외 선택은 보존. 건설·재배치 진행 중, 방문 모드, DevMode 저장 봉인 중에는 명령 전체 거부. 미등록은 경고 후 건너뜀. 각 변경을 디스크 리드백 검증하며 실패한 건물은100으로 복원하고 중단(앞서 저장된 변경은 유지). 기본값100인 종류는 변경하지 않음. 자동 로드 보정 없음." },
   { cat:"건물", cmd:"BldLightsOn [bOn]", desc:"모든 건물 창문 조명을 운영 여부와 무관하게 항상 켬(1, 기본) / 원래 정책(운영 중만 점등)으로 복원(0)", ctx:"MainMap", ex:"BldLightsOn / BldLightsOn 0", note:"ABuildingBaseActor 전역 강제 플래그로 SetWindowLightActive(false) 요청을 무시 → 재평가와 무관하게 항상 켬. off 경로가 그 함수 단일 창구뿐이라 견고. 전역 static 이라 PIE 재시작 시에도 유지될 수 있음(끄려면 BldLightsOn 0)." },
 
   { cat:"벽돌공장", cmd:"UnlockFactoryAuto", desc:"현재 맵의 모든 벽돌공장 자동 수집을 즉시 해금(HQ Lv.10 대기 없이). 자동 수집/최대 용량 강화 슬롯 잠금 해제 + 벽돌 재고 슬롯 활성 + 다음 공장 패널 오픈 시 해금 연출 1회", ctx:"공장 배치된 맵", ex:"UnlockFactoryAuto", note:"정규 해금 축(USaveLoadManager::OnHQLevelUp → DT_FactoryUpgradeDefinition.RequiredHQLevel 충족, 현재 출하값 10)을 우회해 ABrickFactory::UnlockAutoCollection() 직접 호출. 해금 상태는 세이브(bAutoCollectionUnlocked)에 남으므로 되돌리려면 세이브 삭제. 자동 수집 타이머 간격은 하한 0.25초 클램프. 이미 해금된 공장은 무시." },
@@ -284,27 +300,47 @@ const COMMANDS = [
 
   { cat:"카메라", cmd:"CamPreset [Index]", desc:"오피스 카메라 각도 프리셋 즉시 적용 (FOV 40/30 고정, 피치만 변화). 0=코지~3=탑다운", ctx:"OfficeMap", ex:"CamPreset 2", note:"0 코지(~-38) · 1 밸런스(~-45) · 2 탑다운(~-53) · 3 하드탑다운(~-60). 확정값은 AOfficeCameraPawn 생성자에 베이크, PIE 재시작 시 리셋." },
   { cat:"카메라", cmd:"CamBand [InP] [OutP] [InF] [OutF]", desc:"오피스 카메라 밴드 수동 지정 — 줌인/줌아웃 피치 + FOV. InF/OutF 생략 시 40/30", ctx:"OfficeMap", ex:"CamBand -44 -58 40 30" },
+  { cat:"카메라", cmd:"CamPose", desc:"현재 카메라 포즈와 floor 기준 상대·참조 프레임을 한 줄 로그로 출력 (read-only)", ctx:"OfficeMap", ex:"CamPose", note:"[OfficeCameraCalibration] 로그에 footprint/viewport, floor 중심, Pawn·arm·socket·camera transform과 HFOV를 기록해 이후 캘리브레이션에 사용. 카메라/세이브 변경 없음." },
+  { cat:"카메라", cmd:"CamInfo", desc:"현재 카메라가 실제로 보는 범위(카메라 거리·vFOV·보이는 구역)를 한 줄 로그로 출력 (read-only)", ctx:"맵 무관", ex:"CamInfo", note:"팔길이+SocketOffset 후퇴=카메라 거리, hFOV/vFOV(MaintainYFOV 환산), 피치, 보이는 구역(가로×세로 m), 줌 범위, viewport 를 기록. 팔길이≠카메라 거리이고 수직 화각≠FieldOfView 라서 손계산이 어긋나므로 Min/MaxZoomDistance 를 정할 때 줌을 움직이며 찍는다. APlayerCamera 계열 possess 필요." },
 
   { cat:"이동속도", cmd:"WorkerBolt [Count]", desc:"번아웃 배회(직원이 뛰는 유일한 상황)를 즉시 발동 — 피로 누적을 기다리지 않고 러닝 모션 확인", ctx:"OfficeMap · Stage 모드", ex:"WorkerBolt 3", note:"Count 생략 시 전원, 숫자를 주면 앞 N명만 → 걷는 직원과 나란히 비교 가능. EnterSlackBolt 실경로를 그대로 타므로 자리 이탈 + NavMesh 텔레포트 + 배회까지 재현된다. 슬랙 루프는 Stage 전용이라 다른 모드 직원은 건너뛰고 '발동 0명' 경고를 낸다(강제 진입시켜도 다음 프레임에 페이즈가 지워짐)." },
   { cat:"이동속도", cmd:"WorkerSpeed [Value]", desc:"전 직원 MaxWalkSpeed 직접 지정. -1 이면 원래 값 복귀", ctx:"OfficeMap", ex:"WorkerSpeed 320", note:"BS_StickLocomotion 축(걷기125/느린250/보통400/빠른550)을 훑어 전환 지점을 찾는 용도. 임시값 — 슬랙 페이즈가 바뀌면 되돌아가므로 확정값은 MoveSpeedWalk/MoveSpeedBolt 에 옮겨 적을 것." },
   { cat:"이동속도", cmd:"WorkerSpeedStatus", desc:"직원별 모드 / MaxWalkSpeed / 실측 속도 출력", ctx:"OfficeMap", ex:"WorkerSpeedStatus", note:"Speed = GetVelocity().Size2D() = ABP 블렌드스페이스 축 입력값. MaxWalkSpeed 가 125 면 평상시, MoveSpeedBolt 값(기본 450)이면 번아웃 배회 중." },
   { cat:"직원", cmd:"BoltStatus [판초]", desc:"폭주 확률 진단 — 직원별 실효 초당/판당 확률 + 판당 기대 인원", ctx:"OfficeMap", ex:"BoltStatus / BoltStatus 30", note:"직원별로 유효침착성·초당 확률·판당 확률·모드를 찍고 사무실 합계(판당 기대 폭주 인원)를 낸다. 판초 생략 시 15초(DefaultStepDuration) 기준. 강제 발동(WorkerBolt)으로는 확률 튜닝을 검증할 수 없어(표본 수십 회 필요) 계산값을 직접 보여주는 진단용. 확률은 GetEffectiveBoltChance() 를 그대로 읽어 본체 공식과 어긋나지 않는다. 폭주는 피로 사슬과 독립이며 개발(Stage) 중에만 굴린다." },
+  { cat:"직원", cmd:"Face_Set [ExpressionIndex]", desc:"월드의 모든 Funny 직원 얼굴을 지정 표정으로 고정 (상태·반응 표정보다 우선). -1 이면 해제", ctx:"OfficeMap", ex:"Face_Set 9 / Face_Set -1", note:"번호 = EWorkerFaceExpression: 0 기본 · 1 집중 · 2 웃음 · 3 윙크 · 4 화남 · 5 지침 · 6 놀람 · 7 걱정 · 8 잠 · 9 졸림 · 10 허둥 · 11 불끈 · 12 별눈 · 13 곁눈질 · 14 삐침 · 15 어지러움. 16표정 그림(얼굴 판 눈·입 칸)을 실제 화면에서 훑는 미리보기용. 증명사진 리그(bIsPortraitMode)는 건너뛰고, 호출 뒤 새로 스폰된 직원에는 적용되지 않는다." },
 
-  { cat:"프로젝트 진척", cmd:"Proj_Seed [Count] [Review]", desc:"개발 이력 + 출시 기록을 임의로 채운다 — [이전 프로젝트] 패널/도감을 실제 플레이 없이 검증", ctx:"OfficeMap", ex:"Proj_Seed 12", note:"현재 티어까지의 프로젝트를 앞에서부터 Count 개(기본 5) '개발 완료'로 기록. Review 0(기본)이면 12~34 랜덤, 값을 주면 고정. DT 미정의 조합은 패널이 걸러내므로 시드에서도 제외한다(안 보이는 이력이 쌓이지 않게). 지나온 티어를 만들려면 Proj_SetTier 를 먼저." },
+  { cat:"프로젝트 진척", cmd:"Proj_Seed [Count] [Review]", desc:"현재 건물의 개발 이력 + 건물별 출시 기록을 채운다 — 기획 보드/도감을 실제 플레이 없이 검증", ctx:"OfficeMap", ex:"Proj_Seed 12", note:"현재 티어까지의 프로젝트를 앞에서부터 Count 개(기본 5) '개발 완료'로 기록. Review 0(기본)이면 12~34 랜덤, 값을 주면 고정. DT 미정의 조합은 패널이 걸러내므로 시드에서도 제외한다. 지나온 티어를 만들려면 Proj_SetTier 를 먼저." },
   { cat:"프로젝트 진척", cmd:"Proj_SetTier [Tier]", desc:"현재 티어 강제 설정 (1~10)", ctx:"OfficeMap", ex:"Proj_SetTier 3", note:"첫 개발(지나온 티어 미개발)과 재개발(개발함)이 한 리스트에 섞이는 걸 보려면 티어를 올려 둬야 한다. Proj_SetTier 3 → Proj_Seed 12 순서 권장." },
-  { cat:"프로젝트 진척", cmd:"Proj_ClearHistory", desc:"개발 이력 + 출시 기록 초기화 (빈 상태 화면 확인용)", ctx:"OfficeMap", ex:"Proj_ClearHistory", note:"도감 마일스톤 지급 기록(MilestoneRewardedTiers)도 함께 비워 재지급을 볼 수 있다." },
-  { cat:"프로젝트 진척", cmd:"Proj_State", desc:"현재 티어 / 개발 이력 / 출시 기록 수 + 개발한 인덱스 목록 출력", ctx:"OfficeMap", ex:"Proj_State" },
+  { cat:"프로젝트 진척", cmd:"Proj_ClearHistory", desc:"현재 건물의 개발 이력 + 출시 기록 초기화 (빈 상태 화면 확인용)", ctx:"OfficeMap", ex:"Proj_ClearHistory", note:"현재 건물의 도감 마일스톤 지급 기록(MilestoneRewardedTiers)도 함께 비워 재지급을 볼 수 있다." },
+  { cat:"프로젝트 진척", cmd:"Proj_State", desc:"현재 건물의 티어 / 개발 이력 / 출시 기록 수 + 개발한 인덱스 목록 출력", ctx:"OfficeMap", ex:"Proj_State" },
 
   { cat:"진행프리셋", cmd:"Preset_Apply [Row]", desc:"중반 진행 상태 프리셋 인세션 재적용 — 부지·빌딩·직원·이력·운영중 프로젝트·월드맵 생산·자원을 순서대로 시드", ctx:"MainMap", ex:"Preset_Apply Late", note:"DT_DevProgressPreset RowName (Early/Mid/Late). 비우면 Project Settings > Game > CG Dev 설정값. 시드 순서가 곧 정합성 — 시총이 마지막이라 등급이 자연 승격된다." },
   { cat:"진행프리셋", cmd:"Preset_Verify [Row]", desc:"현재 상태가 프리셋과 정합한지 단언하고 실패 항목을 나열 (실패 0건 = 시드 성공)", ctx:"어디서나", ex:"Preset_Verify", note:"부지 미스폰·DT 행 누락은 전부 무음 부분 실패라 이걸로만 잡힌다. 등급 항목 FAIL = 프리셋 값이 부정합(빌딩/업종/이력 부족)." },
 
+  { cat:"개발자모드", cmd:"DevMode", desc:"튜토리얼 즉시 종료 + 미션판 언락 + 자원 Rich + HQ20 (시총 게이트로 국가/티어 파생 해금)", ctx:"어디서나", ex:"DevMode", note:"★ 이 세션의 세이브가 봉인된다 — 껐다 켜면 치트도 이후 진행도 전부 사라짐. 해제 명령 없음(앱 재시작이 해제)." },
   { cat:"튜토리얼", cmd:"SkipToMission [RowName]", desc:"임의 미션으로 즉시 점프 (선행 상태 시드 + 자원 듬뿍 + 빌딩 체크 포함)", ctx:"인세션", ex:"SkipToMission M3_EnterOffice", note:"DT_Mission RowName. 드롭다운 지정은 Project Settings > Game > CG Dev > 시작 미션." },
   { cat:"튜토리얼", cmd:"ResetTutorial", desc:"세이브 슬롯 삭제 — Stop 후 다시 Play 하면 깨끗한 M1부터", ctx:"어디서나", ex:"ResetTutorial", note:"SkipToMission 누적/체인 완주로 CurrentMissionID=None 된 세이브 복구용. 자원 시드 없음." },
+  { cat:"튜토리얼", cmd:"CG_PreviewCityOpening", desc:"세이브 초기화 없이6초 헬기 야경·오전 벽돌공장 페이드 재생", ctx:"MainMap_City", ex:"CG_PreviewCityOpening", note:"개발 빌드의 자기 도시에서 패널을 닫고 실행. 헬기4초·공장2초. 최초 열람/M1 조건을 우회하고 기존 카메라·자막·건너뛰기를 재사용한다. 세이브 삭제·CityOpening 열람 기록 변경·미션 체인 재시작 없음. 방문·레벨 전환·다른 오프닝·모달/특수 조작 중에는 생략. 종료 후 재호출 가능. 새 C++ 빌드/에디터 재실행 필요; 검증 상태는 Tools/CityOpening/README.md." },
 
   { cat:"미션판", cmd:"UnlockGoalBoard", desc:"미션판 즉시 언락 + 전수 재평가 + 저장 (튜토리얼 체인 완주 없이 보드 확인)", ctx:"인세션", ex:"UnlockGoalBoard", note:"정규 언락은 체인 마지막 미션 완료 시점. 언락 직후 전수 재평가라 이미 조건을 넘긴 도달형 미션(본사 레벨·건물 수)은 바로 수령 가능 상태가 된다. 이미 언락이면 변화 없음(로그로 구분)." },
   { cat:"미션판", cmd:"CompleteGoal [GoalRowName]", desc:"지정 미션을 강제 충족 처리. 보상 지급은 안 함 — 수령은 미션판 카드의 [수령]", ctx:"인세션", ex:"CompleteGoal G1_RaiseFloor", note:"RowName = DT_Goal 기준: G1_RaiseFloor / G2_HQLevel3 / G3_SecondBuilding / G4_AcquireCompany / G5_DemolishCompany / G11_AcquirePlot / G6_BuildOnClearedPlot / G7_PlacePainting / G8_EquipSkin / G9_EnhanceStat / G10_EquipTrait. DT에 없으면 유효 목록과 함께 FAIL 로그. 선행 미션(PrereqGoalID)가 미수령이면 카드는 잠금이라 수령 버튼이 안 뜬다." },
   { cat:"미션판", cmd:"ResetGoals", desc:"미션판 상태 초기화 — 언락/충족/수령 전부 리셋 + 저장", ctx:"인세션", ex:"ResetGoals", note:"보드가 잠긴 초기 상태로 돌아간다(다시 보려면 UnlockGoalBoard). 이미 지급된 보상 자원은 회수하지 않는다." },
   { cat:"미션판", cmd:"ResetPanelIntro", desc:"패널 최초 진입 안내(딤+구멍+말풍선)를 전부 안 본 상태로 리셋 + 저장 + 제스처 힌트 졸업 리셋", ctx:"인세션", ex:"ResetPanelIntro", note:"직원창(EmployeeWindow)/미션 목록(MissionTracker) 안내 재확인용. 미션 목록 안내를 다시 보려면 ResetPanelIntro → ResetGoals → UnlockGoalBoard 순." },
+
+  { cat:"LiveOps", cmd:"ClockOffset [Seconds]", desc:"공용 게임 시계(UGameClockSubsystem)의 서버 시각에 디버그 오프셋을 누적. 하루 넘김 재현 = 86400", ctx:"인세션", ex:"ClockOffset 86400 / ClockOffset -3600", note:"누적이라 두 번 넣으면 이틀. 원복은 같은 값을 음수로. Shipping 빌드에서는 무시된다. 키가 실제로 바뀌면 즉시 day/week rolled 방송 — 상점 일일/주간 한도가 초기화된다." },
+  { cat:"LiveOps", cmd:"ClockStatus", desc:"시계 상태 한 줄 덤프 — 서버 동기 여부/마지막 동기 시각/서버 now/KST 하루·주 키/다음 롤까지 남은 시간/오프셋", ctx:"인세션", ex:"ClockStatus", note:"valid=0 이면 서버 시간 미동기(로컬 UTC 폴백). PlayFab 로그인 후 LogGameClock: synced 로그가 떠야 valid=1 이 된다." },
+  { cat:"LiveOps", cmd:"QuestReport [Counter] [Amount]", desc:"퀘스트 카운터를 강제로 보고한다. Counter 는 EQuestCounter 이름 그대로, Amount 생략 시 1", ctx:"인세션", ex:"QuestReport RevenueCollect 5 / QuestReport ProjectLaunch", note:"증분형 카운터만 누적된다. 절대값형(TotalRevenue/BuildingCount/HQLevel 등)은 세이브에서 현재값을 읽으므로 이 치트로 올릴 수 없다." },
+  { cat:"LiveOps", cmd:"QuestReset", desc:"퀘스트 원장(일일/주간/업적 + 활약도 + 수령 이력)을 전부 비우고 현재 하루·주 키로 다시 잡은 뒤 저장", ctx:"인세션", ex:"QuestReset", note:"이미 지급된 보상 자원은 회수하지 않는다. 초기화 직후 QuestStatus 로 전 주기 0 확인." },
+  { cat:"LiveOps", cmd:"QuestStatus", desc:"주기별 활약도(현재/최대)와 노출 중인 행을 QuestID state=… 현재/목표 로 덤프", ctx:"인세션", ex:"QuestStatus", note:"state 0=진행중 1=수령가능 2=수령완료, period 0=일일 1=주간 2=업적. 업적은 트랙별 최저 미수령 티어 1행만 노출된다." },
+  { cat:"LiveOps", cmd:"AttendClaim", desc:"오늘치 28일 순환 출석 보상을 수령한다. 서버 시간이 유효하고 오늘 아직 안 받았을 때만 성공", ctx:"인세션", ex:"AttendClaim", note:"실패해도 claimed=0 으로 로그가 남는다. 거부 사유는 토스트로도 뜬다 — 서버 시간 미동기이거나 오늘 이미 수령." },
+  { cat:"LiveOps", cmd:"AttendReset", desc:"출석 이력(순환 일차·마지막 수령 하루 키·누계)을 전부 초기화하고 저장", ctx:"인세션", ex:"AttendReset", note:"이미 지급된 보상 자원은 회수하지 않는다. 초기화 직후 AttendStatus 로 nextDay=1 확인." },
+  { cat:"LiveOps", cmd:"AttendStatus", desc:"출석 현황 덤프 — canClaim / nextDay(다음 칸) / cycleDay(마지막 받은 칸) / total(누적 일수)", ctx:"인세션", ex:"AttendStatus", note:"놓친 날은 건너뛰지 않는다(관대형). 다음 날 재현은 ClockOffset 86400 뒤 AttendStatus 로 canClaim=1 확인." },
+  { cat:"LiveOps", cmd:"MailSend [DiamondAmount]", desc:"테스트 우편 1통(다이아 N + 일반 채용권 5, 만료 7일)을 시스템 메일로 넣는다. 인자 생략 시 100", ctx:"인세션", ex:"MailSend / MailSend 500", note:"우편함 상한은 50통이고 초과분은 가장 오래된 것부터 밀려난다. 발송은 지연 저장이라 즉시 파일에 쓰이지 않는다." },
+  { cat:"LiveOps", cmd:"MailClear", desc:"우편함을 비우고 글로벌 메일 수신 이력(ConsumedGlobalMailIds)까지 지운 뒤 저장", ctx:"인세션", ex:"MailClear", note:"미수령 보상은 그대로 사라진다. 글로벌 메일 재수신 테스트는 이 치트로 이력을 지운 뒤에." },
+  { cat:"LiveOps", cmd:"MailStatus", desc:"미수령 통수와 각 메일의 제목/보상 개수/만료 시각을 덤프", ctx:"인세션", ex:"MailStatus", note:"우편함에 남아 있는 것은 전부 미수령이다(수령 즉시 제거). 퀘스트 롤오버로 만료된 완료 미수령 보상이 여기로 자동 유입된다." },
+  { cat:"LiveOps", cmd:"LiveOpsRefresh", desc:"PlayFab TitleData(LiveOps.Events / LiveOps.Notices / LiveOps.Mails)를 즉시 다시 읽는다 (10분 스로틀 무시)", ctx:"인세션", ex:"LiveOpsRefresh", note:"로그인 상태에서만 요청이 나간다. 파싱·검증에 실패한 키는 경고만 남기고 DT 정의를 유지한다." },
+  { cat:"LiveOps", cmd:"EventPoints [EventId] [Amount]", desc:"활성 수집 이벤트의 점수를 가산. 인자 생략 시 1", ctx:"인세션", ex:"EventPoints EV_LaunchRush 5", note:"활성이 아니거나 수집 유형이 아닌 Id 는 경고만 남기고 무시된다. 누적 출석 이벤트는 출석 누계가 소스라 이 치트로 안 오른다." },
+  { cat:"LiveOps", cmd:"EventStatus", desc:"활성 이벤트별 유형/점수/마일스톤 상태와 현재 핫타임 배율, 공지 미읽음 수를 덤프", ctx:"인세션", ex:"EventStatus", note:"type 0=누적 출석 1=수집 2=핫타임. hotTime 은 1분 타이머가 갱신하는 캐시라 ClockOffset 직후엔 아직 전 값일 수 있다." },
 
   { cat:"도시인수", cmd:"Acq_Buy [Key]", desc:"지정 BuildingKey 회사 인수 시도. 자금 충분하면 차감 + Milking 전환 + 저장. 성공=1 실패=0 로그", ctx:"MainMap", ex:"Acq_Buy 5", note:"Key = 스카이라인 빌딩 BP_MB### 번호 (1~40). 자금 부족 시 Money 또는 GrantRes Rich 선행." },
   { cat:"도시인수", cmd:"Acq_State [Key]", desc:"지정 Key의 인수 상태 출력. 0=NotAcquired 1=Milking 2=Depleted 3=Cleared", ctx:"MainMap", ex:"Acq_State 5" },
@@ -315,7 +351,9 @@ const COMMANDS = [
 
   { cat:"시간대", cmd:"Day", desc:"낮으로 고정 (12:00 세팅 + 사이클 정지 → 창문/차량 라이트 OFF)", ctx:"TimeCycle 액터 필요", ex:"Day" },
   { cat:"시간대", cmd:"Night", desc:"밤으로 고정 (00:00 세팅 + 사이클 정지 → 창문/차량 라이트 ON)", ctx:"TimeCycle 액터 필요", ex:"Night" },
-  { cat:"시간대", cmd:"SetTime [Hour] [Minute]", desc:"임의 시각으로 고정 (시 0~23, 분 0~59 + 사이클 정지)", ctx:"TimeCycle 액터 필요", ex:"SetTime 18 / SetTime 6 30", note:"WindowLightManager 자체 기준 일출=6시 / 일몰=21시. 완전 낮=7~18시, 완전 밤=22~5시." },
+  { cat:"시간대", cmd:"Dusk", desc:"석양(노을 정점)으로 고정 — 시각을 상수로 박지 않고 하늘의 황혼 노브와 시계의 SunSetTime 에서 파생", ctx:"TimeCycleSky 액터 필요", ex:"Dusk", note:"맵마다 다르다 — MainMap 18:00 / WP_Office 19:00. 하늘 액터가 없으면 SunSetTime 으로 폴백하고 그 사실을 로그에 남긴다." },
+  { cat:"시간대", cmd:"Dawn", desc:"여명(노을 정점)으로 고정 — Dusk 의 반대쪽", ctx:"TimeCycleSky 액터 필요", ex:"Dawn" },
+  { cat:"시간대", cmd:"SetTime [Hour] [Minute]", desc:"임의 시각으로 고정 (시 0~23, 분 0~59 + 사이클 정지)", ctx:"TimeCycle 액터 필요", ex:"SetTime 18 / SetTime 6 30", note:"밤/낮 경계의 단일 소스는 배치된 ATimeCycleManager 의 SunRiseTime/SunSetTime(기본 07:00/19:00). 전환 구간은 맵마다 달라 상수로 못 적으므로 Dusk/Dawn 을 쓸 것." },
   { cat:"시간대", cmd:"TimeResume", desc:"시간 사이클 재개 (고정 해제 → 다시 시간이 흐름)", ctx:"TimeCycle 액터 필요", ex:"TimeResume" },
 
   { cat:"백로그", cmd:"CG_TestBacklogMath", desc:"백로그 순익 지수감쇠 수학 자가검증 — peak100 cost10 반감기600 기준 4샘플(t=0/60/600/3600) 로그 출력. 기댓값: ~90 / ~78.8 / ~40 / 0", ctx:"어디서나", ex:"CG_TestBacklogMath", note:"ComputeProductNetPerSec 단위 검증용. ProjectOperationManager 없으면 경고 로그." },
@@ -323,6 +361,12 @@ const COMMANDS = [
 
   { cat:"UI디버그", cmd:"CG_DumpUI", desc:"UIBase 3스택(Main/Prompt/Bottom) 내용 + 현재 EInputMode 출력", ctx:"어디서나", ex:"CG_DumpUI", note:"입력잠금/유령위젯 진단용 — 화면에 스택 카운트 요약, 상세는 Output Log." },
   { cat:"UI디버그", cmd:"CG_UnlockInput", desc:"입력모드가 UI로 잠겼을 때 강제 Normal 복원 (위젯은 건드리지 않음)", ctx:"어디서나", ex:"CG_UnlockInput", note:"'안 보이는 위젯이 active로 남아 이동 불가' 탈출용. 원인 파악은 CG_DumpUI 먼저." },
+
+  { cat:"렌더격리", cmd:"CG_HideMesh <부분이름>", desc:"스태틱메시명·액터명·클래스명 부분일치로 프리미티브 컴포넌트를 숨김 (로그에 개수)", ctx:"어디서나", ex:"CG_HideMesh TimeCycleSky / CG_HideMesh IslandTerrain / CG_HideMesh Road_Double", note:"쇼플래그는 종류 단위라 하늘돔만·바다판만·지형만 못 가른다 — 실기기 stat unit GPU ms 를 보며 하나씩 숨겨 비용 귀속(2026-10-09 A9). 안드로이드는 am broadcast RUN 인텐트로 로드 후 주입." },
+  { cat:"렌더격리", cmd:"CG_ShowMesh <부분이름>", desc:"CG_HideMesh 로 숨긴 것을 같은 부분일치로 다시 표시", ctx:"어디서나", ex:"CG_ShowMesh TimeCycleSky", note:"" },
+
+  { cat:"전환오버레이", cmd:"CG_PreviewTransition [Sec] [TipKey]", desc:"레벨 이동 없이 전환 홀드 화면(블루 패널 + 슬래시 스피너 + 하단 TIP 밴드)을 N초간 띄운다", ctx:"어디서나", ex:"CG_PreviewTransition / CG_PreviewTransition 10 / CG_PreviewTransition 10 P_Desk", note:"실제 전환은 0.35초 와이프 뒤 블로킹 로딩이라 눈으로 볼 방법이 없다 — 이 치트가 SLevelTransitionOverlay 의 Holding 외형을 그대로 띄운다. 실제 전환 상태(LevelTransitionState)와 멤버를 공유하지 않으므로 IsLevelTransitionActive() 는 계속 false 고 매니저 갱신이 멈추지 않는다. 입력 차단기를 달지 않아 미리보기에 갇히지 않는다. Sec 은 0.5~120 로 클램프. TipKey 를 주면 그 팁을 고정 표시(키 목록 = CG_ListTips), 안 주면 Any 컨텍스트 가중 추첨. 전환 중에는 무시된다." },
+  { cat:"전환오버레이", cmd:"CG_ListTips", desc:"로드된 DT_LoadingTip 행 전체 출력 (키/묶음/컨텍스트/가중치/글자수 + 상한 초과 표시)", ctx:"어디서나", ex:"CG_ListTips", note:"CSV 재임포트가 먹었는지, 상한(FLoadingTipRules::MaxBodyChars=40자)을 넘는 문구가 있는지 확인용. 넘는 행은 OVER 로 표시되고 인게임에서 2줄로 접힌다. 0행이면 DT_LoadingTip 에셋이 없거나 RowStruct 가 FLoadingTipTable 이 아니다." },
 
   { cat:"밸런스계측", cmd:"Balance_DumpDevScore", desc:"개발 중 프로젝트의 활성 직능 스텝별 획득/목표 + 가중치 + 직능슬롯 + 품질점수 q + 등급 + 통과여부를 [BALV] 한 줄로 출력", ctx:"OfficeMap", ex:"Balance_DumpDevScore", note:"출력: [BALV] DevScore proj=3 tier=1 steps=3 emp=4 s0=48.21/120.00 w0=5 d0=0 ... q=0.7431 grade=C pass=0 running=1 remain=8.30. s/w/d 인덱스는 출시 스텝을 뺀 활성 직능 기준으로 재부여된다. emp = 스폰된 오피스 직원 수(per-employee 산출 분모)." },
   { cat:"밸런스계측", cmd:"Balance_DumpEconomy", desc:"ResourceBank 전 재화 잔액 + 빌딩별 실수익률/안정율/금고잔량/금고용량/남은운영시간 + 직원·방치 인원을 [BALV] 한 줄로 출력", ctx:"어디서나", ex:"Balance_DumpEconomy", note:"재화 키 순서는 EResourceType enum 순회라 세션 간 고정(TMap 순회 순서는 비보장이라 안 쓴다). b_cap 은 CalculateWarehouseCapacity — 운영 없는 빌딩은 200 하한 폴백이 그대로 보인다. b_earned=운영 누적 매출(직원 드립 포함). 직원 드립은 Money 로 직접 들어가고 금고(b_stored)를 안 거치므로 A3=Money 차분 / A4=b_stored 차분으로 따로 봐야 한다. empUnassigned=미배치 직원, empIdle=오피스에서 Idle 모드로 도는 직원." },

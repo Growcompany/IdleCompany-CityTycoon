@@ -15,6 +15,24 @@ bool IsSafeFrameValid(const FVector2D SafeMin, const FVector2D SafeMax)
 }
 }
 
+FIntPoint FOfficeCameraFraming::ResolveFramingSlack(bool bCanExpandX, bool bCanExpandY,
+	TFunctionRef<bool(FIntPoint, bool)> IsCellInside)
+{
+	FIntPoint Slack = FIntPoint::ZeroValue;
+	const bool CanExpand[] = {bCanExpandX, bCanExpandY};
+	for (int32 Attempt = 0; Attempt < 4; ++Attempt)
+	{
+		const int32 Axis = Attempt % 2;
+		if (!CanExpand[Axis] || IsCellInside(Slack, Axis == 0)) continue;
+		FIntPoint Trial = Slack;
+		(Axis == 0 ? Trial.X : Trial.Y) = 1;
+		const bool bOtherVisible = CanExpand[1 - Axis] && IsCellInside(Slack, Axis != 0);
+		if (IsCellInside(Trial, Axis == 0) && (!bOtherVisible || IsCellInside(Trial, Axis != 0)))
+			Slack = Trial;
+	}
+	return Slack;
+}
+
 FBox FOfficeCameraFraming::MakeHeroBounds(
 	const FBox2D& FloorBounds,
 	const float StructuralFloorZ,
@@ -36,6 +54,50 @@ FBox FOfficeCameraFraming::MakeHeroBounds(
 	return FBox(
 		FVector(FloorCenter.X, FloorBounds.Min.Y, StructuralFloorZ - VisibleDepthCm),
 		FVector(FloorBounds.Max.X, FloorCenter.Y, StructuralFloorZ));
+}
+
+bool FOfficeCameraFraming::TryMakeFloorFocusPoint(
+	const FBox2D& FloorBounds,
+	const float StructuralFloorZ,
+	const float FocusBelowFloorCm,
+	FVector& OutFocusPoint)
+{
+	if (!FloorBounds.bIsValid
+		|| !FMath::IsFinite(FloorBounds.Min.X)
+		|| !FMath::IsFinite(FloorBounds.Min.Y)
+		|| !FMath::IsFinite(FloorBounds.Max.X)
+		|| !FMath::IsFinite(FloorBounds.Max.Y)
+		|| !FMath::IsFinite(StructuralFloorZ)
+		|| !FMath::IsFinite(FocusBelowFloorCm)
+		|| FocusBelowFloorCm < 0.f)
+	{
+		return false;
+	}
+
+	const FVector2D FloorCenter = FloorBounds.GetCenter();
+	OutFocusPoint = FVector(FloorCenter.X, FloorCenter.Y, StructuralFloorZ - FocusBelowFloorCm);
+	return true;
+}
+
+bool FOfficeCameraFraming::TryClampInitialArmLength(
+	const float CalculatedArmLength,
+	const float MinimumInitialArmLength,
+	const float MaximumInitialArmLength,
+	float& OutArmLength)
+{
+	if (!FMath::IsFinite(CalculatedArmLength)
+		|| CalculatedArmLength <= 0.f
+		|| !FMath::IsFinite(MinimumInitialArmLength)
+		|| MinimumInitialArmLength <= 0.f
+		|| !FMath::IsFinite(MaximumInitialArmLength)
+		|| MaximumInitialArmLength <= 0.f
+		|| MinimumInitialArmLength > MaximumInitialArmLength)
+	{
+		return false;
+	}
+
+	OutArmLength = FMath::Clamp(CalculatedArmLength, MinimumInitialArmLength, MaximumInitialArmLength);
+	return true;
 }
 
 TStaticArray<FVector, 8> FOfficeCameraFraming::MakeBoxCorners(const FBox& Bounds)

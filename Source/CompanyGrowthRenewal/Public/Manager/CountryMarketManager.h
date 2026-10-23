@@ -8,7 +8,7 @@
 #include "Data/WorldMapTypes.h"
 #include "Enum/CompanyType.h"
 #include "Enum/ResourceType.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "CountryMarketManager.generated.h"
 
 /**

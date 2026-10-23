@@ -2,6 +2,7 @@
 
 #include "Data/EmployeeStatsData.h"
 #include "Data/EmployeeTypes.h"
+#include "Data/EmployeePotentialData.h"
 #include "Data/FatigueConfig.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
 
@@ -19,12 +20,12 @@ int32 UEmployeeStatsHelper::CalculateOverall(const FEmployeeStats& Stats)
 	       Stats.Composure +
 	       Stats.ExpGain +
 	       Stats.Stamina +
-	       Stats.Focus;
+	       Stats.CritDamage;
 }
 
 int32 UEmployeeStatsHelper::CalculateEffectiveOverall(const FEmployeeStats& Stats, int32 EnhancementLevel)
 {
-	// ★는 스탯 성장의 유일 경로라, 저장값 합만 보여주면 ★15 직원도 스폰값 그대로 표시된다
+	// 저장값 합에는 ★ 파생 보너스가 없으므로 표시용 유효 합계에 별도로 더한다.
 	return CalculateOverall(Stats)
 		+ static_cast<int32>(EEmployeeStatIndex::Count) * UEmployeeTypeHelper::GetEnhanceStatBonus(EnhancementLevel);
 }
@@ -38,7 +39,7 @@ int32 UEmployeeStatsHelper::GetStatValueByIndex(const FEmployeeStats& Stats, uin
 	case 2: return Stats.Composure;
 	case 3: return Stats.ExpGain;
 	case 4: return Stats.Stamina;
-	case 5: return Stats.Focus;
+	case 5: return Stats.CritDamage;
 	default: return 0;
 	}
 }
@@ -47,8 +48,8 @@ FText UEmployeeStatsHelper::GetStatDisplayName(uint8 StatIndex)
 {
 	// ⚠ UMETA(DisplayName) 을 런타임에 읽지 말 것 — 조회가 WITH_EDITOR 안에만 있어(Enum.cpp) 패키징 빌드에서는
 	//   식별자("WorkSpeed"/"CritChance")로 떨어진다. PIE 는 멀쩡해 보여 안 걸린다. 표시명 SOT 는 이 함수.
-	//   EEmployeeStatIndex 의 UMETA 와 아래 문자열은 반드시 같이 고칠 것.
-	// 침착성/체력의 괄호는 값이 셋 다 "초" 단위라 라벨만으로 구분이 안 되는 걸 푸는 장치다.
+	//   크리티컬 성과는 잠재옵션과 이름을 공유하므로 DT 조회 경로를 쓴다.
+	// 침착성/체력의 괄호는 이탈 확률과 졸음 전 시간의 의미를 구분한다.
 	switch (static_cast<EEmployeeStatIndex>(StatIndex))
 	{
 	case EEmployeeStatIndex::WorkSpeed:  return FText::FromString(TEXT("업무속도"));
@@ -56,7 +57,7 @@ FText UEmployeeStatsHelper::GetStatDisplayName(uint8 StatIndex)
 	case EEmployeeStatIndex::Composure:  return FText::FromString(TEXT("침착성(이탈)"));
 	case EEmployeeStatIndex::ExpGain:    return FText::FromString(TEXT("경험치획득"));
 	case EEmployeeStatIndex::Stamina:    return FText::FromString(TEXT("체력(졸음)"));
-	case EEmployeeStatIndex::Focus:      return FText::FromString(TEXT("업무집중도"));
+	case EEmployeeStatIndex::CritDamage: return UEmployeePotentialHelper::GetPotentialOptionName(EPotentialOptionType::CriticalDamage);
 	default:                             return FText::GetEmpty();
 	}
 }
@@ -81,38 +82,24 @@ namespace
 			UEmployeeBehaviorComponent::MinWorkInterval, UEmployeeBehaviorComponent::BaseWorkInterval);
 	}
 
-	// 평균 이탈 간격(초) = 1 / 실효 초당 폭주확률. GetEffectiveBoltChance 의 포화곡선을 그대로 미러링한다
-	// (구 표기는 폐기된 절벽식 Min(V×Scale, Cap) 을 쓰고 있어 실제 동작과 어긋나 있었다).
-	float FeltBoltIntervalSec(float V)
+	// 이탈 판정이 가능한 10초 동안 한 번 이상 이탈할 확률. 상황별 장비 보너스는 제외한다.
+	// GetEffectiveBoltChance 의 스탯 포화곡선과 초당 확률을 그대로 사용한다.
+	float FeltBoltChance10SecPercent(float V)
 	{
 		const UFatigueConfig* Cfg = LoadFatigueConfig();
 		const float HalfPoint = FMath::Max(1.0f, Cfg->MaxBoltReduction / FMath::Max(KINDA_SMALL_NUMBER, Cfg->ComposureBoltScale));
 		const float Reduction = Cfg->MaxBoltReduction * (V / (V + HalfPoint));
-		const float PerSec = Cfg->BoltChancePerSec * (1.0f - Reduction);
-		return PerSec > KINDA_SMALL_NUMBER ? 1.0f / PerSec : 0.0f;
+		const float PerSec = FMath::Clamp(Cfg->BoltChancePerSec * (1.0f - Reduction), 0.0f, 1.0f);
+		return 100.0f * (1.0f - FMath::Pow(1.0f - PerSec, 10.0f));
 	}
 
 	// 개발 중 꾸벅(Slacking)까지 걸리는 시간(초) = 임계 / 초당 피로 누적.
-	// ⚠ GetWorkDuration(BaseWorkDuration × 체력) 과 헷갈리지 말 것 — 그건 Operation/Idle 의 착석 근무 사이클이고,
-	//   졸음은 개발(Stage) 전용 피로 사슬(TickFatigue)이 소유한다. 라벨이 "체력(졸음)" 이므로 이쪽이 맞다.
+	// 체력의 유일한 체감축 — 졸음은 개발(Stage) 전용 피로 사슬(TickFatigue)이 소유한다.
 	float FeltDrowsySec(float V)
 	{
 		const UFatigueConfig* Cfg = LoadFatigueConfig();
 		const float GainPerSec = Cfg->GainPerSec / (1.0f + V * Cfg->StaminaGainScale);
 		return GainPerSec > KINDA_SMALL_NUMBER ? Cfg->SlackingThreshold / GainPerSec : 0.0f;
-	}
-
-	// 착석 근무/휴식 사이클(Operation·Idle). 졸음과 다른 축이라 툴팁 보조 문장에만 쓴다.
-	// 기본치는 컴포넌트 CDO 가 소유(EditDefaultsOnly) — 리터럴 재기입 금지.
-	float FeltWorkDurationSec(float V)
-	{
-		return GetDefault<UEmployeeBehaviorComponent>()->BaseWorkDuration
-			* (1.0f + V * EmployeeStatTuning::WorkDurationStaminaScale);
-	}
-
-	float FeltFocusPercent(float V)
-	{
-		return FMath::Min(V * EmployeeStatTuning::FocusPerPoint, EmployeeStatTuning::MaxFocusChance) * 100.0f;
 	}
 
 	// 이 직원이 실제로 크리를 터뜨릴 확률 = 스테이지 기본 + 스탯 기여. 스탯분만 찍으면 ★0 에서 0.7% 라
@@ -139,10 +126,10 @@ namespace
 		{
 		case EEmployeeStatIndex::WorkSpeed:  return { FeltWorkIntervalSec(V), TEXT("초"), 2, false };
 		case EEmployeeStatIndex::CritChance: return { FeltCritPercent(V), TEXT("%"), 1, false };
-		case EEmployeeStatIndex::Composure:  return { FeltBoltIntervalSec(V), TEXT("초"), 0, false };
+		case EEmployeeStatIndex::Composure:  return { FeltBoltChance10SecPercent(V), TEXT("%"), 1, false };
 		case EEmployeeStatIndex::ExpGain:    return { V * EmployeeStatTuning::ExpGainMultiplierPerPoint * 100.0f, TEXT("%"), 0, true };
-		case EEmployeeStatIndex::Stamina:    return { FeltDrowsySec(V), TEXT("초"), 0, false };
-		case EEmployeeStatIndex::Focus:      return { FeltFocusPercent(V), TEXT("%"), 0, false };
+		case EEmployeeStatIndex::Stamina:    return { FeltDrowsySec(V), TEXT("초"), 1, false };
+		case EEmployeeStatIndex::CritDamage: return { EmployeeStatTuning::CriticalMultiplier(V), TEXT("배"), 2, false };
 		default:                             return {};
 		}
 	}
@@ -196,7 +183,8 @@ FText UEmployeeStatsHelper::GetStatFeltDeltaText(uint8 StatIndex, int32 BaseValu
 
 	const FFeltReadout Before = MakeFeltReadout(Stat, static_cast<float>(BaseValue));
 	const FFeltReadout After  = MakeFeltReadout(Stat, static_cast<float>(EffectiveValue));
-	return FText::FromString(FormatFelt(After.Value - Before.Value, After.Suffix, After.Decimals, true));
+	const TCHAR* DeltaSuffix = Stat == EEmployeeStatIndex::Composure ? TEXT("%p") : After.Suffix;
+	return FText::FromString(FormatFelt(After.Value - Before.Value, DeltaSuffix, After.Decimals, true));
 }
 
 FText UEmployeeStatsHelper::GetStatEffectText(uint8 StatIndex, int32 EffectiveValue)
@@ -212,21 +200,18 @@ FText UEmployeeStatsHelper::GetStatEffectText(uint8 StatIndex, int32 EffectiveVa
 		return FText::FromString(FString::Printf(TEXT("크리티컬이 %.1f%% 확률로 터집니다"), FeltCritPercent(V)));
 
 	case EEmployeeStatIndex::Composure:
-		return FText::FromString(FString::Printf(TEXT("평균 %.0f초마다 자리를 이탈합니다"), FeltBoltIntervalSec(V)));
+		return FText::FromString(FString::Printf(TEXT("개발 중 이탈 판정이 가능한 10초 동안 한 번 이상 이탈할 확률 %.1f%%. 침착성이 높을수록 낮아집니다(장비 등 상황 보너스 제외)"), FeltBoltChance10SecPercent(V)));
 
 	case EEmployeeStatIndex::ExpGain:
 		return FText::FromString(FString::Printf(TEXT("경험치를 %.0f%% 더 받습니다"),
 			V * EmployeeStatTuning::ExpGainMultiplierPerPoint * 100.0f));
 
-	// 졸음은 개발(Stage) 전용 피로 사슬 소유 — 착석 근무 사이클(FeltWorkDurationSec)과 다른 축이라 보조 문장으로 뺀다
 	case EEmployeeStatIndex::Stamina:
-		return FText::FromString(FString::Printf(TEXT("개발 %.0f초 만에 꾸벅합니다 (평소 근무 %.0f초)"),
-			FeltDrowsySec(V), FeltWorkDurationSec(V)));
+		return FText::FromString(FString::Printf(TEXT("피로가 없는 상태에서 %.1f초 동안 졸지 않고 일할 수 있습니다. 체력이 높을수록 오래 버팁니다(책상·장비 보너스 제외)"), FeltDrowsySec(V)));
 
-	// 표기값은 "주 직능 강제 지정" 확률이라 하한이다 — 실패한 굴림에서도 자기 분야가 뽑힐 수 있어
-	// 실제 관측 비율은 이보다 높다. 실효 확률은 프로젝트 구성마다 달라 카드에 못 박는다.
-	case EEmployeeStatIndex::Focus:
-		return FText::FromString(FString::Printf(TEXT("%.0f%% 확률로 자기 분야 성과를 냅니다"), FeltFocusPercent(V)));
+	case EEmployeeStatIndex::CritDamage:
+		return FText::FromString(FString::Printf(TEXT("크리티컬 발생 시 성과 점수가 %.2f배가 됩니다"),
+			EmployeeStatTuning::CriticalMultiplier(EffectiveValue)));
 
 	default:
 		return FText::GetEmpty();

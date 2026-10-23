@@ -4,6 +4,7 @@
 
 #include "Components/SplineComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Entity/Ambient/AmbientVisibilityComponent.h"
 
 AAmbientSplineMover::AAmbientSplineMover()
 {
@@ -22,6 +23,7 @@ AAmbientSplineMover::AAmbientSplineMover()
 	MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	MeshComp->SetGenerateOverlapEvents(false);
 	MeshComp->SetCanEverAffectNavigation(false);
+	Visibility = CreateDefaultSubobject<UAmbientVisibilityComponent>(TEXT("Visibility"));
 }
 
 void AAmbientSplineMover::BeginPlay()
@@ -38,6 +40,10 @@ void AAmbientSplineMover::BeginPlay()
 
 	DistanceAlongSpline = FMath::Fmod(FMath::Max(StartDistance, 0.f), SplineLength);
 	UpdateTransform(0.f); // 초기 헤딩 즉시 정렬 (스폰 시 휙 도는 것 방지)
+	if (bAnimateOnlyWhenVisible)
+	{
+		Visibility->StartMonitoring(MeshComp);
+	}
 }
 
 void AAmbientSplineMover::Tick(float DeltaTime)
@@ -58,6 +64,10 @@ void AAmbientSplineMover::Tick(float DeltaTime)
 			DistanceAlongSpline = SplineLength;
 			UpdateTransform(DeltaTime);
 			SetActorTickEnabled(false);
+			if (bAnimateOnlyWhenVisible)
+			{
+				Visibility->StopMonitoring();
+			}
 			return;
 		}
 	}

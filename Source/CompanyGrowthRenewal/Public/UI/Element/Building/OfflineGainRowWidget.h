@@ -18,7 +18,7 @@ class UImage;
  * 둘은 독립이라 한 행에 동시에 뜰 수 있고, 그게 데이터상 정확하다
  * (RawGain 이 이미 EffectiveSeconds 기준이라 LossByVault 에 수명 손실이 섞이지 않음).
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOfflineGainRowWidget : public UUserWidget
 {
 	GENERATED_BODY()

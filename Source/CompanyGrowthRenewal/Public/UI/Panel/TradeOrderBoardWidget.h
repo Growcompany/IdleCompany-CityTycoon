@@ -21,7 +21,7 @@ class UAlertMarkWidget;
  * 상태 & 애니메이션 (코드 기반):
  *  - Expanded: CardAreaSizeBox.HeightOverride = ExpandedCardAreaHeight (기본 1150)
  *  - Collapsed: CardAreaSizeBox.HeightOverride = CollapsedCardAreaHeight (기본 183)
- *  - ExpandDuration 동안 EaseOutBack(쫄깃) / CollapseDuration 동안 EaseInQuad(가속 닫힘)
+ *  - 펼침/접힘 모두 EaseOutQuad. 높이에 거는 애니라 오버슈트는 아래 내용을 밀었다 되돌린다
  *  - NativeTick에서 AnimElapsed 누적해 HeightOverride 매 프레임 갱신 (UWidgetAnimation 불사용)
  *  - Expand 시작 직후 카드 populate → 자라나는 프레임에 자연스럽게 카드 드러남
  *  - Collapse 종료 후 카드 clear
@@ -78,14 +78,10 @@ protected:
 	float CollapsedCardAreaHeight = 183.0f;
 
 	UPROPERTY(EditAnywhere, Category = "TradeBoard|Animation", meta = (ClampMin = "0.0"))
-	float ExpandDuration = 0.4f;
+	float ExpandDuration = 0.28f;
 
 	UPROPERTY(EditAnywhere, Category = "TradeBoard|Animation", meta = (ClampMin = "0.0"))
-	float CollapseDuration = 0.3f;
-
-	// Back easing 오버슈트 강도 (1.7 = CSS 기본, 2.5+면 과한 튕김)
-	UPROPERTY(EditAnywhere, Category = "TradeBoard|Animation", meta = (ClampMin = "0.0", ClampMax = "5.0"))
-	float BackEaseOvershoot = 1.7f;
+	float CollapseDuration = 0.20f;
 
 	// Designer 전용 프리뷰 — 체크하면 에디터에서 접힌 모습, 해제하면 펴진 모습 (런타임 무관)
 	UPROPERTY(EditAnywhere, Category = "TradeBoard|Preview",
@@ -140,9 +136,6 @@ private:
 	// ClearChildren/CreateWidget을 하지 않아 TextBlock 재생성 깜빡임 없음.
 	void TickCards();
 
-	// Easing 함수 (static이라 상태 없음)
-	static float EaseOutBack(float T, float Overshoot);
-	static float EaseInQuad(float T);
 
 	// 카드 생성 헬퍼
 	UWidget* CreateOrderCard(const FTradeOrder& Order);

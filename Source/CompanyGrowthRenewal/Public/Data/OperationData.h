@@ -78,6 +78,10 @@ struct FOperationData
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Operation|Quality")
 	EQualityGrade QualityGrade = EQualityGrade::C;
 
+	// 출시 시 확정한 품질 수익 배율. QualityScore는 별도 품질 지표다.
+	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Operation|Quality")
+	float QualityRevenueMultiplier = 1.0f;
+
 	// ========== 보정 계수 ==========
 
 	// 직원 배율 (배치된 직원 스탯 기반)
@@ -96,7 +100,7 @@ struct FOperationData
 
 	// 총 누적 수익
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Operation|Report")
-	float TotalRevenueEarned = 0.0f;
+	double TotalRevenueEarned = 0.0;
 
 	// 직능별 결산 표시 — 착수 시 weight>0 활성 직능 순서(출시 스텝 제외). 병렬 배열, [i]=i번째 활성 직능.
 	// 표시명은 담지 않는다 — 라벨 SOT 는 DT_DisciplineDisplay(GetDisciplineDisplayName) 하나뿐이다.
@@ -119,6 +123,11 @@ struct FOperationData
 	// 운영 중 시장 변동성(진동 진폭). 0=잔잔, 금융 0.42(출렁). 진동은 평균 보존.
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Operation|Industry")
 	float Volatility = 0.0f;
+
+	// 1초 미만 잔돈 버퍼. SaveGame 을 일부러 뺐다 — 세이브 아카이브는 SaveGame 속성만 직렬화하므로
+	// 이 필드는 저장되지 않고 세이브 스키마도 그대로다.
+	UPROPERTY(Transient)
+	double PendingPayout = 0.0;
 
 	// ========== 헬퍼 함수 ==========
 
@@ -163,10 +172,11 @@ struct FOperationData
 		, State(EOperationState::None)
 		, QualityScore(1.0f)
 		, QualityGrade(EQualityGrade::C)
+		, QualityRevenueMultiplier(1.0f)
 		, EmployeeMultiplier(1.0f)
 		, DecorationMultiplier(1.0f)
 		, RandomMultiplier(1.0f)
-		, TotalRevenueEarned(0.0f)
+		, TotalRevenueEarned(0.0)
 		, HalfLifeFrac(0.5f), Volatility(0.0f)
 	{
 	}

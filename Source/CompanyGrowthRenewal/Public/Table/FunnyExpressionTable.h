@@ -5,11 +5,8 @@
 #include "Enum/FaceExpression.h"
 #include "FunnyExpressionTable.generated.h"
 
-class USkeletalMesh;
-
 /**
- * 표정 → 눈썹 메시. 팩 바디는 눈이 UV 에 구워져 있어 눈썹 각도만 감정 채널이다.
- * ⚠ Neutral 행의 EyebrowMesh 는 비워둘 것 — 채우면 개인 시드 눈썹 변주가 전원 같은 눈썹으로 죽는다.
+ * 표정 → 얼굴 판 그림 칸(T_FaceEyes/T_FaceMouth 4×4 아틀라스 순서 0~15). 메시를 갈지 않고 MID 칸만 바꿔 표정 전환이 공짜다.
  */
 USTRUCT(BlueprintType)
 struct FFunnyExpressionTable : public FTableRowBase
@@ -19,6 +16,15 @@ struct FFunnyExpressionTable : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	EWorkerFaceExpression Expression = EWorkerFaceExpression::Neutral;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", ClampMax = "15"))
+	int32 EyesCell = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", ClampMax = "15"))
+	int32 MouthCell = 0;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	TSoftObjectPtr<USkeletalMesh> EyebrowMesh;
+	bool bBlush = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bAllowBlink = false;
 };

@@ -1,15 +1,23 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+﻿// Fill out your copyright notice in the Description page of Project Settings.
 
 
 #include "UI/Panel/FactoryPanelWidget.h"
+#include "UI/Element/Common/PanelHeaderWidget.h"
 #include "UI/Panel/FactoryPanelInteractionPolicy.h"
 
 #include "UI/Element/Buttons/ButtonWidget.h"
+#include "UI/Element/Buttons/IconWithButtonWidget.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Element/Building/UpgradeSlot.h"
 #include "UI/Element/Buttons/CostActionButtonWidget.h"
 #include "Entity/Factory/BrickFactory.h"
 #include "UI/Panel/InGameLayerWidget.h"
+#include "UI/Panel/BuildPlacementPanelWidget.h"
+#include "UI/UIBase.h"
+#include "Core/CGGameInstance.h"
+#include "Player/MainMapPlayerController.h"
+#include "Player/PlayerCamera.h"
+#include "Player/Components/PlacementHandler.h"
 #include "Manager/UIManagerSubsystem.h"
 #include "Manager/SoundManagerSubsystem.h"
 #include "UI/UISoundTags.h"
@@ -19,11 +27,16 @@
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "Kismet/GameplayStatics.h"
+#include "Components/Image.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "EngineUtils.h"
 #include "Data/FactoryUpgradeConfig.h"
 #include "Data/FactoryUpgradeData.h"
 #include "Components/Button.h"
 #include "Components/ScrollBox.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
+#include "CommonTextBlock.h"
+#include "Global/GlobalUtilFunctions.h"
 #include "Enum/WidgetType.h"
 
 namespace
@@ -64,22 +77,35 @@ void UFactoryPanelWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UFactoryPanelWidget::OnCloseButtonClicked);
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UFactoryPanelWidget::OnCloseButtonClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UFactoryPanelWidget::OnCloseButtonClicked);
+	}
+	if (RelocateButton)
+	{
+		RelocateButton->OnClicked().RemoveAll(this);
+		RelocateButton->OnClicked().AddUObject(this, &UFactoryPanelWidget::HandleRelocateRequested);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[FactoryPanel] RelocateButton is missing"));
 	}
 
 	// 배율 선택기 구독 + 세션 모드 복원 (탭이 없어 상시 표시 — 가시성 토글 없음)
 	if (BulkModeSelector)
 	{
+		BulkModeSelector->OnModeChanged.RemoveAll(this);
 		BulkModeSelector->OnModeChanged.AddUObject(this, &UFactoryPanelWidget::ApplyBulkMode);
 		BulkModeSelector->SetMode(BulkMode);
 	}
+
 }
 
 void UFactoryPanelWidget::NativeOnActivated()
 {
 	Super::NativeOnActivated();
+	bCloseRequested = false;
 	CGRFactoryPanelInteraction::ConfigureWorldPassThrough(this, BackgroundBtn);
 
 	if (!CurrentFactory)
@@ -94,6 +120,7 @@ void UFactoryPanelWidget::NativeOnActivated()
 	UResourceItemManager* ResourceManager = GetWorld()->GetGameInstance()->GetSubsystem<UResourceItemManager>();
 	if (ResourceManager)
 	{
+		ResourceManager->OnResourceChanged.RemoveAll(this);
 		ResourceManager->OnResourceChanged.AddUObject(this, &UFactoryPanelWidget::OnResourceChanged);
 	}
 
@@ -107,7 +134,7 @@ void UFactoryPanelWidget::NativeOnActivated()
 		TryPlayAutoUnlockCelebration();
 	}
 
-	// 슬롯이 채워진 뒤 등록 — 등록 즉시 미션이 NudgeUpgrade 로 전진하므로 순서가 뒤집히면 첫 프레임 타겟이 빈다
+	// 슬롯이 채워진 뒤 등록 — 등록 즉시 미션이 인부 추가 단계로 전진할 수 있다.
 	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
 	{
 		MissionMgr->RegisterFactoryPanel(this);
@@ -139,21 +166,53 @@ void UFactoryPanelWidget::NativeOnDeactivated()
 	CurrentFactory = nullptr;
 }
 
-UWidget* UFactoryPanelWidget::GetUpgradeNudgeTarget() const
+UWidget* UFactoryPanelWidget::GetLaborerUpgradeTarget() const
 {
-	return ResolveNudgeTarget(DynamicSlots, EFactoryUpgradeType::HoldProductionSpeed);
+	return ResolveNudgeTarget(DynamicSlots, EFactoryUpgradeType::LaborerCount);
 }
 
-UWidget* UFactoryPanelWidget::GetSecondUpgradeNudgeTarget() const
+UWidget* UFactoryPanelWidget::GetFactoryExpansionUpgradeTarget() const
 {
-	return ResolveNudgeTarget(DynamicSlots, EFactoryUpgradeType::HoldProductionAmount);
+	return ResolveNudgeTarget(DynamicSlots, EFactoryUpgradeType::FactoryExpansion);
+}
+
+UWidget* UFactoryPanelWidget::GetUpgradeTarget(EFactoryUpgradeType Type) const
+{
+	return ResolveNudgeTarget(DynamicSlots, Type);
+}
+
+UWidget* UFactoryPanelWidget::GetFirstAffordableUpgradeTarget() const
+{
+	if (!CurrentFactory) { return nullptr; }
+	for (uint8 Index = static_cast<uint8>(EFactoryUpgradeType::HoldProductionSpeed);
+		Index <= static_cast<uint8>(EFactoryUpgradeType::FactoryExpansion); ++Index)
+	{
+		const EFactoryUpgradeType Type = static_cast<EFactoryUpgradeType>(Index);
+		if (CurrentFactory->GetAllowedUpgradeCount(Type) <= 0
+			|| (FactoryUpgradeUnlockPolicy::IsAutoUnlockType(Type)
+				&& !CurrentFactory->IsAutoCollectionUnlocked())) { continue; }
+		const int32 MaxLevel = CurrentFactory->GetUpgradeMaxLevel(Type);
+		if (MaxLevel == INDEX_NONE || ((MaxLevel > 0 || Type == EFactoryUpgradeType::LaborerCount)
+			&& CurrentFactory->GetUpgradeLevel(Type) >= MaxLevel)) { continue; }
+		const UUpgradeSlot* UpgradeSlot = DynamicSlots.FindRef(Type);
+		UCostActionButtonWidget* Button = UpgradeSlot ? UpgradeSlot->GetUpgradeButton() : nullptr;
+		if (Button && Button->CanAfford())
+		{
+			return Button;
+		}
+	}
+	return nullptr;
 }
 
 void UFactoryPanelWidget::NativeDestruct()
 {
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.RemoveDynamic(this, &UFactoryPanelWidget::OnCloseButtonClicked);
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UFactoryPanelWidget::OnCloseButtonClicked);
+	}
+	if (RelocateButton)
+	{
+		RelocateButton->OnClicked().RemoveAll(this);
 	}
 
 	if (BulkModeSelector)
@@ -177,6 +236,11 @@ void UFactoryPanelWidget::NativeDestruct()
 	Super::NativeDestruct();
 }
 
+UWidget* UFactoryPanelWidget::GetCloseButtonWidget() const
+{
+	return PanelHeader ? PanelHeader->GetCloseButton() : nullptr;
+}
+
 void UFactoryPanelWidget::OnCloseButtonClicked()
 {
 	RequestClose();
@@ -184,7 +248,55 @@ void UFactoryPanelWidget::OnCloseButtonClicked()
 
 void UFactoryPanelWidget::RequestClose()
 {
+	bCloseRequested = true;
+	StopUpgradeHold();
 	CloseWithAnimation();
+}
+
+void UFactoryPanelWidget::HandleRelocateRequested()
+{
+	ABrickFactory* Factory = CurrentFactory;
+	if (!IsValid(Factory) || Factory->IsRelocating())
+	{
+		return;
+	}
+
+	UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
+	AMainMapPlayerController* PlayerController = GameInstance
+		? Cast<AMainMapPlayerController>(GameInstance->GetCurrentPlayerController()) : nullptr;
+	APlayerCamera* PlayerCam = PlayerController ? Cast<APlayerCamera>(PlayerController->GetPawn()) : nullptr;
+	UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	UUIManagerSubsystem* UIMgr = GameInstance ? GameInstance->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+	UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr;
+	TSubclassOf<UUserWidget> PlacementClass = TableMgr
+		? TableMgr->GetWidgetClass(EWidgetType::BuildPlacementPanel) : nullptr;
+	if (!IsValid(PlayerCam) || !IsValid(PlayerCam->PlacementHandler) || !IsValid(UIBase)
+		|| !PlacementClass || !PlacementClass->IsChildOf(UBuildPlacementPanelWidget::StaticClass()))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[FactoryPanel] Relocation prerequisites are missing"));
+		return;
+	}
+
+	// Deactivation clears CurrentFactory and releases the panel's interaction state.
+	DeactivateWidget();
+	PlayerCam->StartBuildingRelocation(Factory);
+	if (!Factory->IsRelocating())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[FactoryPanel] Factory relocation did not start"));
+		return;
+	}
+
+	if (UBuildPlacementPanelWidget* PlacementWidget =
+		Cast<UBuildPlacementPanelWidget>(UIBase->PushBottomClass(PlacementClass.Get())))
+	{
+		PlacementWidget->SetBuildableInfo(FBuildableCardTable(), true);
+	}
+	else
+	{
+		PlayerCam->PlacementHandler->CancelBuildingMove();
+		PlayerCam->EndBuildingRelocation();
+		UE_LOG(LogTemp, Warning, TEXT("[FactoryPanel] Failed to open relocation controls"));
+	}
 }
 
 void UFactoryPanelWidget::SetFactory(ABrickFactory* Factory)
@@ -212,10 +324,19 @@ void UFactoryPanelWidget::HandleFactoryUpgraded(EFactoryUpgradeType UpgradeType)
 		return;
 	}
 
-	// 강화 틱마다 재빌드하면 홀드(10Hz)에서 슬롯이 통째로 다시 만들어진다 — 잠금 표시가 바뀐 순간만
+	// 강화 틱에는 슬롯 구조를 유지하고, 잠금 상태가 바뀌면 정의도 다시 반영한다.
 	const bool bNowLocked = !CurrentFactory->IsAutoCollectionUnlocked();
 	if (bNowLocked == bAutoSlotsShownAsLocked)
 	{
+		if (UpgradeType == EFactoryUpgradeType::FactoryExpansion || UpgradeType == EFactoryUpgradeType::LaborerCount)
+		{
+			UpdateAllUpgradeSlots();
+			if (UpgradeType == EFactoryUpgradeType::LaborerCount && CurrentHoldUpgradeType == UpgradeType
+				&& CurrentFactory->GetUpgradeLevel(UpgradeType) >= CurrentFactory->GetUpgradeMaxLevel(UpgradeType))
+			{
+				StopUpgradeHold();
+			}
+		}
 		return;
 	}
 
@@ -230,8 +351,8 @@ void UFactoryPanelWidget::TryPlayAutoUnlockCelebration()
 		return;
 	}
 
-	// 자동 강화 2슬롯은 시각만, 재고 슬롯에서 사운드 1회 — 같은 연출이 3번 울리지 않게
-	if (UUpgradeSlot* AutoSlot = DynamicSlots.FindRef(EFactoryUpgradeType::AutoCollection))
+	// 자동 강화 2슬롯은 시각만 — 같은 연출이 두 번 울리지 않게 사운드는 아래에서 1회
+	if (UUpgradeSlot* AutoSlot = DynamicSlots.FindRef(EFactoryUpgradeType::LaborerCount))
 	{
 		AutoSlot->PlayUpgradeEffect(false);
 	}
@@ -239,9 +360,9 @@ void UFactoryPanelWidget::TryPlayAutoUnlockCelebration()
 	{
 		CapacitySlot->PlayUpgradeEffect(false);
 	}
-	if (UUpgradeSlot* StockSlot = DynamicSlots.FindRef(EFactoryUpgradeType::BrickStock))
+	if (USoundManagerSubsystem* SM = GetGameInstance()->GetSubsystem<USoundManagerSubsystem>())
 	{
-		StockSlot->PlayUpgradeEffect(true);
+		SM->PlayUISound(CGUISoundTags::UpgradeSuccess);
 	}
 
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
@@ -258,7 +379,6 @@ void UFactoryPanelWidget::RefreshUI()
 	if (CurrentFactory)
 	{
 		UpdateAllUpgradeSlots();
-		UpdateBrickStockSlot();
 	}
 }
 
@@ -286,79 +406,102 @@ void UFactoryPanelWidget::RebuildUpgradeSlots()
 		return;
 	}
 
-	// 기존 슬롯 버튼 언바인딩
-	for (const TPair<EFactoryUpgradeType, UUpgradeSlot*>& Pair : DynamicSlots)
+	const TArray<FFactoryUpgradeDefinition> Defs = TableMgr->GetAllFactoryUpgradeDefinitions();
+	TArray<const FFactoryUpgradeDefinition*> ValidDefs;
+	ValidDefs.Reserve(Defs.Num());
+	const UEnum* UpgradeTypeEnum = StaticEnum<EFactoryUpgradeType>();
+	for (const FFactoryUpgradeDefinition& Def : Defs)
 	{
-		if (UUpgradeSlot* SlotItem = Pair.Value)
+		// UHT 의 _MAX 도 enum 값으로 등록되므로 실제 강화 타입만 슬롯으로 만든다.
+		if (UpgradeTypeEnum && static_cast<int64>(Def.UpgradeType) >= UpgradeTypeEnum->GetMaxEnumValue())
 		{
-			if (UCostActionButtonWidget* Btn = SlotItem->GetUpgradeButton())
+			UE_LOG(LogTemp, Warning,
+				TEXT("[FactoryPanel] DT_FactoryUpgradeDefinition 에 enum 에 없는 행이 있어 건너뛴다 — '%s' 행 삭제 필요"),
+				*Def.DisplayName.ToString());
+			continue;
+		}
+		ValidDefs.Add(&Def);
+	}
+
+	bool bReuseSlots = DynamicSlots.Num() == ValidDefs.Num()
+		&& UpgradeSlotContainer->GetChildrenCount() == ValidDefs.Num();
+	if (bReuseSlots)
+	{
+		for (int32 Index = 0; Index < ValidDefs.Num(); ++Index)
+		{
+			UUpgradeSlot* ExistingSlot = DynamicSlots.FindRef(ValidDefs[Index]->UpgradeType);
+			if (!IsValid(ExistingSlot) || ExistingSlot->GetClass() != SlotClass.Get()
+				|| UpgradeSlotContainer->GetChildAt(Index) != ExistingSlot)
 			{
-				Btn->OnClicked().RemoveAll(this);
-				Btn->OnPressed().RemoveAll(this);
-				Btn->OnReleased().RemoveAll(this);
+				bReuseSlots = false;
+				break;
 			}
 		}
 	}
 
-	UpgradeSlotContainer->ClearChildren();
-	DynamicSlots.Reset();
+	if (!bReuseSlots)
+	{
+		StopUpgradeHold();
+		for (const TPair<EFactoryUpgradeType, UUpgradeSlot*>& Pair : DynamicSlots)
+		{
+			if (UUpgradeSlot* SlotItem = Pair.Value)
+			{
+				if (UCostActionButtonWidget* Btn = SlotItem->GetUpgradeButton())
+				{
+					Btn->OnClicked().RemoveAll(this);
+					Btn->OnPressed().RemoveAll(this);
+					Btn->OnReleased().RemoveAll(this);
+				}
+			}
+		}
+		UpgradeSlotContainer->ClearChildren();
+		DynamicSlots.Reset();
+	}
 
 	bAutoSlotsShownAsLocked = !CurrentFactory->IsAutoCollectionUnlocked();
-
-	const TArray<FFactoryUpgradeDefinition> Defs = TableMgr->GetAllFactoryUpgradeDefinitions();
 	FText AutoLockText;
 	if (bAutoSlotsShownAsLocked)
 	{
 		AutoLockText = GetFactoryAutoLockText(Defs);
 	}
 
-	for (const FFactoryUpgradeDefinition& Def : Defs)
+	for (const FFactoryUpgradeDefinition* DefPtr : ValidDefs)
 	{
-		UUpgradeSlot* NewSlot = CreateWidget<UUpgradeSlot>(this, SlotClass);
-		if (!NewSlot) continue;
+		const FFactoryUpgradeDefinition& Def = *DefPtr;
+		UUpgradeSlot* SlotItem = bReuseSlots ? DynamicSlots.FindRef(Def.UpgradeType)
+			: CreateWidget<UUpgradeSlot>(this, SlotClass);
+		if (!SlotItem) continue;
 
-		ApplySlotDefinition(NewSlot, Def);
+		ApplySlotDefinition(SlotItem, Def);
 
 		const bool bLocked = bAutoSlotsShownAsLocked
 			&& FactoryUpgradeUnlockPolicy::IsAutoUnlockType(Def.UpgradeType);
-		if (bLocked)
+		SlotItem->LockConditionText = bLocked ? AutoLockText : FText::GetEmpty();
+
+		BindSlotButton(SlotItem, Def.UpgradeType);
+
+		if (!bReuseSlots)
 		{
-			NewSlot->LockConditionText = AutoLockText;
+			UpgradeSlotContainer->AddChild(SlotItem);
+			DynamicSlots.Add(Def.UpgradeType, SlotItem);
 		}
 
-		BindSlotButton(NewSlot, Def.UpgradeType);
-
-		UpgradeSlotContainer->AddChild(NewSlot);
-		DynamicSlots.Add(Def.UpgradeType, NewSlot);
-
-		// 초기 UI 갱신
-		if (Def.bIsStatusSlot)
-		{
-			UpdateBrickStockSlot();
-		}
-		else
-		{
-			UpdateUpgradeSlot(Def.UpgradeType, NewSlot);
-		}
+		UpdateUpgradeSlot(Def.UpgradeType, SlotItem);
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[FactoryPanel] Upgrade slots rebuilt: %d slots"), DynamicSlots.Num());
+	UE_LOG(LogTemp, Log, TEXT("[FactoryPanel] Upgrade slots %s: %d slots"),
+		bReuseSlots ? TEXT("reused") : TEXT("rebuilt"), DynamicSlots.Num());
 }
 
 void UFactoryPanelWidget::ApplySlotDefinition(UUpgradeSlot* InSlot, const FFactoryUpgradeDefinition& Def)
 {
 	if (!InSlot) return;
 
-	InSlot->Description = Def.DisplayName;
-	InSlot->SubDescription = Def.SubDescription;
+	InSlot->SetRuntimePresentation(Def.DisplayName, Def.SubDescription, Def.CostResourceType);
 	InSlot->ValueUnit = Def.ValueUnit;
 	InSlot->bIsInteger = Def.bIsInteger;
-	InSlot->CostResourceType = Def.CostResourceType;
-
-	if (!Def.Icon.IsNull())
-	{
-		InSlot->Icon = Def.Icon;
-	}
+	InSlot->Icon = Def.Icon;
+	InSlot->SetIconTexture(Def.Icon.IsNull() ? nullptr : Def.Icon.LoadSynchronous());
 }
 
 void UFactoryPanelWidget::BindSlotButton(UUpgradeSlot* InSlot, EFactoryUpgradeType Type)
@@ -371,27 +514,25 @@ void UFactoryPanelWidget::BindSlotButton(UUpgradeSlot* InSlot, EFactoryUpgradeTy
 	Btn->OnPressed().RemoveAll(this);
 	Btn->OnReleased().RemoveAll(this);
 
-	if (Type == EFactoryUpgradeType::BrickStock)
+	// x1 = Pressed 1회 강화 + 홀드 타이머, x10/x50 = 탭당 벌크 1회 구매 (홀드 비활성)
+	Btn->OnPressed().AddWeakLambda(this, [this, Type]()
 	{
-		Btn->OnClicked().AddUObject(this, &UFactoryPanelWidget::OnCollectAutoResourcesClicked);
-	}
-	else
-	{
-		// x1 = Pressed 1회 강화 + 홀드 타이머, x10/x50 = 탭당 벌크 1회 구매 (홀드 비활성)
-		Btn->OnPressed().AddWeakLambda(this, [this, Type]()
+		if (BulkMode == EEnhanceBulkMode::x1)
 		{
-			if (BulkMode == EEnhanceBulkMode::x1)
+			const UMissionManagerSubsystem* Missions = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>();
+			const FName MissionBefore = Missions ? Missions->GetActiveMissionID() : NAME_None;
+			OnUpgradeClicked(Type);
+			if (!Missions || Missions->GetActiveMissionID() == MissionBefore)
 			{
-				OnUpgradeClicked(Type);
 				StartUpgradeHold(Type);
 			}
-			else
-			{
-				OnBulkUpgrade(Type);
-			}
-		});
-		Btn->OnReleased().AddUObject(this, &UFactoryPanelWidget::StopUpgradeHold);
-	}
+		}
+		else
+		{
+			OnBulkUpgrade(Type);
+		}
+	});
+	Btn->OnReleased().AddUObject(this, &UFactoryPanelWidget::StopUpgradeHold);
 }
 
 void UFactoryPanelWidget::UpdateUpgradeSlot(EFactoryUpgradeType Type, UUpgradeSlot* InSlot)
@@ -399,7 +540,8 @@ void UFactoryPanelWidget::UpdateUpgradeSlot(EFactoryUpgradeType Type, UUpgradeSl
 	if (!InSlot || !CurrentFactory) return;
 
 	const int32 Level = CurrentFactory->GetUpgradeLevel(Type);
-	const float CurrentValue = CurrentFactory->GetUpgradeValue(Type);
+	const float CurrentValue = Type == EFactoryUpgradeType::LaborerCount
+		? static_cast<float>(CurrentFactory->GetDesiredLaborerCount()) : CurrentFactory->GetUpgradeValue(Type);
 
 	// DT 단일 진실 — 비용 곡선/상한/자원타입. 미로드 시 FFactoryUpgradeConfig 폴백.
 	FFactoryCostCurve CostCurve;
@@ -421,10 +563,34 @@ void UFactoryPanelWidget::UpdateUpgradeSlot(EFactoryUpgradeType Type, UUpgradeSl
 	}
 	const int64 Cost = CostCurve.CostAtLevel(Level);
 
-	const bool bIsLocked = FactoryUpgradeUnlockPolicy::IsAutoUnlockType(Type)
-		&& !CurrentFactory->IsAutoCollectionUnlocked();
+	const int32 PurchaseMaxLevel = CurrentFactory->GetUpgradeMaxLevel(Type);
+	const int32 AllowedCount = CurrentFactory->GetAllowedUpgradeCount(Type);
+	const bool bMissingCapacity = PurchaseMaxLevel == INDEX_NONE;
+	const bool bAtStageCapacity = Type == EFactoryUpgradeType::LaborerCount
+		&& Level >= PurchaseMaxLevel && (MaxLevel <= 0 || Level < MaxLevel);
+	const bool bTutorialLocked = AllowedCount == 0 && !bMissingCapacity && !bAtStageCapacity
+		&& (MaxLevel <= 0 || Level < MaxLevel)
+		&& !(FactoryUpgradeUnlockPolicy::IsAutoUnlockType(Type) && !CurrentFactory->IsAutoCollectionUnlocked());
+	const bool bIsLocked = bMissingCapacity || bAtStageCapacity || bTutorialLocked
+		|| (FactoryUpgradeUnlockPolicy::IsAutoUnlockType(Type) && !CurrentFactory->IsAutoCollectionUnlocked());
+	if (bMissingCapacity)
+	{
+		InSlot->LockConditionText = NSLOCTEXT("FactoryPanel", "MissingCapacityData", "공장 데이터 확인 필요");
+	}
+	else if (bAtStageCapacity)
+	{
+		InSlot->LockConditionText = NSLOCTEXT("FactoryPanel", "ExpandLaborerCapacity", "공장 강화로 정원 확장");
+	}
+	else if (bTutorialLocked)
+	{
+		InSlot->LockConditionText = NSLOCTEXT("FactoryPanel", "TutorialUpgradeLimit", "튜토리얼 진행 후 강화 가능");
+	}
+	else if (!FactoryUpgradeUnlockPolicy::IsAutoUnlockType(Type) || CurrentFactory->IsAutoCollectionUnlocked())
+	{
+		InSlot->LockConditionText = FText::GetEmpty();
+	}
 
-	// 벌크 모드 — 잠금 슬롯은 단건 표시. BrickStock 은 UpdateBrickStockSlot 경유라 여기 도달 안 함(벌크 대상 제외)
+	// 벌크 모드 — 잠금 슬롯은 단건 표시. 재고는 상태 스트립이 담당해 슬롯 자체가 없다
 	const bool bBulkMode = (BulkMode != EEnhanceBulkMode::x1) && !bIsLocked;
 
 	int32 BulkCount = 1;
@@ -432,11 +598,20 @@ void UFactoryPanelWidget::UpdateUpgradeSlot(EFactoryUpgradeType Type, UUpgradeSl
 	int64 BulkAvailable = 0;
 	if (bBulkMode)
 	{
-		BulkCount = ComputeBulkCount(Level, MaxLevel, CostCurve, CostType, BulkTotalCost, BulkAvailable);
+		BulkCount = ComputeBulkCount(Type, Level, PurchaseMaxLevel, CostCurve, CostType, BulkTotalCost, BulkAvailable);
 	}
 
 	// 델타 = +N레벨 합산 효과 (Count=0 이면 1레벨 기준 유지)
-	const float NextValue = FFactoryUpgradeConfig::CalculateUpgradeValue(Type, Level + (bBulkMode ? FMath::Max(BulkCount, 1) : 1));
+	const int32 NextLevel = Level + (bBulkMode ? FMath::Max(BulkCount, 1) : 1);
+	float NextValue = CurrentFactory->GetUpgradeValueAtLevel(Type, NextLevel);
+	if (Type == EFactoryUpgradeType::LaborerCount)
+	{
+		const int32 Capacity = CurrentFactory->GetLaborerCapacity();
+		NextValue = FMath::Min(NextValue, static_cast<float>(Capacity));
+		InSlot->SetLevelBadgeOverride(FText::Format(
+			NSLOCTEXT("FactoryPanel", "LaborerOccupancy", "{0} / {1}명"),
+			FText::AsNumber(CurrentFactory->GetDesiredLaborerCount()), FText::AsNumber(Capacity)));
+	}
 
 	InSlot->UpdateInfo(Level, CurrentValue, NextValue, Cost, bIsLocked, MaxLevel,
 		bBulkMode, BulkCount, bBulkMode ? BulkTotalCost : Cost, BulkAvailable);
@@ -444,31 +619,10 @@ void UFactoryPanelWidget::UpdateUpgradeSlot(EFactoryUpgradeType Type, UUpgradeSl
 
 void UFactoryPanelWidget::UpdateAllUpgradeSlots()
 {
+	// DynamicSlots 에는 강화 슬롯만 들어온다 (상태 슬롯은 RebuildUpgradeSlots 에서 제외)
 	for (const TPair<EFactoryUpgradeType, UUpgradeSlot*>& Pair : DynamicSlots)
 	{
-		if (Pair.Key == EFactoryUpgradeType::BrickStock) continue;
 		UpdateUpgradeSlot(Pair.Key, Pair.Value);
-	}
-}
-
-void UFactoryPanelWidget::UpdateBrickStockSlot()
-{
-	UUpgradeSlot* StockSlot = DynamicSlots.FindRef(EFactoryUpgradeType::BrickStock);
-	if (!StockSlot || !CurrentFactory) return;
-
-	// 재고 슬롯의 두 값은 현재/최대라 '진척'이 아니다 — 델타 표기가 남은 용량으로 오독된다
-	StockSlot->bShowDelta = false;
-
-	int32 CurrentAmount = CurrentFactory->GetAutoCollectedAmount();
-	int32 MaxCapacity = FMath::RoundToInt(CurrentFactory->GetUpgradeValue(EFactoryUpgradeType::AutoCollectionCapacity));
-	bool bIsLocked = !CurrentFactory->IsAutoCollectionUnlocked();
-
-	StockSlot->UpdateInfo(0, CurrentAmount, MaxCapacity, CurrentAmount, bIsLocked);
-
-	if (UCostActionButtonWidget* CollectButton = StockSlot->GetUpgradeButton())
-	{
-		bool bCanCollect = !bIsLocked && CurrentAmount > 0;
-		CollectButton->SetEnabled(bCanCollect);
 	}
 }
 
@@ -488,12 +642,18 @@ void UFactoryPanelWidget::OnUpgradeClicked(EFactoryUpgradeType Type)
 void UFactoryPanelWidget::OnBulkUpgrade(EFactoryUpgradeType Type)
 {
 	if (!CurrentFactory) return;
+	if (CurrentFactory->GetAllowedUpgradeCount(Type) <= 0) return;
 
 	const int32 CurrentLevel = CurrentFactory->GetUpgradeLevel(Type);
+	const int32 PurchaseMaxLevel = CurrentFactory->GetUpgradeMaxLevel(Type);
+	if (PurchaseMaxLevel == INDEX_NONE
+		|| ((PurchaseMaxLevel > 0 || Type == EFactoryUpgradeType::LaborerCount) && CurrentLevel >= PurchaseMaxLevel))
+	{
+		return;
+	}
 
 	// DT 단일 진실 — 비용 곡선/상한/자원타입
 	FFactoryCostCurve CostCurve;
-	int32 MaxLevel = 0;
 	EResourceType CostType = EResourceType::Money;
 
 	UTableManagerSubsystem* TableMgr = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
@@ -501,18 +661,16 @@ void UFactoryPanelWidget::OnBulkUpgrade(EFactoryUpgradeType Type)
 	if (TableMgr && TableMgr->GetFactoryUpgradeDefinition(Type, Def))
 	{
 		CostCurve = Def.GetCostCurve();
-		MaxLevel = Def.MaxLevel;
 		CostType = Def.CostResourceType;
 	}
 	else
 	{
 		CostCurve = FFactoryUpgradeConfig::GetFallbackCostCurve(Type);
-		MaxLevel = FFactoryUpgradeConfig::GetMaxLevel(Type);
 	}
 
 	int64 TotalCost = 0;
 	int64 Available = 0;
-	const int32 Count = ComputeBulkCount(CurrentLevel, MaxLevel, CostCurve, CostType, TotalCost, Available);
+	const int32 Count = ComputeBulkCount(Type, CurrentLevel, PurchaseMaxLevel, CostCurve, CostType, TotalCost, Available);
 
 	// 1차 방어는 UpgradeBtn 의 부족 입력 삼킴 — 여기는 잔여 0/자금 부족 경로의 방어적 안내
 	if (Count <= 0 || Available < TotalCost)
@@ -539,12 +697,15 @@ void UFactoryPanelWidget::OnBulkUpgrade(EFactoryUpgradeType Type)
 		TargetSlot->PlayUpgradeEffect();
 	}
 
-	// 자금이 크게 움직였으니 전 슬롯 벌크 카운트/비용 재계산 (OnResourceChanged 도 태우지만 즉시성 확보)
-	UpdateAllUpgradeSlots();
 	SaveFactoryData();
+	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
+	{
+		MissionMgr->NotifyFactoryUpgradePurchased(Type, CurrentFactory->GetUpgradeLevel(Type) - CurrentLevel);
+	}
+	UpdateAllUpgradeSlots();
 }
 
-int32 UFactoryPanelWidget::ComputeBulkCount(int32 CurrentLevel, int32 MaxLevel, const FFactoryCostCurve& CostCurve,
+int32 UFactoryPanelWidget::ComputeBulkCount(EFactoryUpgradeType Type, int32 CurrentLevel, int32 MaxLevel, const FFactoryCostCurve& CostCurve,
 	EResourceType CostType, int64& OutTotalCost, int64& OutAvailable) const
 {
 	OutTotalCost = 0;
@@ -569,6 +730,7 @@ int32 UFactoryPanelWidget::ComputeBulkCount(int32 CurrentLevel, int32 MaxLevel, 
 		Count = FMath::Min(Count, FMath::Max(0, MaxLevel - CurrentLevel));
 	}
 	Count = FMath::Min(Count, 50);
+	Count = CurrentFactory ? FMath::Min(Count, CurrentFactory->GetAllowedUpgradeCount(Type)) : 0;
 
 	// Count=0(잔여 0)이어도 부족액 표기는 1레벨 비용 기준
 	OutTotalCost = CostCurve.BulkCost(CurrentLevel, FMath::Max(Count, 1));
@@ -590,33 +752,6 @@ void UFactoryPanelWidget::ApplyBulkMode(EEnhanceBulkMode NewMode)
 	UpdateAllUpgradeSlots();
 }
 
-void UFactoryPanelWidget::OnCollectAutoResourcesClicked()
-{
-	if (!CurrentFactory) return;
-
-	const int32 Collected = CurrentFactory->GetAutoCollectedAmount();
-	CurrentFactory->CollectAutoResources();
-	UpdateBrickStockSlot();
-
-	if (Collected > 0)
-	{
-		UGameInstance* GI = GetGameInstance();
-		if (UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>())
-		{
-			if (UInGameLayerWidget* InGame = UIMgr->GetInGameLayer())
-			{
-				InGame->SpawnGainPopup(EResourceType::Brick, Collected);
-			}
-		}
-		if (USoundManagerSubsystem* SM = GI->GetSubsystem<USoundManagerSubsystem>())
-		{
-			SM->PlayUISound(CGUISoundTags::RewardCoin);
-		}
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[FactoryPanel] Auto resources collected (+%d)"), Collected);
-}
-
 void UFactoryPanelWidget::OnUpgradeSuccess(EFactoryUpgradeType UpgradeType)
 {
 	if (UUpgradeSlot* TargetSlot = DynamicSlots.FindRef(UpgradeType))
@@ -625,20 +760,29 @@ void UFactoryPanelWidget::OnUpgradeSuccess(EFactoryUpgradeType UpgradeType)
 		TargetSlot->PlayUpgradeEffect();
 	}
 
-	// 자동 용량 업그레이드 시 BrickStock 슬롯도 갱신 (MaxCapacity 변경)
-	if (UpgradeType == EFactoryUpgradeType::AutoCollectionCapacity)
-	{
-		UpdateBrickStockSlot();
-	}
-
 	SaveFactoryData();
+	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
+	{
+		MissionMgr->NotifyFactoryUpgradePurchased(UpgradeType);
+	}
+	UpdateAllUpgradeSlots();
 }
 
 // ===== Hold =====
 
 void UFactoryPanelWidget::StartUpgradeHold(EFactoryUpgradeType UpgradeType)
 {
+	if (!CurrentFactory || bCloseRequested) return;
+	if (CurrentFactory->GetAllowedUpgradeCount(UpgradeType) <= 0) return;
+	const int32 MaxLevel = CurrentFactory->GetUpgradeMaxLevel(UpgradeType);
+	if (MaxLevel == INDEX_NONE || ((MaxLevel > 0 || UpgradeType == EFactoryUpgradeType::LaborerCount)
+		&& CurrentFactory->GetUpgradeLevel(UpgradeType) >= MaxLevel))
+	{
+		return;
+	}
 	CurrentHoldUpgradeType = UpgradeType;
+	const UMissionManagerSubsystem* Missions = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>();
+	HoldMissionID = Missions ? Missions->GetActiveMissionID() : NAME_None;
 
 	// 홀드 중엔 자금 재충전마다 구매가능 펀치가 반복된다 — 홀드 구간만 억제
 	if (UUpgradeSlot* HeldSlot = DynamicSlots.FindRef(UpgradeType))
@@ -659,6 +803,7 @@ void UFactoryPanelWidget::StartUpgradeHold(EFactoryUpgradeType UpgradeType)
 void UFactoryPanelWidget::StopUpgradeHold()
 {
 	GetWorld()->GetTimerManager().ClearTimer(UpgradeHoldTimerHandle);
+	HoldMissionID = NAME_None;
 
 	if (UUpgradeSlot* HeldSlot = DynamicSlots.FindRef(CurrentHoldUpgradeType))
 	{
@@ -669,10 +814,26 @@ void UFactoryPanelWidget::StopUpgradeHold()
 void UFactoryPanelWidget::OnUpgradeHoldTick()
 {
 	if (!CurrentFactory) return;
+	const UMissionManagerSubsystem* Missions = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>();
+	if (Missions && Missions->GetActiveMissionID() != HoldMissionID)
+	{
+		StopUpgradeHold();
+		return;
+	}
+	if (CurrentFactory->GetAllowedUpgradeCount(CurrentHoldUpgradeType) <= 0)
+	{
+		StopUpgradeHold();
+		return;
+	}
 
 	if (CurrentFactory->UpgradeFactory(CurrentHoldUpgradeType))
 	{
 		OnUpgradeSuccess(CurrentHoldUpgradeType);
+		if ((Missions && Missions->GetActiveMissionID() != HoldMissionID)
+			|| CurrentFactory->GetAllowedUpgradeCount(CurrentHoldUpgradeType) <= 0)
+		{
+			StopUpgradeHold();
+		}
 	}
 	else
 	{
@@ -684,9 +845,20 @@ void UFactoryPanelWidget::OnUpgradeHoldTick()
 
 void UFactoryPanelWidget::OnResourceChanged(EResourceType Type, int64 NewValue)
 {
-	if (Type == EResourceType::Money && CurrentFactory)
+	if (!CurrentFactory)
 	{
-		UpdateAllUpgradeSlots();
+		return;
+	}
+
+	for (const TPair<EFactoryUpgradeType, UUpgradeSlot*>& Pair : DynamicSlots)
+	{
+		if (UUpgradeSlot* SlotItem = Pair.Value)
+		{
+			if (UCostActionButtonWidget* Btn = SlotItem->GetUpgradeButton())
+			{
+				Btn->RefreshAffordability(Type, NewValue);
+			}
+		}
 	}
 }
 

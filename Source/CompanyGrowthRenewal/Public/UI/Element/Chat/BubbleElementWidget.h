@@ -17,7 +17,7 @@ class UMaterialInterface;
 
 DECLARE_DELEGATE_TwoParams(FOnBubbleElementClicked, int32 /*BuildingIndex*/, EBubbleType /*Type*/);
 
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UBubbleElementWidget : public UCommonButtonBase
 {
 	GENERATED_BODY()

@@ -8,13 +8,15 @@
 
 class UButtonWidget;
 class UCommonButtonBase;
+class UImage;
+class UTexture2D;
 
 /**
  * 탭 전용 합성 래퍼 위젯
  * Overlay(ClipToBounds) + 음수 Padding 마스킹과 디자인 기본값을 한 곳에 캡슐화.
  * 외부에서는 GetButton() 으로 내부 버튼을 꺼내 ButtonGroup 에 등록한다.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UTabButtonWidget : public UUserWidget
 {
 	GENERATED_BODY()
@@ -30,6 +32,22 @@ protected:
 	// WBP 안에서 정확히 "TabButton" 이름으로 배치된 ButtonWidget 인스턴스
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidget))
 	UButtonWidget* TabButton;
+
+	// 라벨 왼쪽 글리프. 트리에 없거나 IconTexture 가 비면 Collapsed — 기존 탭 WBP 들은 그대로 동작한다
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
+	UImage* TabIcon;
+
+	UPROPERTY(EditAnywhere, Category = "Tab|Icon")
+	TSoftObjectPtr<UTexture2D> IconTexture;
+
+	UPROPERTY(EditAnywhere, Category = "Tab|Icon", meta = (ClampMin = "0"))
+	float IconSize = 42.0f;
+
+	// 아이콘이 라벨 왼쪽에 겹쳐 놓이므로 라벨을 이만큼 밀어 자리를 비운다.
+	// 아이콘이 없으면 0 이 들어간다 — 안 걷으면 빈 자리만큼 라벨이 오른쪽으로 치우친다.
+	// ⚠ 건드리는 건 Left 뿐이다. 세로 패딩은 탭이 아래 내용판과 붙는 마감이라 그대로 둔다.
+	UPROPERTY(EditAnywhere, Category = "Tab|Icon", meta = (ClampMin = "0"))
+	float IconLabelInset = 50.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Tab")
 	FText Text;
@@ -58,4 +76,5 @@ protected:
 
 private:
 	void ApplySelectedColor(bool bIsSelected);
+	void ApplyIcon();
 };

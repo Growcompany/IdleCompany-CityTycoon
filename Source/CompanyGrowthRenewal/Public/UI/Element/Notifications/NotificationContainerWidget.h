@@ -16,7 +16,7 @@ class UTexture2D;
  * - 여러 개의 NotificationElementWidget을 관리하는 컨테이너
  * - 새로운 알림은 상단에 추가되고, 최대 개수 초과 시 오래된 알림 제거
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UNotificationContainerWidget : public UUserWidget
 {
 	GENERATED_BODY()
@@ -26,7 +26,7 @@ public:
 
 	// 새로운 알림 추가
 	UFUNCTION(BlueprintCallable, Category = "Notification")
-	void AddNotification(const FText& Message, float Duration = 3.0f, FLinearColor TextColor = FLinearColor(1.0f, 0.867f, 0.478f, 1.0f));
+	void AddNotification(const FText& Message, float Duration = 3.0f, FLinearColor TextColor = FLinearColor(1.0f, 0.867f, 0.478f, 1.0f), UTexture2D* Icon = nullptr);
 
 	UFUNCTION(BlueprintCallable, Category = "Notification")
 	void AddIconNotification(const FText& Message, UTexture2D* Icon, float Duration = 3.0f, FLinearColor TextColor = FLinearColor(1.0f, 0.867f, 0.478f, 1.0f));
@@ -42,6 +42,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Notification")
 	void ClearGuideNotification();
+
+	// 시간이 지나면 사라지는 알림만 센다 ― 상주하는 가이드 알림은 제외
+	bool HasActiveNotifications() const { return ActiveNotifications.Num() > 0; }
 
 protected:
 	// BindWidget 멤버

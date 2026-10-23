@@ -9,10 +9,9 @@
 class UButtonWidget;
 class UCommonTextBlock;
 class UImage;
-class UProgressBar;
 class ABuildingBaseActor;
 
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UBuildingSlotHorizonWidget : public UUserWidget
 {
 	GENERATED_BODY()
@@ -44,17 +43,27 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButtonWidget* MoveBtn;
 
-	// 업종 시그니처색을 아이콘 테두리로 흡수 — 별도 업종 컬럼 없이 색만으로 식별
+	// 업종 시그니처색을 아이콘 테두리로 표시
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UImage* IconPlate = nullptr;
+
+	// 썸네일 오른쪽 아래 업종 배지 — DT_CompanyInfo.PanelIcon, 테두리 = 업종색
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UImage> IndustryBadgeRing;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UImage> IndustryBadgeIcon;
 
 	// 실수익 "1.2만/초" — 배율(×N.NN)은 추상적이라 폐기, 운영 실측치 표시
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* IncomeText = nullptr;
 
-	// 직원 정원 대비 채움 게이지 (현재/정원)
+	// 있으면 단위·정원을 작은 글자로 나눠 쓴다 ("600" + "/초", "4" + "/ 10")
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UProgressBar* CapacityBar = nullptr;
+	TObjectPtr<UCommonTextBlock> IncomeUnitText;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UCommonTextBlock> EmployeeCapText;
 
 private:
 	void HandleMoveClicked();

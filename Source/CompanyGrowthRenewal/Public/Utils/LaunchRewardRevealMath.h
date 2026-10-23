@@ -4,7 +4,7 @@
 #include "Enum/ItemType.h"
 #include "Table/MissionTable.h"
 
-// 출시 보상 리빌 순수 계산 — 월드 의존 0(자동화 테스트 대상). 소비처: ULaunchRewardRevealWidget.
+// 출시 보상 리빌 순수 계산 — 월드 의존 0(자동화 테스트 대상). 소비처: ULaunchConfirmWidget.
 namespace LaunchRewardRevealMath
 {
 	// ULaunchLootManagerSubsystem::GetLootPreview 의 "메인 보상 우선" 서열과 동일. 숫자가 클수록 귀하다.

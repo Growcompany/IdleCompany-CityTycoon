@@ -32,6 +32,36 @@ void UGestureHintWidget::SetLabel(const FText& Label)
 	LabelText->SetVisibility(Label.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
 }
 
+bool UGestureHintWidget::GetHandRectLocal(const FGeometry& OverlayGeometry, FSlateRect& OutRect) const
+{
+	if (!HandImage || Gesture == EGestureHintKind::None || !IsVisible())
+	{
+		return false;
+	}
+	const FGeometry& HandGeometry = HandImage->GetCachedGeometry();
+	const FVector2D Size = HandGeometry.GetLocalSize();
+	if (Size.X <= 1.f || Size.Y <= 1.f)
+	{
+		return false;
+	}
+	// 지금 위치는 왕복 중 한 점이다 ― 움직이는 폭 전체를 덮어야 반대쪽 끝에서 다시 겹치지 않는다
+	const float SweepX = Gesture == EGestureHintKind::Drag ? GestureHintMotion::DragAmpPx * 2.f : 0.f;
+	const float SweepY = Gesture == EGestureHintKind::Tap ? GestureHintMotion::TapDipPx : 0.f;
+	const FVector2D Corners[4] = {
+		FVector2D(-SweepX, -SweepY), FVector2D(Size.X + SweepX, -SweepY),
+		FVector2D(-SweepX, Size.Y + SweepY), FVector2D(Size.X + SweepX, Size.Y + SweepY)};
+	FVector2D Min(TNumericLimits<float>::Max(), TNumericLimits<float>::Max());
+	FVector2D Max(-TNumericLimits<float>::Max(), -TNumericLimits<float>::Max());
+	for (const FVector2D& Corner : Corners)
+	{
+		const FVector2D Local = OverlayGeometry.AbsoluteToLocal(HandGeometry.LocalToAbsolute(Corner));
+		Min = FVector2D::Min(Min, Local);
+		Max = FVector2D::Max(Max, Local);
+	}
+	OutRect = FSlateRect(Min.X, Min.Y, Max.X, Max.Y);
+	return true;
+}
+
 void UGestureHintWidget::ApplyGestureVisibility()
 {
 	const bool bShow = Gesture != EGestureHintKind::None;

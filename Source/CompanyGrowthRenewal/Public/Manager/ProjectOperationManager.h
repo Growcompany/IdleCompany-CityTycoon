@@ -9,6 +9,7 @@
 #include "Data/ProjectReportData.h"
 #include "Enum/QualityGrade.h"
 #include "Enum/OperationState.h"
+#include "Table/IndustryProfileTable.h"
 #include "ProjectOperationManager.generated.h"
 
 class UResourceItemManager;
@@ -37,6 +38,68 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnOperationUpdated, int32, Buildin
 // 직원 수익 코인 연출 요청 (직원 월드 위치 → 돈 아이콘, OfficeLayer 가 구독)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnIncomeCoinRequested, FVector, WorldPos, int64, Amount, int32, EmployeeID);
 
+// 건물 운영 수익이 적립될 때마다 방송 — 연출 전용. 구독자가 없어도, 잘려도 적립에 영향이 없다.
+// 월드 좌표를 넘기지 않는 이유 = 투영·가시성·캡은 이미 좌표 기계를 가진 InGameLayerWidget 의 책임이다.
+DECLARE_MULTICAST_DELEGATE_TwoParams(FOnBuildingIncomeStreamed, int32, int64);
+
+// 명시적 금고 수거(오프라인 리포트·운영 종료 자동 수령)에서만 방송 — 틱 적립은 타지 않는다.
+// 비-dynamic = BP 구독 봉쇄. 퀘스트 카운터처럼 "1회 = 1행동" 인 원장이 초당 가산되면 안 되는 신호 전용.
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnStoredRevenueCollected, int64);
+
+// 한 건물의 한 틱 지급 결과 — 연출과 무관한 순수 산식(가시성 인자를 받지 않는 것이 계약이다)
+struct FOperationTickPayout
+{
+	double NewPending = 0.0;
+	int64 PayoutNow = 0;
+};
+
+// 출시 직전 운영 전망. 시간 변동 배율과 진동을 제외한 전체 운영 기간의 감쇠 적분값이다.
+struct FOperationLaunchForecast
+{
+	EQualityGrade EffectiveGrade = EQualityGrade::C;
+	float QualityMultiplier = 1.0f;
+	float OperationSeconds = 0.0f;
+	float BaseTotalRevenue = 0.0f;
+	float TotalRevenue = 0.0f;
+};
+
+// 오피스 안에서는 직원 수익이 대신 지급되므로 프로젝트 수익을 적립하지 않는다.
+// 정수부만 지급하고 소수부를 남기는 이유 = 초당 1원 미만 버는 초반 건물이 영구 0원이 되는 것을 막는다.
+inline FOperationTickPayout ResolveOperationTickPayout(
+	bool bPlayerInOffice, double CurrentPending, double RevenueThisTick)
+{
+	FOperationTickPayout Result;
+
+	if (bPlayerInOffice)
+	{
+		Result.NewPending = CurrentPending;
+		return Result;
+	}
+
+	double Pending = CurrentPending + RevenueThisTick;
+	// /fp:fast 가 `!(x > 0)` 을 `x <= 0` 으로 접어 NaN 이 새고 Floor(NaN) 캐스팅이 INT64_MIN 을 준다.
+	// IsFinite 는 비트 검사라 재배치에 안 흔들리고 Inf 까지 같이 막는다.
+	if (!FMath::IsFinite(Pending) || Pending <= 0.0)
+	{
+		return Result;
+	}
+
+	const double Whole = FMath::Floor(Pending);
+
+	// IsFinite 는 크기를 안 본다 — 2^53 을 넘으면 cvttsd2si 가 다시 INT64_MIN 을 준다.
+	// double 이 정수를 정확히 표현하는 상한에서 자른다. 이 규모면 이미 비정상 입력이라 잔액은 버린다.
+	constexpr double MaxSafeWhole = 9007199254740992.0;
+	if (Whole >= MaxSafeWhole)
+	{
+		Result.PayoutNow = static_cast<int64>(MaxSafeWhole);
+		return Result;
+	}
+
+	Result.PayoutNow = static_cast<int64>(Whole);
+	Result.NewPending = Pending - Whole;
+	return Result;
+}
+
 /**
  * 프로젝트 운영 매니저
  *
@@ -62,6 +125,10 @@ public:
 		if (Amount > 0) { OnIncomeCoinRequested.Broadcast(WorldPos, Amount, EmployeeID); }
 	}
 
+	FOnBuildingIncomeStreamed OnBuildingIncomeStreamed;
+
+	FOnStoredRevenueCollected OnStoredRevenueCollected;
+
 	// ===== GameInstanceSubsystem Lifecycle =====
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
@@ -77,6 +144,9 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Operation")
 	int32 StartOperation(const FStageProgressData& StageData, int32 BuildingID);
+
+	// StartOperation 과 같은 초기 운영값을 읽기 전용으로 계산한다.
+	FOperationLaunchForecast GetLaunchForecast(const FStageProgressData& StageData, int32 BuildingID) const;
 
 	/**
 	 * 운영 종료 (수동 종료 또는 수명 만료)
@@ -119,7 +189,7 @@ public:
 	int64 CollectAllWarehouseByBuilding(int32 BuildingID);
 
 	/**
-	 * 모든 빌딩의 저장된 수익을 한 번에 수령 (MainMap 하단바 "전체 수거" 버튼용)
+	 * 모든 빌딩의 저장된 수익을 한 번에 수령 — 호출처는 오프라인 리포트와 MainMap 진입 안전망(수거 UI 없음)
 	 * @return 총 수령 금액 (빌딩별 합산)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Operation|Warehouse")
@@ -128,7 +198,7 @@ public:
 	/**
 	 * 모든 빌딩의 저장 수익을 건물당 AmountPerBuilding(원, 기본 500만) 절대액으로 즉시 강제 충전 (트레일러 "방치 수익" 컷).
 	 * 금고 용량 무시 — 수거(CollectStoredRevenue)는 용량 재클램프 없이 그대로 회수하므로 대량 코인 연출이 나온다.
-	 * CollectAllStoredRevenue 의 역 — 전 빌딩 순회하며 채우고 OnWarehouseUpdated 방송(버블 표시). 수거는 안 함.
+	 * CollectAllStoredRevenue 의 역 — 전 빌딩 순회하며 채우고 OnWarehouseUpdated 방송(현재 C++ 구독자 없음). 수거는 안 함.
 	 * @return 충전한 빌딩 수
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Operation|Warehouse")
@@ -142,15 +212,15 @@ public:
 	bool HasAnyStoredRevenue() const;
 
 	/**
-	 * 전 빌딩의 저장 수익 합계 (비파괴 — 수거 버튼 금액 표시용).
+	 * 전 빌딩의 저장 수익 합계 (비파괴). C++ 호출처는 없다 — BlueprintPure 라 BP 참조 가능성이 남아 유지.
 	 * HasAnyStoredRevenue 의 정량판. CollectAllStoredRevenue 와 같은 순회를 쓰되 회수하지 않는다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Operation|Warehouse")
 	double GetTotalStoredRevenue() const;
 
-	// ===== 기대 수익 (직원 잠재 큐브 수익줄 기반) =====
+	// ===== 기대 수익 (직원 잠재 큐브와 배정 책상 운영 시스템) =====
 
-	// 빌딩 소속 직원 잠재 수익줄 평균 기반 수익 배율 — 결과 캐싱
+	// 직원별 잠재 수익 배수 × 배정 책상 운영 배수의 소속 직원 평균 — 결과 캐싱
 	UFUNCTION(BlueprintPure, Category = "Operation|Expected")
 	float CalculateEmployeeStatBonus(int32 BuildingID) const;
 
@@ -171,7 +241,7 @@ public:
 	// 25초 Volatility 진동은 상시 지표에선 노이즈라 제외 (평균 보존 연출은 세일즈 커브 소관).
 	float GetBuildingDisplayNetPerSec(int32 BuildingID) const;
 
-	// 회사 전체 = Σ빌딩 표시순수익 + Σ모뉴먼트 패시브. Money 툴팁 드릴다운이 클릭 시 조회.
+	// 회사 전체 = Σ빌딩 표시순수익. Money 툴팁 드릴다운이 클릭 시 조회.
 	double GetCompanyNetPerSec() const;
 
 	// ===== Query =====
@@ -274,7 +344,10 @@ public:
 	float CalculateBaseRevenue(const FStageProgressData& Data) const;
 
 	// 규모 스칼라 진입점 — 스테이지 없이 프로젝트 번호만으로 기본 수익을 뽑는다(금고 용량 기준축).
-	float CalculateBaseRevenueForProjectNumber(int32 ProjectNumber) const;
+	float CalculateBaseRevenueForProjectNumber(int32 ProjectNumber, ECompanyType Industry = ECompanyType::None) const;
+
+	// 산업 프로필을 이미 조회한 호출부도 동일한 규모 산식을 사용한다.
+	static double ComputeBaseRevenuePerSec(int32 ProjectNumber, const FIndustryProfileRow& Profile);
 
 	// 산업 수익 인격 노브(DT_IndustryProfile) — 피크/감쇠반감기/변동성. 미정의 산업이면 (1, 0.5, 0).
 	void GetIndustryCurveKnobs(ECompanyType Industry, float& OutPeakMult, float& OutHalfLifeFrac, float& OutVolatility) const;
@@ -300,19 +373,19 @@ public:
 		return HLF / 0.6931472f * (1.0f - FMath::Pow(0.5f, 1.0f / HLF));
 	}
 
-	/** 출시 직후(피크) 초당 수익 = 규모 기본 × 산업 피크 × 트렌드 × 품질.
+	/** 출시 직후(피크) 초당 수익 = 규모 기본 × 산업 피크 × 품질.
 	 *  ⚠ 수익 항 목록의 단일 출처 — 항을 더하거나 빼면 여기만 고친다.
 	 *  피치 카드 추정과 출시 결과 화면이 둘 다 이걸 부르므로 항이 갈릴 수 없다. */
-	static float ComputePeakRevenuePerSec(float BaseRevenuePerSec, float PeakMult, float TrendMult, float QualityMult)
+	static float ComputePeakRevenuePerSec(float BaseRevenuePerSec, float PeakMult, float QualityMult)
 	{
-		return BaseRevenuePerSec * PeakMult * TrendMult * QualityMult;
+		return BaseRevenuePerSec * PeakMult * QualityMult;
 	}
 
 	/** 운영 전 구간 총수익 = 피크 초당 × 운영시간 × 감쇠 적분. */
-	static float ComputeLaunchRevenue(float BaseRevenuePerSec, float PeakMult, float TrendMult,
+	static float ComputeLaunchRevenue(float BaseRevenuePerSec, float PeakMult,
 		float QualityMult, float OpSeconds, float HalfLifeFrac)
 	{
-		return ComputePeakRevenuePerSec(BaseRevenuePerSec, PeakMult, TrendMult, QualityMult)
+		return ComputePeakRevenuePerSec(BaseRevenuePerSec, PeakMult, QualityMult)
 			* OpSeconds * ComputeDecayIntegralPerSec(HalfLifeFrac);
 	}
 
@@ -390,12 +463,12 @@ public:
 	// ===== Report =====
 
 	/**
-	 * 직원이 벌어들인 수익을 운영 데이터에 추가 (Office 직접 관리 시)
+	 * 직원에게 실제 지급된 수익을 건물 누적 및 현재 운영 결산에 기록 (Office 직접 관리 시)
 	 * @param BuildingID 건물 ID
 	 * @param Amount 수익 금액
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Operation|Revenue")
-	void AddEmployeeRevenue(int32 BuildingID, float Amount);
+	void AddEmployeeRevenue(int32 BuildingID, double Amount);
 
 	/**
 	 * 해당 건물에 미확인 결산서가 있는지 확인
@@ -423,25 +496,21 @@ protected:
 	void UpdateSingleOperation(FOperationData& Operation, float DeltaTime);
 
 	/**
-	 * 수익 처리 (실시간 획득 또는 창고 누적)
-	 * @param Operation 운영 데이터
-	 * @param RevenueAmount 수익 금액
-	 */
-	void ProcessRevenue(FOperationData& Operation, float RevenueAmount);
-
-	/**
 	 * 운영 완료 처리
 	 * @param OperationIndex 운영 인덱스
 	 */
 	void OnOperationComplete(int32 OperationIndex);
 
-	/**
-	 * 운영 완료 시 경험치 분배
-	 * @param Operation 완료된 운영 데이터
-	 */
-	void DistributeOperationExperience(const FOperationData& Operation);
-
 private:
+	struct FInitialOperationSetup
+	{
+		FOperationData Operation;
+		float QualityMultiplier = 1.0f;
+		float BasePeakRevenuePerSecond = 0.0f;
+	};
+
+	FInitialOperationSetup BuildInitialOperation(const FStageProgressData& StageData, int32 BuildingID) const;
+
 	// 활성 운영 목록
 	UPROPERTY()
 	TArray<FOperationData> ActiveOperations;
@@ -449,6 +518,10 @@ private:
 	// 다음 운영 ID
 	UPROPERTY()
 	int32 NextOperationID = 1;
+
+	// UpdateOperations 순회 동안 모으는 틱 합계. 건물마다 StoreResource 를 부르면
+	// 건물 80개에서 초당 80회 재화 브로드캐스트가 나가 HUD 가 그만큼 갱신된다.
+	int64 PendingTickPayout = 0;
 
 	// FTSTicker 델리게이트 핸들
 	FTSTicker::FDelegateHandle TickDelegateHandle;
@@ -475,13 +548,14 @@ private:
 	// BuildingID로 OfficeSaveData 조회
 	FOfficeSaveData* GetOfficeSaveDataByBuildingID(int32 BuildingID) const;
 
-	// BuildingID로 저장된 수익 수령
-	int64 CollectStoredRevenueByBuilding(int32 BuildingID);
+	// BuildingID로 저장된 수익 수령.
+	// bSaveImmediately=false 는 전 건물 순회 호출처 전용 — 건물마다 전체 스냅샷+디스크 쓰기를 돌지 않게 한다(저장은 호출처가 1회).
+	int64 CollectStoredRevenueByBuilding(int32 BuildingID, bool bSaveImmediately = true);
 
 	// 빌딩 강화 MarketingPower + 성급 보너스 최종 배율 (SaveData 기반 — MainMap/OfficeMap 양쪽 안전)
 	float GetBuildingIncomeMultiplier(int32 BuildingID) const;
 
-	// 일반 강화 슬롯의 순수 배율 조회 (성급 보너스 없음). ProjectLifespan, EventResistance 등에서 재사용.
+	// 일반 강화 슬롯의 순수 배율 조회 (성급 보너스 없음). ProjectLifespan 등에서 재사용.
 	float GetBuildingEnhancementMultiplier(int32 BuildingID, EBuildingEnhancementType Type) const;
 
 	// 빌딩별 스탯 보너스 캐시(체력+수익보너스) — 이벤트 기반 무효화. 매 tick 순회 비용 회피.

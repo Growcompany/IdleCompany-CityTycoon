@@ -21,7 +21,7 @@ class UNotificationElementWidget;
  * 전역 알림 컨테이너(UNotificationContainerWidget)와는 별개 시스템 — 엘리먼트(UNotificationElementWidget)만 재사용하고
  * 스택/최대개수/만료는 이 레일이 따로 소유한다(전역 경로 48곳 무영향).
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOfficeEventRailWidget : public UCommonUserWidget
 {
 	GENERATED_BODY()
@@ -43,11 +43,6 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Office|EventRail")
 	void RemoveEventCard(UUserWidget* Card);
-
-	// 자동 만료 카드(반응 토스트 등) — 레일에 붙이되 트림 우선순위는 토스트급(결정 대기 카드보다 먼저 밀려남).
-	// 카드는 만료 시 스스로 RemoveEventCard 를 요청해야 한다(OnRailRemoveRequested 관용구).
-	UFUNCTION(BlueprintCallable, Category = "Office|EventRail")
-	void AddTransientCard(UUserWidget* Card);
 
 	// 레일 전체 비우기 (오피스 이탈/레이어 파괴)
 	UFUNCTION(BlueprintCallable, Category = "Office|EventRail")
@@ -78,10 +73,6 @@ private:
 	// Entries 의 보조 인덱스 — 키로 조기 해제하기 위한 것. 정리는 DetachEntry 한 곳에서만(모든 제거 경로가 거기를 지난다).
 	UPROPERTY()
 	TMap<int32, UNotificationElementWidget*> KeyedToasts;
-
-	// AddTransientCard 로 들어온 엔트리 — TrimToMax 가 NotificationElement 와 같은 급으로 본다. 정리는 DetachEntry 한 곳.
-	UPROPERTY()
-	TSet<TObjectPtr<UUserWidget>> TransientEntries;
 
 	void AppendEntry(UUserWidget* Entry);
 	void DetachEntry(UUserWidget* Entry);

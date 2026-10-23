@@ -15,9 +15,20 @@ static constexpr float MedalGlossDuration = 0.4f;
 
 void UHQLevelUpCelebrationWidget::SetLevelUpInfo(int32 InOldLevel, int32 InNewLevel, const FText& InRewardText)
 {
+	bTitleMode = false;   // PushPromptClass 는 클래스당 인스턴스를 재사용한다 ― 모드 비트를 데이터와 같은 자리에서 끈다
 	CachedOldLevel = InOldLevel;
 	CachedNewLevel = InNewLevel;
 	CachedRewardText = InRewardText;
+}
+
+void UHQLevelUpCelebrationWidget::SetTitlePromotion(const FText& InOldTitle, const FText& InNewTitle, int32 InOldTier, int32 InNewTier)
+{
+	bTitleMode = true;
+	CachedOldTitle = InOldTitle;
+	CachedNewTitle = InNewTitle;
+	CachedOldLevel = InOldTier;   // 메달 숫자와 0.6s 스왑 연출을 그대로 재사용한다
+	CachedNewLevel = InNewTier;
+	CachedRewardText = FText::GetEmpty();   // 호칭 승격엔 즉시 보상이 없다 - 플레이트는 접힌다
 }
 
 void UHQLevelUpCelebrationWidget::NativeOnActivated()
@@ -30,11 +41,17 @@ void UHQLevelUpCelebrationWidget::NativeOnActivated()
 		BackgroundBtn->OnClicked.AddDynamic(this, &UHQLevelUpCelebrationWidget::OnBackgroundClicked);
 	}
 
-	// 텍스트 설정
+	// 텍스트 설정 ― WBP baked 문구는 레벨업 전용이라 모드마다 다시 주입한다 (인스턴스 재사용)
+	if (LevelUpTitleText)
+		LevelUpTitleText->SetText(FText::FromString(bTitleMode ? TEXT("RANK UP!") : TEXT("LEVEL UP!")));   // Bungee = 한글 글리프 0, 라틴만
+	if (EyebrowText)
+		EyebrowText->SetText(FText::FromString(bTitleMode ? TEXT("기업 등급이 올랐습니다") : TEXT("본사 레벨업")));
+	if (MedalCaptionText)
+		MedalCaptionText->SetText(FText::FromString(bTitleMode ? TEXT("등급") : TEXT("LEVEL")));
 	if (OldLevelText)
-		OldLevelText->SetText(FText::FromString(FString::Printf(TEXT("Lv.%d"), CachedOldLevel)));
+		OldLevelText->SetText(bTitleMode ? CachedOldTitle : FText::FromString(FString::Printf(TEXT("Lv.%d"), CachedOldLevel)));
 	if (NewLevelText)
-		NewLevelText->SetText(FText::FromString(FString::Printf(TEXT("Lv.%d"), CachedNewLevel)));
+		NewLevelText->SetText(bTitleMode ? CachedNewTitle : FText::FromString(FString::Printf(TEXT("Lv.%d"), CachedNewLevel)));
 	if (RewardDescText)
 		RewardDescText->SetText(CachedRewardText);
 	if (TouchToCloseText)
@@ -362,6 +379,19 @@ void UHQLevelUpCelebrationWidget::NativeTick(const FGeometry& MyGeometry, float 
 		float Pulse = 0.65f + 0.35f * FMath::Sin((IntroTimer - 1.2f) * 3.f);
 		TouchToCloseText->SetRenderOpacity(Pulse);
 	}
+}
+
+UWidget* UHQLevelUpCelebrationWidget::GetCloseTargetWidget() const
+{
+	if (!bIntroComplete)
+	{
+		return nullptr;
+	}
+	// 글자가 탭을 먹으면 아래 버튼이 못 받는다 — 그때는 전체 화면 버튼을 그대로 짚는다
+	const bool bTextPassesTap = TouchToCloseText
+		&& (TouchToCloseText->GetVisibility() == ESlateVisibility::HitTestInvisible
+			|| TouchToCloseText->GetVisibility() == ESlateVisibility::SelfHitTestInvisible);
+	return bTextPassesTap ? static_cast<UWidget*>(TouchToCloseText) : static_cast<UWidget*>(BackgroundBtn);
 }
 
 void UHQLevelUpCelebrationWidget::OnBackgroundClicked()

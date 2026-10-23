@@ -27,9 +27,13 @@ struct FDecorationCardTable : public FTableRowBase
 
 	// ========== 표시 정보 ==========
 
-	// 장식품 이름
+	// 내부 식별 이름(로그용). 카드에는 DisplayName 을 쓴다.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Display")
 	FName Name;
+
+	// 카드에 보이는 이름. 비어 있으면 이름 줄을 숨긴다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Display")
+	FText DisplayName;
 
 	// 장식품 설명
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Display")

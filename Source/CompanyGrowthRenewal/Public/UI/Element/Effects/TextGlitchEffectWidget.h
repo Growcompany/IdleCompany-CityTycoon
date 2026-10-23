@@ -14,7 +14,7 @@ class URetainerBox;
  * RetainerBox에 글리치 머티리얼을 적용하여 텍스트에 효과 부여
  * 블루프린트에서 디자인하고 C++에서 텍스트 설정
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UTextGlitchEffectWidget : public UUserWidget
 {
 	GENERATED_BODY()

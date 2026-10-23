@@ -3,16 +3,29 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "CommonActivatableWidget.h"
+#include "UI/AnimatedActivatableWidget.h"
 #include "ConfirmCancelWidget.generated.h"
 
 class UCommonTextBlock;
 class UButtonWidget;
 class UNamedSlot;
 class UCommonButtonStyle;
+class UImage;
+class UTexture2D;
+class UPanelHeaderWidget;
 
 DECLARE_MULTICAST_DELEGATE(FOnConfirmDelegate);
 DECLARE_MULTICAST_DELEGATE(FOnCancelDelegate);
+
+// 텍스처는 C++ 가 주입한다 ― WBP 에 텍스처 하드참조를 만들지 않기 위해
+UENUM(BlueprintType)
+enum class EConfirmDialogIcon : uint8
+{
+    None,
+    Warning,
+    Delete,
+    Info
+};
 
 /**
  * 확인/취소 대화상자 위젯
@@ -21,11 +34,14 @@ DECLARE_MULTICAST_DELEGATE(FOnCancelDelegate);
  * - 컴포넌트 사용: ContentSlot에 커스텀 UI 삽입 (LaunchConfirm, ProjectReport 등)
  */
 UCLASS()
-class COMPANYGROWTHRENEWAL_API UConfirmCancelWidget : public UCommonActivatableWidget
+class COMPANYGROWTHRENEWAL_API UConfirmCancelWidget : public UAnimatedActivatableWidget
 {
 	GENERATED_BODY()
 
 public:
+    UConfirmCancelWidget();
+    virtual void SynchronizeProperties() override;
+
     FOnConfirmDelegate OnConfirm;
     FOnCancelDelegate OnCancel;
 
@@ -36,6 +52,10 @@ public:
     // 제목 텍스트 설정
     UFUNCTION(BlueprintCallable, Category = "Dialog")
     void SetTitle(const FText& Title);
+
+    // 제목 옆 아이콘 종류 설정 (None 이면 접힘)
+    UFUNCTION(BlueprintCallable, Category = "Dialog")
+    void SetTitleIconType(EConfirmDialogIcon Type);
 
     /**
      * 제목/버튼 라벨을 WBP Default* 값으로 되돌린다.
@@ -95,12 +115,28 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialog|Style")
     TSubclassOf<UCommonButtonStyle> CancelButtonStyle;
 
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Dialog|Appearance")
+    FName ThemeKey;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Dialog|Appearance")
+    FName HeaderPatternKey;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Dialog|Appearance")
+    FName SideGradientKey;
+
 protected:
     virtual void NativePreConstruct() override;
     virtual void NativeConstruct() override;
 
-    UPROPERTY(meta = (BindWidget))
+    UPROPERTY(meta = (BindWidgetOptional))
     UCommonTextBlock* TitleText;
+
+    UPROPERTY(meta = (BindWidgetOptional))
+    UPanelHeaderWidget* PanelHeader;
+
+    // 아이콘 자리가 없는 WBP 도 그대로 살아야 하므로 Optional
+    UPROPERTY(meta = (BindWidgetOptional))
+    UImage* TitleIcon;
 
     // 단독 사용 시 텍스트 표시 (ContentSlot 안에 배치하면 단독/컴포넌트 둘 다 지원)
     UPROPERTY(meta = (BindWidgetOptional))
@@ -121,4 +157,5 @@ protected:
 
     UFUNCTION()
     void OnCancelButtonClicked();
+
 };

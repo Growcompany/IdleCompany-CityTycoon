@@ -18,7 +18,7 @@ class UChatManagerSubsystem;
  * - 채팅 아이콘 + 반투명 배경 + 최근 메시지 1줄
  * - 클릭 시 ChatPanelWidget 열기
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UChatMiniLogWidget : public UUserWidget
 {
 	GENERATED_BODY()
@@ -49,6 +49,11 @@ private:
 
 	FDelegateHandle MessagesReceivedHandle;
 	FDelegateHandle ConnectionChangedHandle;
+	FDelegateHandle PromptCountHandle;
+	TWeakObjectPtr<class UUIBase> PromptSource;
+
+	// 가운데 창이 떠 있는 동안은 숨는다 ― 창 테두리에 잘려 두 창이 겹친 것처럼 보이지 않게
+	void HandlePromptCountChanged(int32 PromptCount);
 
 	// 메시지 표시 후 페이드아웃 타이머
 	FTimerHandle FadeOutTimerHandle;

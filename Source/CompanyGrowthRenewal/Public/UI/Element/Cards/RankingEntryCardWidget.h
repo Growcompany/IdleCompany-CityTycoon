@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "Data/RankingData.h"
+#include "UI/Element/Common/ListIntroStagger.h"
 #include "RankingEntryCardWidget.generated.h"
 
 class UTextBlock;
@@ -26,6 +27,8 @@ public:
 
 	// 데이터 설정
 	void SetEntryData(const FRankingEntry& InEntry);
+	void SetVisitEnabled(bool bEnabled);
+	void SetScoreAvailable(bool bAvailable);
 
 	// 리스트 채움 시 순차 슬라이드인 시작. OrderIndex = 카드 순번 (Spacer 제외한 루프 인덱스)
 	void PlayIntro(int32 OrderIndex);
@@ -39,9 +42,10 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UTextBlock> RankText = nullptr;
 
-	// 플레이어 이름 버튼 (UI_Element_Button)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	TObjectPtr<UCommonButtonBase> PlayerNameButton = nullptr;
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UTextBlock> PlayerNameText = nullptr;
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UCommonButtonBase> RowButton = nullptr;
 
 	// HQ 레벨 텍스트
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
@@ -61,19 +65,11 @@ protected:
 
 private:
 	FRankingEntry CachedEntry;
+	bool bVisitEnabled = true;
 
 	UFUNCTION()
 	void OnMoveBtnClicked();
 
 	// 슬라이드인 상태 (FloatingNumberWidget 의 NativeTick 수동 보간 패턴)
-	float IntroElapsed = 0.f;
-	float IntroDelay = 0.f;
-	bool bIntroPlaying = false;
-
-	static constexpr float IntroDuration = 0.28f;
-	static constexpr float IntroSlideX = 60.f;
-	static constexpr float IntroStagger = 0.06f;
-	static constexpr float IntroMaxDelay = 0.48f;   // 화면 밖 카드까지 끝없이 늦어지지 않게 캡
-
-	static float EaseOutCubic(float A);
+	FListIntroStagger Intro;
 };

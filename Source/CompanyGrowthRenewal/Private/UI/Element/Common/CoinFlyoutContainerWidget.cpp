@@ -7,13 +7,18 @@
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/Image.h"
-#include "Components/TextBlock.h"
+#include "Components/SizeBox.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Blueprint/WidgetTree.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
 #include "Engine/Texture2D.h"
 #include "Manager/SoundManagerSubsystem.h"
 #include "UI/UISoundTags.h"
 #include "Global/GlobalUtilFunctions.h"
+#include "UI/Element/Common/IncomeGlyphMetrics.h"
+
+static constexpr float IncomeGlyphDisplayScale = 1.50f;
 
 bool UCoinFlyoutContainerWidget::Initialize()
 {
@@ -27,9 +32,12 @@ bool UCoinFlyoutContainerWidget::Initialize()
 		WidgetTree->RootWidget = CoinCanvas;
 	}
 
-	// 일시적 게임 피드백 수익 텍스트용 NEXON Bold 폰트
-	IncomeFont = TSoftObjectPtr<UObject>(FSoftObjectPath(
-		TEXT("/Game/CompanyGrowth/Font/NEXONLv1GothicBold_Font.NEXONLv1GothicBold_Font"))).LoadSynchronous();
+	IncomeGlyphMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(
+		TEXT("/Game/CompanyGrowth/UI/Materials/DamageNumber/M_UI_IncomeGlyph.M_UI_IncomeGlyph"))).LoadSynchronous();
+	if (!IncomeGlyphMaterial)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CoinFlyout] M_UI_IncomeGlyph material is missing"));
+	}
 
 	return bSuccess;
 }
@@ -154,6 +162,62 @@ void UCoinFlyoutContainerWidget::SpawnStreamCoin(FVector2D StartAbsolute, FVecto
 	StreamCoins.Add(Data);
 }
 
+void UCoinFlyoutContainerWidget::UpdateIncomeGlyphColors(FLinearColor MoneyColor)
+{
+	if (CachedIncomeGlyphColor.Equals(MoneyColor)) return;
+
+	const float Lum = 0.2126f * MoneyColor.R + 0.7152f * MoneyColor.G + 0.0722f * MoneyColor.B;
+	auto Saturated = [Lum](float C) { return FMath::Clamp(Lum + (C - Lum) * 1.65f, 0.0f, 1.0f) * 0.85f; };
+	const FLinearColor Base(Saturated(MoneyColor.R), Saturated(MoneyColor.G), Saturated(MoneyColor.B), 1.0f);
+	auto Brightened = [](float C) { return FMath::Min(C * 1.35f, 1.0f); };
+
+	for (const TPair<int32, UMaterialInstanceDynamic*>& Entry : IncomeGlyphMIDs)
+	{
+		UMaterialInstanceDynamic* MID = Entry.Value;
+		MID->SetVectorParameterValue(TEXT("TopColor"),
+			FLinearColor(Brightened(Base.R), Brightened(Base.G), Brightened(Base.B), 1.0f));
+		MID->SetVectorParameterValue(TEXT("MidColor"), Base);
+		MID->SetVectorParameterValue(TEXT("BottomColor"),
+			FLinearColor(Base.R * 0.5f, Base.G * 0.5f, Base.B * 0.5f, 1.0f));
+		MID->SetScalarParameterValue(TEXT("MidStop"), 0.44f);
+	}
+	CachedIncomeGlyphColor = MoneyColor;
+}
+
+UMaterialInstanceDynamic* UCoinFlyoutContainerWidget::GetIncomeGlyphMID(int32 GlyphIndex, FLinearColor MoneyColor)
+{
+	if (!IncomeGlyphMaterial) return nullptr;
+	if (UMaterialInstanceDynamic** Cached = IncomeGlyphMIDs.Find(GlyphIndex))
+	{
+		UpdateIncomeGlyphColors(MoneyColor);
+		return *Cached;
+	}
+
+	const TCHAR* AssetName = IncomeGlyphMetrics::Glyphs[GlyphIndex].AssetName;
+	const FString TexturePath = FString::Printf(
+		TEXT("/Game/CompanyGrowth/UI/Textures/Effect/IncomeGlyph/48/T_UI_IncomeGlyph_%s.T_UI_IncomeGlyph_%s"),
+		AssetName, AssetName);
+	UTexture2D* Texture = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TexturePath)).LoadSynchronous();
+	if (!Texture)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CoinFlyout] Missing income glyph texture: %s"), *TexturePath);
+		return nullptr;
+	}
+
+	UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(IncomeGlyphMaterial, this);
+	if (!MID) return nullptr;
+	MID->SetTextureParameterValue(TEXT("Glyph"), Texture);
+	MID->SetVectorParameterValue(TEXT("RimColor"), FLinearColor::Black);
+	MID->SetVectorParameterValue(TEXT("KeyColor"), FLinearColor::White);
+	MID->SetScalarParameterValue(TEXT("GlossStrength"), 0.18f);
+	MID->SetScalarParameterValue(TEXT("GlossPos"), 0.18f);
+	MID->SetScalarParameterValue(TEXT("GlossWidth"), 0.18f);
+	IncomeGlyphMIDs.Add(GlyphIndex, MID);
+	CachedIncomeGlyphColor = FLinearColor::Transparent;
+	UpdateIncomeGlyphColors(MoneyColor);
+	return MID;
+}
+
 void UCoinFlyoutContainerWidget::SpawnIncomeText(
 	FVector2D StartAbsolute,
 	int64 Amount,
@@ -161,6 +225,38 @@ void UCoinFlyoutContainerWidget::SpawnIncomeText(
 	FLinearColor MoneyColor)
 {
 	if (!CoinCanvas || Amount <= 0) return;
+	const FString AmountLabel = Amount < 1000
+		? FString::Printf(TEXT("+%lld"), Amount)
+		: Amount < 10000
+			? FString::Printf(TEXT("+%lld,%03lld"), Amount / 1000, Amount % 1000)
+			: UGlobalUtilFunctions::FormatFundsAmount(Amount, true).ToString();
+	TArray<int32> GlyphIndices;
+	GlyphIndices.Reserve(AmountLabel.Len());
+	float AdvanceWidth = 0.0f;
+	for (TCHAR Character : AmountLabel)
+	{
+		int32 GlyphIndex = INDEX_NONE;
+		for (int32 Candidate = 0; Candidate < UE_ARRAY_COUNT(IncomeGlyphMetrics::Glyphs); ++Candidate)
+		{
+			if (IncomeGlyphMetrics::Glyphs[Candidate].Character == Character)
+			{
+				GlyphIndex = Candidate;
+				break;
+			}
+		}
+		if (GlyphIndex == INDEX_NONE)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[CoinFlyout] Unsupported income glyph: %c"), Character);
+			return;
+		}
+		GlyphIndices.Add(GlyphIndex);
+		AdvanceWidth += IncomeGlyphMetrics::Glyphs[GlyphIndex].Advance * IncomeGlyphDisplayScale;
+	}
+	if (!IncomeGlyphMaterial || GlyphIndices.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CoinFlyout] Income glyph row cannot be drawn"));
+		return;
+	}
 
 	// 전역 상한 — 오래된 것부터 제거
 	while (IncomeTexts.Num() >= MaxIncomeTexts)
@@ -197,32 +293,47 @@ void UCoinFlyoutContainerWidget::SpawnIncomeText(
 		}
 	}
 
-	UTextBlock* Txt = WidgetTree->ConstructWidget<UTextBlock>(
-		UTextBlock::StaticClass(), *FString::Printf(TEXT("IncomeText_%d"), IncomeId));
-	if (!Txt)
-	{
-		IncomeRow->RemoveFromParent();
-		return;
-	}
+	USizeBox* GlyphBounds = WidgetTree->ConstructWidget<USizeBox>(
+		USizeBox::StaticClass(), *FString::Printf(TEXT("IncomeGlyphBounds_%d"), IncomeId));
+	UCanvasPanel* GlyphCanvas = WidgetTree->ConstructWidget<UCanvasPanel>(
+		UCanvasPanel::StaticClass(), *FString::Printf(TEXT("IncomeGlyphCanvas_%d"), IncomeId));
+	if (!GlyphBounds || !GlyphCanvas) return;
+	const float Inset = (IncomeGlyphMetrics::RasterPadding - IncomeGlyphMetrics::Rim) * IncomeGlyphDisplayScale;
+	GlyphBounds->SetWidthOverride(AdvanceWidth + 2.0f * IncomeGlyphMetrics::Rim * IncomeGlyphDisplayScale);
+	GlyphBounds->SetHeightOverride(IncomeGlyphMetrics::BoxHeight * IncomeGlyphDisplayScale - 2.0f * Inset);
+	GlyphBounds->AddChild(GlyphCanvas);
 
-	// 실제 Money 델타는 공용 자금 계약의 한국식 축약과 양수 부호를 그대로 사용한다.
-	Txt->SetText(UGlobalUtilFunctions::FormatFundsAmount(Amount, true));
-	Txt->SetJustification(ETextJustify::Center);
-	if (IncomeFont)
+	float Pen = 0.0f;
+	for (int32 GlyphOffset = 0; GlyphOffset < GlyphIndices.Num(); ++GlyphOffset)
 	{
-		FSlateFontInfo Font(IncomeFont, IncomeFontSize, FName(TEXT("Default")));
-		Font.OutlineSettings.OutlineSize = 1;
-		Font.OutlineSettings.OutlineColor = FLinearColor(0.0f, 0.0f, 0.0f, 1.0f);
-		Txt->SetFont(Font);
+		const int32 GlyphIndex = GlyphIndices[GlyphOffset];
+		const IncomeGlyphMetrics::FGlyph& Glyph = IncomeGlyphMetrics::Glyphs[GlyphIndex];
+		UMaterialInstanceDynamic* MID = GetIncomeGlyphMID(GlyphIndex, MoneyColor);
+		if (!MID)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[CoinFlyout] Income glyph row failed for '%s'"), *AmountLabel);
+			return;
+		}
+		UImage* GlyphImage = WidgetTree->ConstructWidget<UImage>(
+			UImage::StaticClass(), *FString::Printf(TEXT("IncomeGlyph_%d_%d"), IncomeId, GlyphOffset));
+		if (!GlyphImage) return;
+		GlyphImage->SetBrushFromMaterial(MID);
+		FSlateBrush GlyphBrush = GlyphImage->GetBrush();
+		GlyphBrush.ImageSize = FVector2D(Glyph.BoxWidth, IncomeGlyphMetrics::BoxHeight) * IncomeGlyphDisplayScale;
+		GlyphImage->SetBrush(GlyphBrush);
+		GlyphImage->SetDesiredSizeOverride(GlyphBrush.ImageSize);
+		GlyphImage->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		if (UCanvasPanelSlot* GlyphCanvasSlot = GlyphCanvas->AddChildToCanvas(GlyphImage))
+		{
+			GlyphCanvasSlot->SetAutoSize(false);
+			GlyphCanvasSlot->SetSize(GlyphBrush.ImageSize);
+			GlyphCanvasSlot->SetPosition(FVector2D(Pen - Inset, -Inset));
+		}
+		Pen += Glyph.Advance * IncomeGlyphDisplayScale;
 	}
-	// DT Money 프레젠테이션 색을 아이콘과 같은 행의 금액 텍스트에 적용한다.
-	Txt->SetColorAndOpacity(FSlateColor(MoneyColor));
-	Txt->SetShadowOffset(FVector2D(1.0f, 1.5f));
-	Txt->SetShadowColorAndOpacity(FLinearColor(0.0f, 0.0f, 0.0f, 0.4f));
-	Txt->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-	if (UHorizontalBoxSlot* TextBoxSlot = IncomeRow->AddChildToHorizontalBox(Txt))
+	if (UHorizontalBoxSlot* GlyphBoxSlot = IncomeRow->AddChildToHorizontalBox(GlyphBounds))
 	{
-		TextBoxSlot->SetVerticalAlignment(VAlign_Center);
+		GlyphBoxSlot->SetVerticalAlignment(VAlign_Center);
 	}
 
 	UCanvasPanelSlot* RowCanvasSlot = CoinCanvas->AddChildToCanvas(IncomeRow);

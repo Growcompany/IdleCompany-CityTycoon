@@ -408,9 +408,8 @@ void UProjectTraitEventHandler::ApplyEventChoice(int32 ChoiceIndex, FStageProgre
 
 	const FProjectEventChoice& Choice = CurrentPendingEvent.Choices[ChoiceIndex];
 
-	// 빌딩 강화 EventResistance (부정 효과 감소) / ViralBoost (긍정 효과 증폭) 배율 조회 — Phase 3
-	float ResistMult = 1.0f;  // 음수 보너스(페널티)에 곱
-	float ViralMult = 1.0f;   // 양수 보너스에 곱
+	// 긍정 이벤트 효과에 적용할 바이럴 강화 배율을 조회한다.
+	float ViralMult = 1.0f;
 	{
 		if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
 		{
@@ -423,8 +422,6 @@ void UProjectTraitEventHandler::ApplyEventChoice(int32 ChoiceIndex, FStageProgre
 					{
 						if (B.BuildingIndex == BuildingIndex)
 						{
-							const int32 ResistLv = B.BuildingData.EnhancementLevels.FindRef(EBuildingEnhancementType::EventResistance);
-							ResistMult = UBuildingEnhancementHelper::CalculateEffectMultiplier(EBuildingEnhancementType::EventResistance, ResistLv);
 							const int32 ViralLv = B.BuildingData.EnhancementLevels.FindRef(EBuildingEnhancementType::ViralBoost);
 							ViralMult = UBuildingEnhancementHelper::CalculateEffectMultiplier(EBuildingEnhancementType::ViralBoost, ViralLv);
 							break;
@@ -434,12 +431,9 @@ void UProjectTraitEventHandler::ApplyEventChoice(int32 ChoiceIndex, FStageProgre
 			}
 		}
 	}
-	// EventResistance 는 "피해 감소" 의미이므로 페널티에 직접 곱하면 강화될수록 페널티가 더 커지는 역효과.
-	// ResistMult(>=1.0) 의 역수를 페널티 잔존률로 사용 — Lv 1000 (Mult 1.5) → 페널티 67% 만 적용.
-	const float PenaltyRetention = 1.0f / FMath::Max(ResistMult, KINDA_SMALL_NUMBER);
-	auto AdjustBonus = [PenaltyRetention, ViralMult](float Bonus) -> float
+	auto AdjustBonus = [ViralMult](float Bonus) -> float
 	{
-		return Bonus >= 0.0f ? (Bonus * ViralMult) : (Bonus * PenaltyRetention);
+		return Bonus > 0.0f ? (Bonus * ViralMult) : Bonus;
 	};
 
 	// 카테고리별 점수 보너스: 고정 점수 가산 (누적 무관, 항상 동일한 변화량 보장)
@@ -459,21 +453,21 @@ void UProjectTraitEventHandler::ApplyEventChoice(int32 ChoiceIndex, FStageProgre
 			ProgressData.Steps[2].AcquiredScore + AdjustBonus(Choice.QAScoreBonus));
 	}
 
-	// 타이머 증감 — 양수(시간 추가) ViralBoost / 음수(시간 감소) EventResistance
+	// 타이머 증가에는 바이럴 강화를 적용하고 감소는 선택지 원값을 적용한다.
 	if (!FMath::IsNearlyZero(Choice.TimerAdjustment))
 	{
 		ProgressData.RemainingTime += AdjustBonus(Choice.TimerAdjustment);
 		ProgressData.RemainingTime = FMath::Max(0.5f, ProgressData.RemainingTime);
 	}
 
-	// 랜덤 카테고리 페널티 (항상 음수 — EventResistance 로 감소)
+	// 랜덤 카테고리 페널티는 선택지 원값을 적용한다.
 	if (Choice.bRandomCategoryPenalty && !FMath::IsNearlyZero(Choice.RandomPenaltyAmount))
 	{
 		int32 RandomStep = FMath::RandRange(0, 2);
 		if (ProgressData.Steps.IsValidIndex(RandomStep))
 		{
 			ProgressData.Steps[RandomStep].AcquiredScore = FMath::Max(0.0f,
-				ProgressData.Steps[RandomStep].AcquiredScore + Choice.RandomPenaltyAmount * PenaltyRetention);
+				ProgressData.Steps[RandomStep].AcquiredScore + Choice.RandomPenaltyAmount);
 		}
 	}
 

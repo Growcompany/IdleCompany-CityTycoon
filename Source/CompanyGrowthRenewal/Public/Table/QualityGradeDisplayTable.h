@@ -6,6 +6,8 @@
 #include "Enum/QualityGrade.h"
 #include "QualityGradeDisplayTable.generated.h"
 
+class UMaterialInterface;
+
 /**
  * 산업(CompanyType) × 품질등급(EQualityGrade) → 한국어 라벨 매핑
  * 같은 등급이라도 산업에 따라 표시명이 다름
@@ -26,6 +28,12 @@ struct FQualityGradeDisplayRow : public FTableRowBase
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Display")
 	FText DisplayName;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Launch Display")
+	TSoftObjectPtr<UMaterialInterface> LaunchMedalMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Launch Display")
+	TSoftObjectPtr<UMaterialInterface> LaunchLetterMaterial;
 
 	static FIntPoint MakeKey(ECompanyType InCompanyType, EQualityGrade InGrade)
 	{

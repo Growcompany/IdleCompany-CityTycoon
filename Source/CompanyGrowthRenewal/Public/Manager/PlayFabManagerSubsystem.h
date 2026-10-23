@@ -23,6 +23,7 @@ namespace PlayFab
 		struct FGetLeaderboardAroundPlayerResult;
 		struct FPlayerLeaderboardEntry;
 		struct FGetTimeResult;
+		struct FGetTitleDataResult;
 	}
 
 	namespace LeaderboardsModels
@@ -98,6 +99,12 @@ public:
 	// 오프라인 보상 계산 요청 이벤트 (OfflineSeconds). USaveLoadManager 가 리스닝해서 실 계산 수행.
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnPlayFabOfflineGainsRequested, float);
 	FOnPlayFabOfflineGainsRequested OnOfflineGainsRequested;
+
+	// TitleData 읽기 (운영 콘텐츠: 이벤트/공지/메일 JSON). 실패는 로그만 남기고(OnGetTitleDataError) 성공만 방송
+	// TMap 의 쉼표가 매크로 인자를 쪼개서 별칭이 필요하다
+	using FPlayFabTitleDataMap = TMap<FString, FString>;
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnPlayFabTitleDataReceived, const FPlayFabTitleDataMap&);
+	FOnPlayFabTitleDataReceived OnTitleDataReceived;
 
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
@@ -177,6 +184,10 @@ public:
 
 	// 오프라인 보상 시퀀스 트리거 (로그인 직후 1회 호출) — 서버 시간 조회 → LastSync 로드 → OfflineSeconds 계산 → OnOfflineGainsRequested 브로드캐스트 → LastSync 갱신
 	void StartOfflineGainsSequence();
+	FDateTime GetOfflineGainsIntervalEndUtc() const { return OfflineGainsIntervalEndUtc; }
+
+	// TitleData 조회 (읽기 전용). 완료 시 OnTitleDataReceived 브로드캐스트
+	void RequestTitleData(const TArray<FString>& Keys);
 
 private:
 	TSharedPtr<PlayFab::UPlayFabClientAPI> PlayFabClientPtr;
@@ -205,11 +216,8 @@ private:
 
 	// Classic API 콜백
 	void OnUpdateLeaderboardSuccess(const PlayFab::ClientModels::FUpdatePlayerStatisticsResult& Result);
-	void OnGetLeaderboardSuccess(const PlayFab::ClientModels::FGetLeaderboardResult& Result);
-	void OnGetLeaderboardAroundSuccess(const PlayFab::ClientModels::FGetLeaderboardAroundPlayerResult& Result);
-
-	// 현재 조회 중인 리더보드 이름 (콜백에서 사용)
-	FString PendingLeaderboardName;
+	void OnGetLeaderboardSuccess(const PlayFab::ClientModels::FGetLeaderboardResult& Result, FString LeaderboardName);
+	void OnGetLeaderboardAroundSuccess(const PlayFab::ClientModels::FGetLeaderboardAroundPlayerResult& Result, FString LeaderboardName);
 
 	// ===== 오프라인 보상 내부 상태 =====
 	// GetTime 결과를 어디에 쓸지 구분 (로그인 직후 시퀀스 vs 하트비트)
@@ -218,6 +226,7 @@ private:
 
 	// 로그인 시퀀스에서 GetTime 결과 임시 저장 → LastSync 조회 완료 시점에 사용
 	int64 PendingServerNow = 0;
+	FDateTime OfflineGainsIntervalEndUtc;
 
 	// LoadPlayerData 응답이 오프라인 시퀀스의 LastSync 인지 구분
 	bool bAwaitingLastSyncResponse = false;
@@ -228,4 +237,8 @@ private:
 
 	void OnGetTimeSuccess(const PlayFab::ClientModels::FGetTimeResult& Result);
 	void OnHeartbeatTick();
+
+	void OnGetTitleDataSuccess(const PlayFab::ClientModels::FGetTitleDataResult& Result);
+	// 시간 시퀀스 상태를 건드리지 않기 위해 OnApiError 와 분리
+	void OnGetTitleDataError(const PlayFab::FPlayFabCppError& Error);
 };

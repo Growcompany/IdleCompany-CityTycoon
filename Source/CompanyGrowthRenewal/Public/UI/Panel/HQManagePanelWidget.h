@@ -8,18 +8,24 @@
 #include "HQManagePanelWidget.generated.h"
 
 class UButtonWidget;
+class UCostActionButtonWidget;
 class UIconWithButtonWidget;
 class UWidgetSwitcher;
-class UBorder;
 class UScrollBox;
+class UHorizontalBox;
 class UCommonButtonGroupBase;
 class UCommonButtonBase;
 class UButton;
-class UCloseButtonWidget;
-class UStatRowWidget;
+class UModalFrameWidget;
+class UHQConditionCardWidget;
+class UHQKpiCellWidget;
 class UCommonTextBlock;
 class UProgressBar;
 class UImage;
+class UTexture2D;
+class UWrapBox;
+class UUniformGridPanel;
+struct FHQRewardSlot;
 enum class EResourceType : uint8;
 
 // 빌딩 목록 정렬 기준 (패널 내부 전용)
@@ -31,175 +37,211 @@ enum class EHQBuildingSortMode : uint8
 };
 
 /**
- * 본사 관리 패널 — 본사/빌딩목록/재무제표 3탭 구성
- * 레이아웃/UX 스펙: docs/05_UI/HQ_PANEL_REDESIGN.md (claim 레벨업 + 가로 3컬럼)
+ * 본사 관리 패널 — 성장 / 운영 현황 / 보유 빌딩 3탭.
+ * 설계·목업 대응표: docs/superpowers/specs/2026-10-11-hq-panel-3tab-design.md
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UHQManagePanelWidget : public UAnimatedActivatableWidget
 {
 	GENERATED_BODY()
 
+public:
+	UWidget* GetGrowthGuideTargetWidget(bool* bOutConditionsUnmet = nullptr) const;
+	bool IsGrowthTabActive() const { return CurrentTabIndex == GrowthTabIndex; }
+
+	// 튜토리얼 M29 — 자동 재생은 ShouldPlay 가 막으므로 명시적으로 부른다(본 적 있어도 재생). 정리는 기존 NativeOnDeactivated 경로가 맡는다
+	bool PlayPanelIntro();
+	// 튜토리얼 M30 — 레벨업 뒤 남은 본사 창을 닫고 건설로 가게 짚는다(헤더 X)
+	UWidget* GetCloseButtonWidget() const;
+	bool IsPanelIntroPlaying() const { return PanelIntroOverlay.IsValid(); }
+
 protected:
 	virtual void NativeOnActivated() override;
 	virtual void NativeOnDeactivated() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
-	// ===== 공용 (헤더 영역) =====
+	// 최초 진입 코치마크 (DT_PanelIntro PanelKey="HQManage")
+	void TryPlayPanelIntro();
+	void HandlePanelIntroFinished();
+	FTimerHandle PanelIntroTimer;
+	TWeakObjectPtr<class UPanelIntroOverlayWidget> PanelIntroOverlay;
 
-	// 배경 클릭 시 닫기
+	// ===== 공용 =====
+
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButton* BackgroundBtn;
 
-	// 닫기 버튼
+	// 공통 셸과 헤더. 본문 탭과 게임 동작은 이 패널이 소유한다.
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UCloseButtonWidget* UIE_CloseButton;
+	TObjectPtr<UModalFrameWidget> ModalFrame;
 
-	// ===== 레일 탭 (UIE_RailTab — 설정창 레일 문법 공용, CommonButtonBase 파생이라 그룹 직접 등록) =====
+	// ===== 레일 탭 — 순서 = ContentSwitcher 인덱스 (성장 0 / 운영 현황 1 / 보유 빌딩 2) =====
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UIconWithButtonWidget* HQTab;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UIconWithButtonWidget* OperationsTab;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UIconWithButtonWidget* BuildingListTab;
 
-	// 재무제표 — 데이터 레이어 전까지 트리에서 Collapsed (숨김 탭)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UIconWithButtonWidget* FinancialTab;
-
-	// ===== 콘텐츠 전환 =====
+	// 레벨업 가능한데 다른 탭을 보는 중이면 성장 탭에 알림 점
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UWidget> GrowthTabAlert;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UWidgetSwitcher* ContentSwitcher;
 
-	// ===== HQ 탭 (인덱스 0) — 좌 컬럼: 레벨 히어로 =====
-	// 신규 멤버는 W1(WBP 재배치) 전까지 Optional — 구 WBP에서도 컴파일/동작 유지
+	// ===== 성장 탭 — 회사 레벨 띠 =====
 
-	// 메달 안 레벨 숫자 ("7" — "LEVEL" 캡션은 트리 정적)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* LevelText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* CurLevelText;
 
-	// Lv 전환 라인 "Lv.7 ▶ Lv.8" — 최대 레벨 시 Cur/Arrow Collapsed
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* CurLevelText = nullptr;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UCommonTextBlock> HeroTitleText;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* TransArrowText = nullptr;
-
-	// 전환 라인 골드 "Lv.8" / 최대 레벨 시 "최고 등급 달성"
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* NextLevelText;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UCommonTextBlock> HeroSubText;
 
 	// 종합 진행바 — 활성 조건들의 정규화 진행률 평균 (이산 충족 카운트 아님)
-	// ※ 선행 글로우 헤드는 의도적으로 없음 — 퍼센트 텍스트가 바 위에 겹친 labeled meter 라 역할이 중복
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UProgressBar* OverallProgressBar;
 
-	// "76%" / 최대 레벨 시 "MAX"
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	// "81%" / 최대 레벨 "MAX"
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UCommonTextBlock* OverallProgressText;
 
-	// 현황 요약 행 — 라벨/색은 WBP 디자이너 값 그대로, cpp는 값만 갱신
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UStatRowWidget* Row_Money;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UStatRowWidget* Row_Buildings;
+	TObjectPtr<UCommonTextBlock> HeroStatusText;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UStatRowWidget* Row_Employees;
+	TObjectPtr<UCommonTextBlock> HeroMissingText;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UStatRowWidget* Row_TopStage;
-
-	// ===== HQ 탭 — 레벨업 조건 체크리스트 =====
-	// DT 값 0 = 조건 없음 → 행 Collapsed. 다음 레벨 없으면 전체 Collapsed.
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UStatRowWidget* Row_Cond_Money;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UStatRowWidget* Row_Cond_Buildings;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UStatRowWidget* Row_Cond_Tier;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UStatRowWidget* Row_Cond_Employees;
-
-	// 시총 조건행 — 2막 레벨 전용이라 대부분 Collapsed. WBP 배치 전에도 패널이 살아야 하므로 Optional
-	// (다른 Row_Cond_* 는 required — WBP 반영 확인 후 required로 승격할 것)
+	// 명판 광택 VFX — 저작에 있으면 동작
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UStatRowWidget* Row_Cond_MarketCap = nullptr;
+	TObjectPtr<UImage> LevelBadgeGloss;
 
-	// ===== HQ 탭 — 보상 스트립(조건 웰 하단) + 하단 밴드 캔디 CTA =====
+	// ===== 성장 탭 — 일반 레벨 본문 =====
 
-	// 보상 스트립 라벨 "Lv.8에 열리는 것"
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UWidget> GrowthBody;
+
+	// DT 목표 0 = 조건 없음 → 카드 Collapsed. 보이는 카드만 2열로 채운다.
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UHQConditionCardWidget* Row_Cond_Money;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UHQConditionCardWidget* Row_Cond_Buildings;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UHQConditionCardWidget* Row_Cond_Tier;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UHQConditionCardWidget* Row_Cond_Employees;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UHQConditionCardWidget* Row_Cond_MarketCap;
+
+	// 조건 카드 묶음 ― 패널 안내(DT_PanelIntro HQManage_1)가 카드 전체를 한 번에 비추는 앵커
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UUniformGridPanel> ConditionGrid;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UCommonTextBlock* RewardTitleText;
 
-	// 해금 칩 — UnlockDescription 없으면 칩째 Collapsed
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UBorder* UnlockChipBox = nullptr;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* UnlockText = nullptr;
-
-	// Lv N+2 미래 칩 — 해금 내용은 가리고 존재만 예고
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UBorder* FutureChipBox = nullptr;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* FutureText = nullptr;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* FutureCaptionText = nullptr;
-
-	// 하단 밴드 — 미충족 시 "남은 조건 N개", 레디 시 Collapsed
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* RemainText = nullptr;
-
-	// 캔디 CTA 안 비용 금액 (부족 시 빨강 — v4 비용 인라인 예외)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* CostAmountText = nullptr;
-
-	// 레벨업 버튼 — claim: 조건 충족 시 활성+샤인 (펄스 금지 — v4)
+	// 다음 레벨에서 실제로 받는 것 — UIE_HQRewardSlot 을 보상 수만큼 런타임 생성
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UButtonWidget* LevelUpButton;
+	TObjectPtr<UWrapBox> RewardSlotBox;
 
-	// ===== 장식 VFX (WBP에 넣은 것만 동작) =====
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* UnlockText;
+
+	// 해금 표에 그림 열이 없는 보상의 아이콘 (저작이 넣는다)
+	UPROPERTY(EditDefaultsOnly, Category = "HQ|Reward")
+	TObjectPtr<UTexture2D> RandomRewardIcon;
+
+	UPROPERTY(EditDefaultsOnly, Category = "HQ|Reward")
+	TObjectPtr<UTexture2D> WorldMapRewardIcon;
+
+	// 보상 칸 사이 (가로, 세로) — 2개일 때만 가로를 넓힌다(큰 칸 3개는 넓으면 한 줄에 안 들어간다)
+	UPROPERTY(EditDefaultsOnly, Category = "HQ|Reward")
+	FVector2D RewardSlotGap = FVector2D(26.f, 18.f);
+
+	UPROPERTY(EditDefaultsOnly, Category = "HQ|Reward")
+	FVector2D FewRewardSlotGap = FVector2D(44.f, 18.f);
+
+	// 레벨업 버튼 — 비용과 승급 조건을 함께 표시한다.
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCostActionButtonWidget* LevelUpButton;
 
 	// 레벨업 가능 동안 CTA 위를 주기 횡단하는 샤인 (버튼 Overlay 안, ClipToBounds 전제)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UImage* CTAShineImage = nullptr;
 
-	// 메달 골드 링 글로우 — 전 조건 충족(레디) 동안만 은은한 브리딩 (스케일 펄스 아님)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UImage* MedalGlowImage = nullptr;
+	// ===== 성장 탭 — 최고 레벨 본문 =====
 
-	// ===== 빌딩 목록 탭 (인덱스 1) =====
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UWidget> MaxBody;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UHorizontalBox> LevelStepBox;
+
+	// ===== 운영 현황 탭 =====
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UHQKpiCellWidget> Kpi_Money;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UHQKpiCellWidget> Kpi_MarketCap;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UHQKpiCellWidget> Kpi_Buildings;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UHQKpiCellWidget> Kpi_Employees;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UCommonTextBlock> IndustryCountText;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UHorizontalBox> IndustryCardBox;
+
+	// ===== 보유 빌딩 탭 =====
 
 	// CommonHierarchicalScrollBox는 UScrollBox 상속 — 부모 타입으로 바인딩
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UScrollBox* BuildingListScrollBox;
 
-	// 정렬 바 — WBP 반영 전까지 Optional (수십 개 빌딩 대비)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UButtonWidget* SortLevelBtn = nullptr;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* ListHeaderText;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UButtonWidget* SortIncomeBtn = nullptr;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UButtonWidget* SortLevelBtn;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UButtonWidget* SortEmployeeBtn = nullptr;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UButtonWidget* SortIncomeBtn;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UButtonWidget* SortEmployeeBtn;
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FHQGrowthGuideTargetTestAccessor;
+#endif
+	static constexpr int32 GrowthTabIndex = 0;
+	static constexpr int32 OperationsTabIndex = 1;
+	static constexpr int32 BuildingsTabIndex = 2;
+	// 애니메이티드 스위처는 전환 페이드가 끝나야 GetActiveWidgetIndex 가 바뀌므로 선택 탭을 따로 든다.
+	int32 CurrentTabIndex = GrowthTabIndex;
+
 	UPROPERTY()
 	UCommonButtonGroupBase* TabButtonGroup = nullptr;
 
 	UPROPERTY()
 	UCommonButtonGroupBase* SortButtonGroup = nullptr;
 
-	// 기본 = 레벨 내림차순. 같은 모드 재클릭 시 방향 토글 (ProductSellModal 컨벤션)
+	// 기본 = 단계 내림차순. 같은 모드 재클릭 시 방향 토글 (ProductSellModal 컨벤션)
 	EHQBuildingSortMode BuildingSortMode = EHQBuildingSortMode::Level;
 	bool bBuildingSortAscending = false;
 
@@ -216,10 +258,10 @@ private:
 	int32 CachedTierBuildingCount = 0;
 	int32 CachedTotalEmployees = 0;
 	int64 CachedMarketCap = 0;
+	bool bCanLevelUpNow = false;
 
 	// 장식 VFX 상태 — 이벤트 구동 패널이라 틱은 VFX 전용 (이미지 없으면 즉시 탈출)
 	bool bCTAShineActive = false;
-	bool bMedalGlowActive = false;
 	float VFXTimer = 0.f;
 	static constexpr float ShinePeriod = 2.6f;     // 스윕 주기 (이동 + 휴지)
 	static constexpr float ShineTravel = 0.6f;     // 횡단 시간
@@ -242,23 +284,30 @@ private:
 
 	void OnLevelUpButtonClicked();
 
-	// bAnimateConditions: 레벨업 직후 2차 연출 — 조건행 카운트업+펀치
-	void UpdateHQInfo(bool bAnimateConditions = false);
+	void UpdateHQInfo();
+	void UpdateGrowthBody(int32 NextLevel);
+	void PopulateLevelSteps();
+	void UpdateOperations(int64 CurrentMoney);
 
 	// Money 변동 경량 경로 — OnResourceChanged는 고빈도라 전체 갱신 금지
 	void RefreshAffordability(int64 CurrentMoney);
 
-	// 해당 레벨의 보상 문구 — "건설 가능 건물 +N" 을 항상 앞세우고 DT 해금 문구가 있으면 뒤에 잇는다.
-	// 보상 스트립과 축하 화면이 같은 문구를 써야 하므로 생성처를 하나로 둔다.
-	// +N 을 상수로 박지 않는 이유 = CSV 에서 구간별로 +2 로 튜닝해도 문구가 따라와야 한다.
+	// 보상 카드와 축하 화면이 같은 DataTable 해금 문구를 사용한다.
 	FText BuildLevelRewardText(int32 Level) const;
 
-	// Money 조건행 — int64는 float 정밀도 한계로 SetCurrentProgress 대신 축약 문자열+바 직접 갱신
-	void UpdateMoneyConditionRow(int64 CurrentMoney);
+	// 보상 칸 — 업종·채용권·랜덤 보상(지급 규칙) / 공장·세계지도(게이트) / 메뉴(DT_MenuUnlock + 메뉴 시트 타일) / 빌딩 종류(DT 크기별)
+	void PopulateRewardSlots(int32 Level);
+	void CollectRewardSlots(int32 Level, TArray<FHQRewardSlot>& OutSlots) const;
+
+	void UpdateCountCondition(UHQConditionCardWidget* Card, const FText& Label, int32 Current, int32 Target, const FText& Unit);
+	// 자금·시총 — int64 는 float 정밀도 한계라 축약 문자열 + 비율 직접 계산 (보유=Floor / 목표=Ceil)
+	void UpdateCurrencyCondition(UHQConditionCardWidget* Card, const FText& Label, int64 Current, int64 Target);
 	void UpdateOverallProgress(int64 CurrentMoney);
 	float ComputeOverallProgress(int64 CurrentMoney) const;
 	int32 ComputeUnmetCount(int64 CurrentMoney) const;
+	FText BuildMissingConditionNames(int64 CurrentMoney) const;
 	void UpdateLevelUpButtonState();
+	void UpdateGrowthTabAlert();
 
 	void PopulateBuildingList();
 	void OnBuildingMoveClicked(int32 BuildingIndex);

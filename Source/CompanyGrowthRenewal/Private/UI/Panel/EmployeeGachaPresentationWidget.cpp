@@ -19,9 +19,12 @@
 #include "UI/UISoundTags.h"
 #include "UI/Gacha/GachaCaptureStage.h"
 #include "UI/Element/Cards/EmployeeIdCardMiniWidget.h"
+#include "UI/Element/Employee/EmployeeRosterCardWidget.h"
 #include "Utils/FWidgetAnimationUtils.h"
 #include "Utils/GachaBatchMath.h"
+#include "Utils/OfficeRecruitHireFxMath.h"
 #include "Blueprint/WidgetTree.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
 #include "Components/TextBlock.h"
 #include "Components/Image.h"
 #include "Components/CanvasPanel.h"
@@ -84,6 +87,10 @@ namespace EmpFx
 	// 사이드 배치 기준점 폴백 — 권위는 런타임 IdCardBox 캔버스 슬롯 (트리 SC_Card = 360,555)
 	constexpr float CardCenterX = 360.f;
 	constexpr float CardCenterY = 555.f;
+	constexpr float OfficeRevealDuration = 0.1f;
+	constexpr float OfficeLandingDuration = 0.22f;
+	constexpr float OfficeLandingSize = 80.f;
+	constexpr float OfficeLandingSoundGap = 0.1f;
 
 	// 런타임 생성 UImage 레이아웃 크기는 Brush.ImageSize 로 고정 —
 	// SetDesiredSizeOverride 는 Slate 미생성 시점 호출이 유실됨 (특성 가챠 5차 실측)
@@ -154,6 +161,9 @@ void UEmployeeGachaPresentationWidget::NativeConstruct()
 
 void UEmployeeGachaPresentationWidget::NativeDestruct()
 {
+	ClearOfficeLandingEffects();
+	if (OfficeEmployeeManager) { OfficeEmployeeManager->OnEmployeePortraitUpdated.RemoveAll(this); }
+	OfficeEmployeeManager = nullptr;
 	if (ConfirmButton) ConfirmButton->OnClicked().RemoveAll(this);
 	if (UIE_CloseButton) UIE_CloseButton->OnCloseClicked.RemoveAll(this);
 
@@ -163,9 +173,9 @@ void UEmployeeGachaPresentationWidget::NativeDestruct()
 	}
 
 	// 명시적 버튼 없이 닫혀도 결과 유실 방지 (idempotent)
-	IsMulti() ? BankAllResults() : BankCurrentResult();
+	if (!bOfficeArrival) { IsMulti() ? BankAllResults() : BankCurrentResult(); }
 
-	if (!bCurrentBanked)
+	if (!bOfficeArrival && !bCurrentBanked)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[GachaReveal] 미적립 상태로 파괴 — 직원 %d명 유실 (대표 ID %d)"),
 			IsMulti() ? BatchResults.Num() : 1, CurrentResult.ResultEmployee.EmployeeID);
@@ -213,7 +223,8 @@ void UEmployeeGachaPresentationWidget::SetupPullBatch(const TArray<FGachaResultD
 	// 센터 사번은 DisplayCard 의 +1 이 아니라 뽑기순번 기준 — 덮어쓴다
 	if (UTextBlock* BandLabel = Cast<UTextBlock>(GetWidgetFromName(TEXT("BandLabel"))))
 	{
-		const int32 Base = RecruitmentManager ? RecruitmentManager->GetTotalHiredCount(CurrentBuildingIndex) : 0;
+		const int32 Base = RecruitmentManager ? RecruitmentManager->GetTotalHiredCount(CurrentBuildingIndex)
+			- (bOfficeArrival ? BatchResults.Num() : 0) : 0;
 		BandLabel->SetText(FText::FromString(FString::Printf(TEXT("ID NO.%03d"), Base + 1 + DisplayOrder[0])));
 	}
 
@@ -267,16 +278,116 @@ void UEmployeeGachaPresentationWidget::SetupPullBatch(const TArray<FGachaResultD
 	BeginStaging(); // RevealRarity = CurrentResult(베스트) 기준 — 기존 로직 그대로
 }
 
+void UEmployeeGachaPresentationWidget::SetupOfficeArrival(const TArray<FGachaResultData>& Results,
+	EGachaTier Tier, int32 BuildingIndex, const TArray<FVector>& SeatTargets)
+{
+	if (OfficeEmployeeManager) { OfficeEmployeeManager->OnEmployeePortraitUpdated.RemoveAll(this); }
+	OfficeEmployeeManager = nullptr;
+	for (UEmployeeIdCardMiniWidget* SideCard : SideCards)
+	{
+		if (SideCard) { SideCard->RemoveFromParent(); }
+	}
+	SideCards.Reset();
+	if (CharacterImage)
+	{
+		FSlateBrush EmptyPhoto = CharacterImage->GetBrush();
+		EmptyPhoto.SetResourceObject(nullptr);
+		CharacterImage->SetBrush(EmptyPhoto);
+	}
+	bOfficeArrival = true;
+	bOfficeArrivalFinished = false;
+	bOfficeCardsPlaced = false;
+	bCurrentBanked = true; // 오피스 흐름이 이미 저장한 결과이므로 위젯은 채용을 소유하지 않는다.
+	if (Results.IsEmpty() || Results.Num() != SeatTargets.Num())
+	{
+		UE_LOG(LogTemp, Error, TEXT("[GachaReveal] 오피스 카드/좌석 수 불일치: %d / %d"), Results.Num(), SeatTargets.Num());
+		bOfficeArrivalFinished = true;
+		RemoveFromParent();
+		return;
+	}
+
+	OfficeSeatTargets = SeatTargets;
+	OfficeTime = 0.f;
+	OfficeRevealTimes.Init(-1.f, Results.Num());
+	OfficeRevealRequested.Init(false, Results.Num());
+	OfficePortraitReady.Init(false, Results.Num());
+	BatchResults = Results;
+	DisplayOrder.Reset();
+	for (int32 RollIndex = 0; RollIndex < Results.Num(); ++RollIndex) { DisplayOrder.Add(RollIndex); }
+	CurrentResult = Results[0];
+	CurrentTier = Tier;
+	CurrentBuildingIndex = BuildingIndex;
+	DisplayCard(CurrentResult);
+	RevealRarity = CurrentResult.PotentialRarity;
+	RarityColor = FLootBoxRarityUtility::GetRarityColor(RevealRarity);
+	bReduceMotion = USettingsManagerSubsystem::IsReduceMotion(this);
+	if (PhotoRing) { PhotoRing->SetColorAndOpacity(RarityColor); }
+	RebuildOfficeLandingEffects();
+	if (StageCanvas && Results.Num() > 1) { SpawnSideCards(); }
+	OfficeEmployeeManager = GetGameInstance() ? GetGameInstance()->GetSubsystem<UEmployeeManager>() : nullptr;
+	if (OfficeEmployeeManager)
+	{
+		OfficeEmployeeManager->OnEmployeePortraitUpdated.RemoveAll(this);
+		OfficeEmployeeManager->OnEmployeePortraitUpdated.AddUObject(this, &ThisClass::HandleOfficePortraitUpdated);
+		for (int32 RollIndex = 0; RollIndex < Results.Num(); ++RollIndex) { RefreshOfficePortrait(RollIndex); }
+	}
+	bCurrentBanked = true;
+	bStagingActive = false;
+	if (DimBG) { DimBG->SetVisibility(ESlateVisibility::Collapsed); }
+	if (SlotBar) { SlotBar->SetVisibility(ESlateVisibility::Collapsed); }
+	if (PeekClip) { PeekClip->SetVisibility(ESlateVisibility::Collapsed); }
+	if (IdCardBox)
+	{
+		IdCardBox->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+		IdCardBox->SetVisibility(Results.Num() > 1 ? ESlateVisibility::Collapsed : ESlateVisibility::Hidden);
+	}
+	if (StampBox)
+	{
+		StampBox->SetRenderOpacity(1.f);
+		StampBox->SetRenderScale(FVector2D::UnitVector);
+	}
+	if (ConfirmButton) { ConfirmButton->SetVisibility(ESlateVisibility::Collapsed); }
+	if (UIE_CloseButton) { UIE_CloseButton->SetVisibility(ESlateVisibility::Collapsed); }
+	if (SlotGlow) { SlotGlow->SetVisibility(ESlateVisibility::Collapsed); }
+	if (CardBackGlow) { CardBackGlow->SetVisibility(ESlateVisibility::Collapsed); }
+	if (BeamImage) { BeamImage->SetVisibility(ESlateVisibility::Collapsed); }
+	if (FlashOverlay) { FlashOverlay->SetVisibility(ESlateVisibility::Collapsed); }
+	if (ShockwaveRing) { ShockwaveRing->SetVisibility(ESlateVisibility::Collapsed); }
+	for (UImage* DustImage : DustImages) { if (DustImage) { DustImage->SetRenderOpacity(0.f); } }
+	if (!StageCanvas || !IdCardBox)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[GachaReveal] 오피스 카드 캔버스 또는 원본 사원증 누락"));
+	}
+}
+
+void UEmployeeGachaPresentationWidget::NotifyOfficeEmployeeArrived(int32 RollIndex)
+{
+	if (bOfficeArrival && OfficeRevealRequested.IsValidIndex(RollIndex))
+	{
+		OfficeRevealRequested[RollIndex] = true;
+	}
+}
+
 void UEmployeeGachaPresentationWidget::SpawnSideCards()
 {
 	SideCards.Reset();
-	if (!StageCanvas || DisplayOrder.Num() < 2) { return; }
+	if (!StageCanvas || DisplayOrder.Num() < 2)
+	{
+		return;
+	}
 
 	UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
-	UEmployeeManager* EmpMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UEmployeeManager>() : nullptr;
 	// DT 행이 아직 없으면 사이드 생략 — 센터 단독 연출로 강등(크래시 금지)
 	TSubclassOf<UUserWidget> CardClass = TableMgr ? TableMgr->GetWidgetClass(EWidgetType::EmployeeIdCardMini) : nullptr;
-	if (!CardClass) { return; }
+	if (!CardClass)
+	{
+		if (bOfficeArrival)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[GachaReveal] EmployeeIdCardMini 등록 에셋 누락"));
+			SideCards.SetNum(DisplayOrder.Num());
+		}
+		return;
+	}
 
 	// 배치 권위 = 센터 사원증 슬롯. 사이드는 같은 앵커/정렬/위치에서 출발하고 X 는 딜링이 RenderTranslation 으로
 	FAnchors CardAnchors(0.f, 0.f);
@@ -294,22 +405,26 @@ void UEmployeeGachaPresentationWidget::SpawnSideCards()
 		}
 	}
 
-	const int32 Base = RecruitmentManager ? RecruitmentManager->GetTotalHiredCount(CurrentBuildingIndex) : 0;
+	const int32 Base = RecruitmentManager ? RecruitmentManager->GetTotalHiredCount(CurrentBuildingIndex)
+		- (bOfficeArrival ? BatchResults.Num() : 0) : 0;
 	const ECompanyType CompanyType = GetBuildingCompanyType();
 
-	for (int32 k = 1; k < DisplayOrder.Num(); ++k)
+	for (int32 k = bOfficeArrival ? 0 : 1; k < DisplayOrder.Num(); ++k)
 	{
 		const FGachaResultData& R = BatchResults[DisplayOrder[k]];
 		UEmployeeIdCardMiniWidget* MiniCard = GetOwningPlayer()
 			? CreateWidget<UEmployeeIdCardMiniWidget>(GetOwningPlayer(), CardClass)
 			: CreateWidget<UEmployeeIdCardMiniWidget>(this, CardClass);
-		if (!MiniCard) { continue; }
+		if (!MiniCard)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[GachaReveal] 미니 사원증 생성 실패: display %d, roll %d"), k, DisplayOrder[k]);
+			SideCards.Add(nullptr); // 슬롯을 압축하면 뒤 카드가 다른 직원의 좌석으로 날아간다.
+			continue;
+		}
 
 		const FText DeptText = TableMgr->GetDepartmentDisplayName(CompanyType, R.ResultEmployee.Department);
-		const FString RankStr = EmpMgr
-			? EmpMgr->GetRankDisplayName(UEmployeeTypeHelper::GetRankFromEnhancementLevel(R.ResultEmployee.EnhancementLevel))
-			: FString();
-		MiniCard->SetCardData(R, Base + 1 + DisplayOrder[k], DeptText, RankStr);
+		// 채용 직후는 전원 Lv.1 인턴이라 직급이 카드를 구분해 주지 못한다 — 부서와 등급만 남긴다.
+		MiniCard->SetCardData(R, Base + 1 + DisplayOrder[k], DeptText, FString());
 
 		if (UCanvasPanelSlot* CardSlot = StageCanvas->AddChildToCanvas(MiniCard))
 		{
@@ -319,8 +434,9 @@ void UEmployeeGachaPresentationWidget::SpawnSideCards()
 			CardSlot->SetPosition(CardPosition);
 			CardSlot->SetZOrder(SideZOrder);
 		}
-		// 공개 전 Collapsed — opacity 0 만으론 자식이 비치는 사례 (기존 실측)
-		MiniCard->SetVisibility(ESlateVisibility::Collapsed);
+		// 공개 전 Collapsed — opacity 0 만으론 자식이 비치는 사례 (기존 실측).
+		// 오피스는 사진이 준비돼 있으면 첫 갱신에 바로 공개하므로 Hidden 으로 배치를 미리 계산해 둔다(Collapsed 면 첫 프레임에 글자가 흩어졌다).
+		MiniCard->SetVisibility(bOfficeArrival ? ESlateVisibility::Hidden : ESlateVisibility::Collapsed);
 		MiniCard->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
 		SideCards.Add(MiniCard);
 	}
@@ -369,6 +485,37 @@ void UEmployeeGachaPresentationWidget::EndCharacterCapture()
 	CaptureStage = nullptr;
 }
 
+void UEmployeeGachaPresentationWidget::RefreshOfficePortrait(int32 RollIndex)
+{
+	if (!bOfficeArrival || !OfficeEmployeeManager || !BatchResults.IsValidIndex(RollIndex)) { return; }
+	const int32 EmployeeID = BatchResults[RollIndex].ResultEmployee.EmployeeID;
+	if (!OfficeEmployeeManager->IsPortraitCurrent(EmployeeID) || OfficeEmployeeManager->IsPortraitPending(EmployeeID)) { return; }
+	UTexture2D* Portrait = UEmployeeRosterCardWidget::LoadPortraitTexture(EmployeeID, FVector2D(262.f, 327.f));
+	if (!Portrait) { return; }
+	if (RollIndex == 0 && CharacterImage)
+	{
+		CharacterImage->SetBrushFromTexture(Portrait, true);
+		CharacterImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+		if (BatchResults.Num() == 1) { OfficePortraitReady[RollIndex] = true; }
+	}
+	if (SideCards.IsValidIndex(RollIndex) && SideCards[RollIndex])
+	{
+		OfficePortraitReady[RollIndex] |= SideCards[RollIndex]->SetPhotoTexture(Portrait);
+	}
+}
+
+void UEmployeeGachaPresentationWidget::HandleOfficePortraitUpdated(int32 EmployeeID, int64)
+{
+	for (int32 RollIndex = 0; RollIndex < BatchResults.Num(); ++RollIndex)
+	{
+		if (BatchResults[RollIndex].ResultEmployee.EmployeeID == EmployeeID)
+		{
+			RefreshOfficePortrait(RollIndex);
+			break;
+		}
+	}
+}
+
 void UEmployeeGachaPresentationWidget::DisplayCard(const FGachaResultData& Result)
 {
 	const FEmployeeInstance& Emp = Result.ResultEmployee;
@@ -381,7 +528,8 @@ void UEmployeeGachaPresentationWidget::DisplayCard(const FGachaResultData& Resul
 	// 사번 — 이 건물 누적 채용 순번 (표시 시점 = 적립 전이라 +1). Bungee 폰트 = ASCII 만.
 	if (UTextBlock* BandLabel = Cast<UTextBlock>(GetWidgetFromName(TEXT("BandLabel"))))
 	{
-		const int32 Ordinal = (RecruitmentManager ? RecruitmentManager->GetTotalHiredCount(CurrentBuildingIndex) : 0) + 1;
+		const int32 TotalHired = RecruitmentManager ? RecruitmentManager->GetTotalHiredCount(CurrentBuildingIndex) : 0;
+		const int32 Ordinal = bOfficeArrival ? TotalHired - FMath::Max(1, BatchResults.Num()) + 1 : TotalHired + 1;
 		BandLabel->SetText(FText::FromString(FString::Printf(TEXT("ID NO.%03d"), Ordinal)));
 	}
 
@@ -403,15 +551,10 @@ void UEmployeeGachaPresentationWidget::DisplayCard(const FGachaResultData& Resul
 		ResultDepartmentText->SetText(DeptText);
 	}
 
-	// 직급 (강화 레벨 → 직급 표시명)
+	// 채용 직후는 전원 Lv.1 인턴이라 표기해도 카드끼리 구분이 안 된다 — 공개 화면은 등급이 주인공이다.
 	if (ResultRankText)
 	{
-		if (UEmployeeManager* EmployeeManager = GetGameInstance() ? GetGameInstance()->GetSubsystem<UEmployeeManager>() : nullptr)
-		{
-			FString RankStr = EmployeeManager->GetRankDisplayName(
-				UEmployeeTypeHelper::GetRankFromEnhancementLevel(Emp.EnhancementLevel));
-			ResultRankText->SetText(FText::FromString(RankStr));
-		}
+		ResultRankText->SetVisibility(ESlateVisibility::Collapsed);
 	}
 }
 
@@ -433,7 +576,7 @@ ECompanyType UEmployeeGachaPresentationWidget::GetBuildingCompanyType() const
 
 void UEmployeeGachaPresentationWidget::BankCurrentResult()
 {
-	if (bCurrentBanked || !RecruitmentManager)
+	if (bOfficeArrival || bCurrentBanked || !RecruitmentManager)
 	{
 		return;
 	}
@@ -447,7 +590,7 @@ void UEmployeeGachaPresentationWidget::BankCurrentResult()
 
 void UEmployeeGachaPresentationWidget::BankAllResults()
 {
-	if (bCurrentBanked || !RecruitmentManager)
+	if (bOfficeArrival || bCurrentBanked || !RecruitmentManager)
 	{
 		return;
 	}
@@ -463,32 +606,52 @@ void UEmployeeGachaPresentationWidget::BankAllResults()
 		}
 		return;
 	}
+	TArray<FGachaResultData> PendingResults;
+	for (const FGachaResultData& Result : BatchResults)
+	{
+		if (!EmpMgr || !EmpMgr->GetEmployeeData(Result.ResultEmployee.EmployeeID))
+		{
+			PendingResults.Add(Result);
+		}
+	}
+	if (PendingResults.IsEmpty())
+	{
+		bCurrentBanked = true;
+		return;
+	}
 
 	int32 Seated = 0, Benched = 0;
-	const bool bAllHired = RecruitmentManager->ConfirmGachaHireBatch(BatchResults, PreferredWorkstationWeak.Get(), Seated, Benched);
+	const bool bAllHired = RecruitmentManager->ConfirmGachaHireBatch(PendingResults, PreferredWorkstationWeak.Get(), Seated, Benched);
 	if (Seated + Benched > 0)
 	{
-		if (!bAllHired)
+		if (!bAllHired || Seated + Benched != PendingResults.Num())
 		{
-			// 정원/캡처 게이트를 전부 선통과한 뒤라 도달 불가 경로 — 도달했다면 게이트가 새는 것
 			UE_LOG(LogTemp, Error, TEXT("[GachaReveal] 배치 채용 부분 실패 — 요청 %d / 처리 %d"),
-				BatchResults.Num(), Seated + Benched);
+				PendingResults.Num(), Seated + Benched);
 		}
-		bCurrentBanked = true;
-		if (UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+		bCurrentBanked = bAllHired && Seated + Benched == PendingResults.Num();
+		if (bCurrentBanked)
 		{
-			UIMgr->ShowNotification(FText::FromString(FString::Printf(
-				TEXT("직원 %d명을 채용했습니다 ― %d명 착석, %d명 대기"), Seated + Benched, Seated, Benched)),
-				3.0f, ENotificationType::Success);
+			if (UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+			{
+				UIMgr->ShowNotification(FText::FromString(FString::Printf(
+					TEXT("직원 %d명을 채용했습니다 ― %d명 착석, %d명 대기"), Seated + Benched, Seated, Benched)),
+					3.0f, ENotificationType::Success);
+			}
 		}
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("[GachaReveal] 배치 채용 전량 실패 — 결과 %d건 폐기 (빌딩 %d)"),
-			BatchResults.Num(), CurrentBuildingIndex);
-		// 전량 실패 원인은 정원 초과뿐 = 오버레이 안에서 해소 불가 → 재탭도 영원히 실패한다.
-		// 유저를 창에 가두느니 폐기하고 닫게 한다(캡처 게이트는 시간이 해소하므로 위에서 이미 return).
-		bCurrentBanked = true;
+		UE_LOG(LogTemp, Error, TEXT("[GachaReveal] 배치 채용 실패 — 미처리 %d건 (빌딩 %d)"),
+			PendingResults.Num(), CurrentBuildingIndex);
+	}
+	if (!bCurrentBanked)
+	{
+		if (UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+		{
+			UIMgr->ShowNotification(NSLOCTEXT("Recruitment", "BatchHireRetry", "미등록 직원이 남았습니다. 잠시 후 [확인]을 다시 눌러주세요"),
+				3.0f, ENotificationType::Warning);
+		}
 	}
 }
 
@@ -509,6 +672,7 @@ void UEmployeeGachaPresentationWidget::ShowPlacementToast() const
 
 void UEmployeeGachaPresentationWidget::OnConfirmClicked()
 {
+	if (bOfficeArrival) { return; }
 	IsMulti() ? BankAllResults() : BankCurrentResult();
 	if (!bCurrentBanked)
 	{
@@ -519,6 +683,7 @@ void UEmployeeGachaPresentationWidget::OnConfirmClicked()
 
 void UEmployeeGachaPresentationWidget::OnCloseClicked()
 {
+	if (bOfficeArrival) { return; }
 	IsMulti() ? BankAllResults() : BankCurrentResult();
 	if (!bCurrentBanked)
 	{
@@ -579,10 +744,10 @@ void UEmployeeGachaPresentationWidget::BeginStaging()
 	bStagingActive = true;
 
 	ResetStagingVisuals();
-	RebuildDustPool();
+	if (!bOfficeArrival) { RebuildDustPool(); }
 
 	// 딤 강화 — 뒤 채용 패널 비침 방지 (특성 가챠 실측값 동기)
-	if (DimBG) { DimBG->SetBrushTintColor(FSlateColor(FLinearColor(0.008f, 0.011f, 0.02f, 0.96f))); }
+	if (DimBG && !bOfficeArrival) { DimBG->SetBrushTintColor(FSlateColor(FLinearColor(0.008f, 0.011f, 0.02f, 0.96f))); }
 
 	// 등급색 텔레그래프 — 빌드업부터 결과 색 노출. FX 크기 = DT ImageSize 기준 RenderScale (레이아웃 불침투)
 	if (SlotGlow)
@@ -608,12 +773,16 @@ void UEmployeeGachaPresentationWidget::BeginStaging()
 	if (PhotoRing) { PhotoRing->SetColorAndOpacity(RarityColor); }
 	// 테두리 순환광(TrailLine)은 기각 — 마스크가 사원증 비율과 부정합 + 인쇄물 재질과 상충 (2026-07-11 PIE 판정)
 
-	PlayUITag(CGUISoundTags::GachaBuildup);
+	if (!bOfficeArrival) { PlayUITag(CGUISoundTags::GachaBuildup); }
 }
 
 void UEmployeeGachaPresentationWidget::ResetStagingVisuals()
 {
-	if (DimBG) { DimBG->SetRenderOpacity(0.f); }
+	if (DimBG)
+	{
+		DimBG->SetRenderOpacity(0.f);
+		if (bOfficeArrival) { DimBG->SetVisibility(ESlateVisibility::Collapsed); }
+	}
 	auto Hide = [](UImage* Img) { if (Img) { Img->SetRenderOpacity(0.f); } };
 	Hide(SlotGlow); Hide(CardBackGlow); Hide(BeamImage); Hide(FlashOverlay); Hide(ShockwaveRing);
 	// 공개 전 카드는 Collapsed — opacity 0 만으론 자식(포토플레이트/도장)이 비치는 사례 (2026-07-11 PIE)
@@ -670,7 +839,8 @@ void UEmployeeGachaPresentationWidget::RebuildDustPool()
 void UEmployeeGachaPresentationWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
-	if (bStagingActive) { UpdateStaging(InDeltaTime); }
+	if (bOfficeArrival && !bOfficeArrivalFinished) { UpdateOfficeArrival(InDeltaTime); }
+	else if (bStagingActive) { UpdateStaging(InDeltaTime); }
 }
 
 void UEmployeeGachaPresentationWidget::UpdateStaging(float DeltaTime)
@@ -680,7 +850,7 @@ void UEmployeeGachaPresentationWidget::UpdateStaging(float DeltaTime)
 	const float B = BuildDuration;
 	const int32 Tier = TierOf(RevealRarity);
 
-	if (DimBG) { DimBG->SetRenderOpacity(FMath::Clamp(T / EmpFx::DimFadeDuration, 0.f, 1.f)); }
+	if (DimBG && !bOfficeArrival) { DimBG->SetRenderOpacity(FMath::Clamp(T / EmpFx::DimFadeDuration, 0.f, 1.f)); }
 
 	// ① 빌드업 — 슬롯 등급광 램프 + 카드 티징 상승/진동, 플래시 직후 급소멸
 	if (SlotGlow)
@@ -843,7 +1013,7 @@ void UEmployeeGachaPresentationWidget::UpdateStaging(float DeltaTime)
 	}
 
 	// 버튼/닫기 지연 등장 (+페이드/라이즈) — 그 전까지 오조작 차단. 펄스 없음 (특성 가챠 기각 승계)
-	if (!bButtonsShown && T >= ButtonsTime)
+	if (!bOfficeArrival && !bButtonsShown && T >= ButtonsTime)
 	{
 		bButtonsShown = true;
 		if (ConfirmButton) { ConfirmButton->SetVisibility(ESlateVisibility::Visible); }
@@ -886,6 +1056,144 @@ void UEmployeeGachaPresentationWidget::UpdateDealing()
 	}
 }
 
+UWidget* UEmployeeGachaPresentationWidget::GetOfficeCardForRoll(int32 RollIndex) const
+{
+	if (!OfficeRevealTimes.IsValidIndex(RollIndex)) { return nullptr; }
+	if (bOfficeArrival)
+	{
+		if (OfficeRevealTimes.Num() == 1) { return RollIndex == 0 ? IdCardBox : nullptr; }
+		return SideCards.IsValidIndex(RollIndex) ? SideCards[RollIndex].Get() : nullptr;
+	}
+	if (!IsMulti()) { return RollIndex == 0 ? IdCardBox : nullptr; }
+	const int32 DisplayIndex = DisplayOrder.Find(RollIndex);
+	return DisplayIndex == 0 ? IdCardBox
+		: (DisplayIndex > 0 && SideCards.IsValidIndex(DisplayIndex - 1) ? SideCards[DisplayIndex - 1].Get() : nullptr);
+}
+
+void UEmployeeGachaPresentationWidget::ClearOfficeLandingEffects()
+{
+	for (UImage* LandingPulse : OfficeLandingPulses)
+	{
+		if (LandingPulse) { LandingPulse->RemoveFromParent(); }
+	}
+	OfficeLandingPulses.Reset();
+}
+
+void UEmployeeGachaPresentationWidget::RebuildOfficeLandingEffects()
+{
+	ClearOfficeLandingEffects();
+	OfficeLandingPulses.SetNum(BatchResults.Num());
+	OfficeNextLandingSoundTime = 0.f;
+	if (!StageCanvas || !WidgetTree || !ShockwaveRing || !ShockwaveRing->GetBrush().GetResourceObject()) { return; }
+
+	// 공개 위젯이 이미 로드한 DT 링 브러시를 공유하고 직원별 잔상만 독립적으로 유지한다.
+	for (int32 RollIndex = 0; RollIndex < BatchResults.Num(); ++RollIndex)
+	{
+		UImage* LandingPulse = WidgetTree->ConstructWidget<UImage>();
+		LandingPulse->SetBrush(ShockwaveRing->GetBrush());
+		EmpFx::SetImageLayoutSize(LandingPulse, FVector2D(EmpFx::OfficeLandingSize));
+		LandingPulse->SetColorAndOpacity(FLootBoxRarityUtility::GetRarityColor(BatchResults[RollIndex].PotentialRarity));
+		LandingPulse->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+		LandingPulse->SetVisibility(ESlateVisibility::Collapsed);
+		if (UCanvasPanelSlot* PulseSlot = StageCanvas->AddChildToCanvas(LandingPulse))
+		{
+			PulseSlot->SetAutoSize(true);
+			PulseSlot->SetAnchors(FAnchors(0.f, 0.f));
+			PulseSlot->SetAlignment(FVector2D(0.5f, 0.5f));
+			PulseSlot->SetZOrder(30);
+		}
+		OfficeLandingPulses[RollIndex] = LandingPulse;
+	}
+}
+
+void UEmployeeGachaPresentationWidget::UpdateOfficeArrival(float DeltaTime)
+{
+	const FGeometry CanvasGeometry = StageCanvas ? StageCanvas->GetCachedGeometry() : GetCachedGeometry();
+	const FGeometry ViewportGeometry = UWidgetLayoutLibrary::GetViewportWidgetGeometry(this);
+	const FVector2D ViewportSize = ViewportGeometry.GetLocalSize();
+	if (ViewportSize.X <= 1.f || ViewportSize.Y <= 1.f
+		|| CanvasGeometry.GetLocalSize().X <= 1.f || CanvasGeometry.GetLocalSize().Y <= 1.f) return;
+	const FVector2D CanvasOrigin = CanvasGeometry.AbsoluteToLocal(ViewportGeometry.LocalToAbsolute(FVector2D::ZeroVector));
+	const float CanvasPerViewportX = (CanvasGeometry.AbsoluteToLocal(ViewportGeometry.LocalToAbsolute(FVector2D(1.f, 0.f))) - CanvasOrigin).Size();
+	const float CanvasPerViewportY = (CanvasGeometry.AbsoluteToLocal(ViewportGeometry.LocalToAbsolute(FVector2D(0.f, 1.f))) - CanvasOrigin).Size();
+	if (CanvasPerViewportX <= KINDA_SMALL_NUMBER || CanvasPerViewportY <= KINDA_SMALL_NUMBER) return;
+	OfficeTime += DeltaTime;
+	// 첫 갱신에는 숨긴 카드를 배치해 공개 첫 프레임부터 사진과 글자가 함께 그려지게 한다.
+	for (int32 RollIndex = 0; bOfficeCardsPlaced && RollIndex < OfficeRevealTimes.Num(); ++RollIndex)
+	{
+		if (OfficeRevealTimes[RollIndex] >= 0.f) continue;
+		const float SincePrevious = RollIndex > 0 && OfficeRevealTimes[RollIndex - 1] >= 0.f
+			? OfficeTime - OfficeRevealTimes[RollIndex - 1] : -1.f;
+		if (OfficeRecruitHireFx::CanRevealCard(OfficeRevealRequested[RollIndex], RollIndex == 0, SincePrevious))
+		{
+			OfficeRevealTimes[RollIndex] = OfficeTime;
+			if (OfficeTime >= OfficeNextLandingSoundTime)
+			{
+				OfficeNextLandingSoundTime = OfficeTime + EmpFx::OfficeLandingSoundGap;
+				if (UGameInstance* GI = GetGameInstance())
+					if (USoundManagerSubsystem* SoundMgr = GI->GetSubsystem<USoundManagerSubsystem>())
+						SoundMgr->PlayUISoundWithParams(CGUISoundTags::GachaStamp, 0.45f);
+			}
+			UE_LOG(LogTemp, Log, TEXT("[GachaReveal] desk card revealed roll=%d employee=%d photo=%d frame=%llu"), RollIndex,
+				BatchResults[RollIndex].ResultEmployee.EmployeeID, OfficePortraitReady[RollIndex] ? 1 : 0, GFrameCounter);
+		}
+		break;
+	}
+	bOfficeCardsPlaced = true;
+	APlayerController* PlayerController = GetOwningPlayer();
+	bool bAllComplete = true;
+	for (int32 RollIndex = 0; RollIndex < OfficeRevealTimes.Num(); ++RollIndex)
+	{
+		const bool bRevealed = OfficeRevealTimes[RollIndex] >= 0.f;
+		const float Age = bRevealed ? OfficeTime - OfficeRevealTimes[RollIndex] : 0.f;
+		const float Opacity = OfficeRecruitHireFx::SeatCardOpacity(Age);
+		bAllComplete &= bRevealed && Opacity <= 0.f;
+		FVector2D SeatPoint = ViewportSize * 0.5f;
+		const bool bSeatProjected = PlayerController && OfficeSeatTargets.IsValidIndex(RollIndex)
+			&& UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(PlayerController,
+				OfficeSeatTargets[RollIndex] + FVector(0.f, 0.f, 110.f), SeatPoint, true);
+		const OfficeRecruitHireFx::FCardPose Pose = OfficeRecruitHireFx::SeatCardPose(
+			ViewportSize, SeatPoint, bSeatProjected, FVector2D(CanvasPerViewportX, CanvasPerViewportY));
+		if (UWidget* Card = GetOfficeCardForRoll(RollIndex))
+		{
+			if (UCanvasPanelSlot* CardSlot = Cast<UCanvasPanelSlot>(Card->Slot))
+			{
+				CardSlot->SetAnchors(FAnchors(0.f, 0.f));
+				CardSlot->SetAlignment(FVector2D(0.5f, 0.5f));
+				CardSlot->SetPosition(CanvasGeometry.AbsoluteToLocal(ViewportGeometry.LocalToAbsolute(Pose.Center)));
+				CardSlot->SetZOrder(10 + RollIndex);
+			}
+			Card->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+			FWidgetTransform CardTransform = OfficeRecruitHireFx::SeatCardRockAt(Age, bReduceMotion);
+			CardTransform.Scale *= Pose.Scale * (bReduceMotion ? 1.f
+				: OfficeRecruitHireFx::RevealScale(Age / EmpFx::OfficeRevealDuration));
+			Card->SetRenderTransform(CardTransform);
+			Card->SetRenderOpacity(Opacity);
+			Card->SetVisibility(!bRevealed ? ESlateVisibility::Hidden
+				: Opacity > 0.f ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		}
+		if (UImage* LandingPulse = OfficeLandingPulses[RollIndex])
+		{
+			FVector2D PulsePoint;
+			const bool bPulseProjected = bRevealed && PlayerController
+				&& UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(PlayerController, OfficeSeatTargets[RollIndex], PulsePoint, true);
+			const float Progress = FMath::Clamp(Age / EmpFx::OfficeLandingDuration, 0.f, 1.f);
+			LandingPulse->SetVisibility(bPulseProjected && Progress < 1.f ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+			if (bPulseProjected)
+				if (UCanvasPanelSlot* PulseSlot = Cast<UCanvasPanelSlot>(LandingPulse->Slot))
+					PulseSlot->SetPosition(CanvasGeometry.AbsoluteToLocal(ViewportGeometry.LocalToAbsolute(PulsePoint)));
+			const float PulseScale = bReduceMotion ? 1.f : FMath::Lerp(0.55f, 1.25f, FWidgetAnimationUtils::EaseOutQuad(Progress));
+			LandingPulse->SetRenderScale(FVector2D(CanvasPerViewportX, CanvasPerViewportY) * PulseScale);
+			LandingPulse->SetRenderOpacity(0.65f * (1.f - Progress));
+		}
+	}
+	if (bAllComplete)
+	{
+		bOfficeArrivalFinished = true;
+		RemoveFromParent();
+	}
+}
+
 void UEmployeeGachaPresentationWidget::SkipToSettle()
 {
 	if (!bFlashFired)
@@ -900,6 +1208,7 @@ void UEmployeeGachaPresentationWidget::SkipToSettle()
 
 FReply UEmployeeGachaPresentationWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
+	if (bOfficeArrival) { return FReply::Handled(); }
 	// 빌드업~공개 중 탭 = 스킵 (여운 상태로 시간 점프)
 	if (bStagingActive && StageTime < SettleTime)
 	{

@@ -26,9 +26,9 @@ public:
 
 	// x and y index of cells
 	UPROPERTY(BlueprintReadWrite , EditAnywhere, Category = "Placement System");
-	int32 x;
+	int32 x = 0;
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Placement System");
-	int32 y;
+	int32 y = 0;
 
 	FGuid reserverBuildingId;
 

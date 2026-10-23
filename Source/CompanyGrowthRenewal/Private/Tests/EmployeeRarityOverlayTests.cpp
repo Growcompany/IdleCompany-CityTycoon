@@ -1,5 +1,5 @@
 #include "Misc/AutomationTest.h"
-#include "Entity/Officeworker/StickOfficeworker.h"
+#include "Entity/Officeworker/FunnyOfficeworker.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -11,13 +11,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCGREmployeeRarityOverlayContextTest::RunTest(const FString& Parameters)
 {
 	TestFalse(TEXT("Office Premium 직원은 희귀도 Overlay를 표시하지 않는다"),
-		AStickOfficeworker::ShouldShowRarityOverlay(EGachaTier::Premium, false));
+		AFunnyOfficeworker::ShouldShowRarityOverlay(EGachaTier::Premium, false));
 	TestTrue(TEXT("가챠 공개 중인 Premium 직원만 희귀도 Overlay를 표시한다"),
-		AStickOfficeworker::ShouldShowRarityOverlay(EGachaTier::Premium, true));
+		AFunnyOfficeworker::ShouldShowRarityOverlay(EGachaTier::Premium, true));
 	TestFalse(TEXT("가챠 공개 중이어도 Advanced 직원은 희귀도 Overlay를 표시하지 않는다"),
-		AStickOfficeworker::ShouldShowRarityOverlay(EGachaTier::Advanced, true));
+		AFunnyOfficeworker::ShouldShowRarityOverlay(EGachaTier::Advanced, true));
 	TestFalse(TEXT("가챠 공개 중이어도 Normal 직원은 희귀도 Overlay를 표시하지 않는다"),
-		AStickOfficeworker::ShouldShowRarityOverlay(EGachaTier::Normal, true));
+		AFunnyOfficeworker::ShouldShowRarityOverlay(EGachaTier::Normal, true));
 
 	return true;
 }

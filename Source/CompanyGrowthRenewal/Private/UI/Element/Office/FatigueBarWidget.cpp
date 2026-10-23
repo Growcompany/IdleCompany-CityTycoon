@@ -7,6 +7,16 @@ void UFatigueBarWidget::SetFatigue01(float InFill01)
 {
 	const float Fill01 = FMath::Clamp(InFill01, 0.f, 1.f);
 
+	// 이력 현상: 이미 보이면 HideThreshold 아래로 내려가야 숨고, 숨겨져 있으면 ShowThreshold 를 넘어야 뜬다
+	const bool bShow = bShown ? (Fill01 >= HideThreshold) : (Fill01 >= ShowThreshold);
+	bShown = bShow;
+	SetVisibility(bShow ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	if (!bShow)
+	{
+		LastFill01 = Fill01;
+		return;
+	}
+
 	// throttle 은 호출부(워커 1초 게이트)가 1차로 거르지만, 동일값 재호출도 차단
 	if (FMath::IsNearlyEqual(Fill01, LastFill01, 0.005f))
 	{

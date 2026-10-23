@@ -19,7 +19,7 @@ class UNiagaraSystemWidget;
 /**
  * 재사용 가능한 업그레이드 슬롯 위젯
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UUpgradeSlot : public UUserWidget
 {
 	GENERATED_BODY()

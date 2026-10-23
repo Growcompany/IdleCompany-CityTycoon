@@ -22,7 +22,7 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnOccStatRowInvest, EEmployeeStatIndex /*St
  * - SetCanInvest(bCanInvest): 남은 포인트 0이면 [+] 숨김(비활성)
  * - [+] → OnRowInvestRequested.Broadcast(StatIndex) (부모가 구독해 재발신)
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOccStatRowWidget : public UUserWidget
 {
 	GENERATED_BODY()

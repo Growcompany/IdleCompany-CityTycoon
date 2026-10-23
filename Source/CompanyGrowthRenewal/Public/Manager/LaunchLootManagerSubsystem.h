@@ -55,6 +55,9 @@ public:
 	// 출시 확정 전용: 키 매핑 + 티어 보너스 + 결과 캐시 (보상 리빌 UI 가 GetLastLaunchLoot 로 동기 조회)
 	void RollLaunchLoot(int32 ReviewScore, int32 ProjectTier);
 
+	// 결과 창에 공개한 보상을 그대로 지급. 호출부가 출시 상태와 함께 저장한다.
+	void GrantLaunchLoot(const TArray<FMissionReward>& Rewards);
+
 	const TArray<FMissionReward>& GetLastLaunchLoot() const { return LastLaunchLoot; }
 
 	// 롤을 돌지 않는 출시 경로(제조/최소점수 미달)가 이전 출시의 캐시를 보상 리빌 UI에 재노출하지 않게 하는 안전핀

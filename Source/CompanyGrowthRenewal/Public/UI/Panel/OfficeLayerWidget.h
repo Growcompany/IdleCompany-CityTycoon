@@ -32,6 +32,7 @@ class UTexture2D;
 class UButton;
 class UDiamondProgressWidget;
 class URevenueRateChipWidget;
+class UItemTooltipWidget;
 
 /**
  * OfficeMap 전용 레이어 위젯
@@ -54,6 +55,14 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButtonWidget* BackButton;
 
+	// BackButton 과 뒤 판을 함께 품은 Overlay ― 집중 모드에서 화살표만 사라지고 빈 판이 남지 않게 페이드 대상이 된다
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UWidget> BackPlateBox = nullptr;
+
+	// 회사 블록(액자·이름 판·재화 칩) ― 개발·제조 연구 중에는 진행 줄이 이 자리로 올라오므로 흐려 사라진다
+	UPROPERTY(meta = (BindWidget))
+	TObjectPtr<UWidget> TopBlock = nullptr;
+
 	// 블루프린트에 배치된 리소스 위젯 참조 (이름 = WBP UI_OfficeLayer 의 위젯명과 일치해야 바인딩됨)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UResourceWidget* UIE_Resource_Money;
@@ -74,32 +83,23 @@ protected:
 	URevenueRateChipWidget* RevenueRateChip = nullptr;
 
 	// ===== 상단 밴드 (재화와 같은 상시 레이어에 통합 — OfficeMain 에서 이관) =====
-	// 회사 배너: 산업 시그니처색 플레이트 + 글리프 + 회사명/산업 + 빌딩 레벨 배지
-	UPROPERTY(meta = (BindWidgetOptional))
-	UImage* CompanyPlate;
-
-	UPROPERTY(meta = (BindWidgetOptional))
+	// 회사 블록 = 도시 화면 TopBlock 과 같은 짜임: 건물 액자 + 모서리 단계 마름모 + 칩 줄 아래 이름 판
+	UPROPERTY(meta = (BindWidget))
 	UImage* CompanyProfileIcon;
 
-	UPROPERTY(meta = (BindWidgetOptional))
+	UPROPERTY(meta = (BindWidget))
 	UCommonTextBlock* CompanyNameText;
 
-	UPROPERTY(meta = (BindWidgetOptional))
-	UCommonTextBlock* CompanyIndustryText;
-
-	UPROPERTY(meta = (BindWidgetOptional))
+	UPROPERTY(meta = (BindWidget))
 	UCommonTextBlock* CompanyLevelText;
 
-	// 뱃지(마름모) 테두리 자체가 EXP 게이지 ― 크기 변화 0, 막히면 테두리 색만 앰버라 별도 경고점이 필요 없다
-	UPROPERTY(meta = (BindWidgetOptional))
+	// 마름모 뱃지 테두리 위에 겹친 진행 게이지 ― 크기 변화 0
+	UPROPERTY(meta = (BindWidget))
 	UDiamondProgressWidget* CompanyLevelProgress;
 
-	// 플레이트 블록 전체를 덮는 투명 버튼 — 탭하면 빌딩 레벨 로드맵
-	UPROPERTY(meta = (BindWidgetOptional))
+	// 액자와 이름 판을 함께 품은 투명 버튼 — 탭하면 현재 단계의 진행 수치
+	UPROPERTY(meta = (BindWidget))
 	UButton* CompanyPlateButton;
-
-	UPROPERTY(meta = (BindWidgetOptional))
-	UButtonWidget* CodexButton;
 
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
@@ -108,9 +108,6 @@ protected:
 	UFUNCTION()
 	void OnBackButtonClicked();
 
-	// 포트폴리오(도감) 패널 열기 — OfficeMain 에서 이관
-	void OnCodexBtnClicked();
-
 public:
 	// 디자이너가 배치한 미션 트래커 인스턴스 (없으면 nullptr → 매니저가 폴백 생성)
 	UMissionTrackerWidget* GetMissionTracker() const { return MissionTracker; }
@@ -118,6 +115,11 @@ public:
 	// 상단 밴드 데이터 갱신 (회사배너/티어 진행) — OfficeMain 이 라이프사이클 전환마다 호출.
 	// 재화는 기존 델리게이트로 자동, 이건 정적 데이터라 명시 갱신.
 	void RefreshTopBar();
+	void SetOfficePlacementBubblesSuppressed(bool bSuppressed);
+	// 직원 패널이 화면을 쓰는 동안 상단 바·버블 레이어 전체를 접는다 (직전 가시성으로 복원)
+	void SetSuppressedForEmployeePanel(bool bSuppressed);
+	// 진행 줄이 맨 위로 올라오는 동안 회사 블록을 숨긴다 ― 사무실 화면이 진행 줄 자리와 같은 판정으로 부른다
+	void SetTopBlockHidden(bool bHidden);
 
 	// 수익 수집 코인 연출 재생 (오피스 진입/일괄 수집용 — 중앙 팝 원샷)
 	void PlayStoredRevenueCollection(int64 CollectedAmount);
@@ -147,9 +149,13 @@ private:
 
 	void HandleWorkstationCountChanged();
 
-	// 회사 플레이트 블록 탭 → 빌딩 레벨 로드맵 (뱃지가 말하는 대상과 같은 건물)
+	// 회사 플레이트 블록 탭 → 현재 단계의 정확 진행 수치 팝오버 (재화 칩과 같은 "축약 표시 / 탭하면 정확수치" 관례)
 	UFUNCTION()
 	void HandleCompanyPlateClicked();
+
+	// 위 팝오버 인스턴스 — 매번 만들지 않고 하나를 재사용한다(ResourceWidget 선례)
+	UPROPERTY()
+	TObjectPtr<UItemTooltipWidget> ActiveTooltip = nullptr;
 
 	// 인원 칩(로스터 / 인원 상한) 갱신의 유일 경로
 	void UpdateEmployeeChip();
@@ -175,11 +181,13 @@ private:
 	// 잠금 상태 진입/해제 — 히트테스트는 즉시 끊고, 페이드는 틱이 이어받는다
 	void SetFocusLocked(bool bLocked);
 
-	// 페이드 알파(1=완전히 사라짐)를 두 버튼 opacity 에 반영
+	// 페이드 알파(1=완전히 사라짐)를 나가기 컨트롤 opacity 에 반영
 	void ApplyFocusFade(float Alpha);
 
 	bool bFocusLocked = false;
 	float FocusFadeAlpha = 0.0f;
+	bool bTopBlockHidden = false;
+	float TopBlockFadeAlpha = 0.0f;
 	static constexpr float FocusFadeSpeed = 12.0f;   // FInterpTo 속도(≈0.2s) — 하단 도크와 동일 체감
 
 	// 코인 연출 중 Money 위젯 자동 업데이트 억제
@@ -223,6 +231,10 @@ private:
 	// 책상 위 빈 좌석 버블 컨테이너 (InGameCanvas에 월드 추적 자식으로 부착)
 	UPROPERTY()
 	UBubbleContainerWidget* BubbleContainer = nullptr;
+	bool bPlacementBubblesSuppressed = false;
+	ESlateVisibility BubbleVisibilityBeforePlacement = ESlateVisibility::SelfHitTestInvisible;
+	bool bSuppressedForEmployeePanel = false;
+	ESlateVisibility VisibilityBeforeEmployeePanel = ESlateVisibility::SelfHitTestInvisible;
 
 	// 배정 변경 전용 델리게이트가 없어 주기적으로 전체 재평가 (책상 변화는 드물어 2초면 충분)
 	float BubbleReevalTimer = 0.0f;

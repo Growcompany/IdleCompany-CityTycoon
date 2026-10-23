@@ -94,6 +94,12 @@ public:
 	// 특정 도시 블록(부지)에 소속된 건물 목록 — 수용량 카운트(Task 4)에서 사용
 	TArray<ABuildingBaseActor*> GetBuildingsOnPlot(FName PlotId) const;
 
+	// 호출부 버퍼 재사용용 — 값 반환판은 프레임당 수십 번 불릴 때 힙 할당이 쌓인다.
+	void GetBuildingsOnPlot(FName PlotId, TArray<ABuildingBaseActor*>& OutBuildings) const;
+
+	// 개수만 필요한 자리(수용량 판정)는 배열을 만들지 않는다.
+	int32 CountBuildingsOnPlot(FName PlotId) const;
+
 	// 부지에 건물을 더 지을 여지가 있는지 = 현재 건물 수 < 수용량(BuildingCapacity). (BuildModal 게이트)
 	// 격자 제거로 물리적 빈칸 스캔 폐기 — 카운트 캡이 한도, 물리적 배치 가능 여부는 PlacementHandler 가 판정.
 	bool HasFreeCapacityOnPlot(FName PlotId, int32 Capacity) const;

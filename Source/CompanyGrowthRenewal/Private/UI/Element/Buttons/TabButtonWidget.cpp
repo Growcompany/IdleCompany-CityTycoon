@@ -3,6 +3,8 @@
 #include "UI/Element/Buttons/TabButtonWidget.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
 #include "CommonButtonBase.h"
+#include "Components/Image.h"
+#include "Engine/Texture2D.h"
 
 void UTabButtonWidget::NativePreConstruct()
 {
@@ -12,8 +14,37 @@ void UTabButtonWidget::NativePreConstruct()
 	{
 		TabButton->SetButtonText(Text);
 		TabButton->SetMinDimensions(MinWidth, MinHeight);
-		ApplySelectedColor(TabButton->GetSelected());
 	}
+	ApplyIcon();
+	ApplySelectedColor(TabButton ? TabButton->GetSelected() : false);
+}
+
+void UTabButtonWidget::ApplyIcon()
+{
+	UTexture2D* Tex = IconTexture.IsNull() ? nullptr : IconTexture.LoadSynchronous();
+
+	// 아이콘은 라벨 위에 겹쳐 놓이고 라벨이 왼쪽 패딩으로 자리를 비켜 준다 — 아이콘이 없으면
+	// 그 여백도 걷어야 라벨이 가운데에 선다 (2026-09-24 탭 아이콘 제거 후 25px 치우침).
+	// 세로 패딩은 그대로 둔다: 탭 라벨을 아래 내용판에서 띄워 두는 마감 값이다.
+	if (TabButton)
+	{
+		FMargin LabelPadding = TabButton->GetTextPadding();
+		LabelPadding.Left = Tex ? IconLabelInset : 0.0f;
+		TabButton->SetTextPadding(LabelPadding);
+	}
+
+	if (!TabIcon)
+	{
+		return;
+	}
+	if (!Tex)
+	{
+		TabIcon->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+	TabIcon->SetBrushFromTexture(Tex, false);
+	TabIcon->SetDesiredSizeOverride(FVector2D(IconSize, IconSize));
+	TabIcon->SetVisibility(ESlateVisibility::HitTestInvisible);
 }
 
 void UTabButtonWidget::NativeConstruct()
@@ -44,9 +75,15 @@ void UTabButtonWidget::HandleSelectedChanged(bool bIsSelected)
 
 void UTabButtonWidget::ApplySelectedColor(bool bIsSelected)
 {
+	const FSlateColor& Ink = bIsSelected ? SelectedTextColor : NormalTextColor;
 	if (TabButton)
 	{
-		TabButton->SetTextColor(bIsSelected ? SelectedTextColor : NormalTextColor);
+		TabButton->SetTextColor(Ink);
+	}
+	// 글리프는 글자색을 그대로 따라간다 — 노브를 나누면 둘이 다른 상태를 말하게 된다
+	if (TabIcon && TabIcon->GetVisibility() != ESlateVisibility::Collapsed)
+	{
+		TabIcon->SetColorAndOpacity(Ink.GetSpecifiedColor());
 	}
 }
 

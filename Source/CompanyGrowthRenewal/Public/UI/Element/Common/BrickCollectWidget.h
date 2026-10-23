@@ -92,6 +92,8 @@ private:
 
 	FVector2D Pos = FVector2D::ZeroVector;
 	FVector2D Velocity = FVector2D::ZeroVector;
+	FVector2D BurstStartPos = FVector2D::ZeroVector;
+	FVector2D BurstStartVelocity = FVector2D::ZeroVector;
 	FVector2D TargetPos = FVector2D::ZeroVector;
 
 	// 흡수 베지어 P0/P1 (P2 = TargetPos)

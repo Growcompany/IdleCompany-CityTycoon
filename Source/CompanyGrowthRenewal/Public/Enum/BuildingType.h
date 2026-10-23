@@ -10,5 +10,4 @@ enum class EBuildingType : uint8
 {
 	None UMETA(DisplayName = "None"),
 	House UMETA(DisplayName = "House"),
-	VictoryMonument UMETA(DisplayName = "VictoryMonument"),
 };

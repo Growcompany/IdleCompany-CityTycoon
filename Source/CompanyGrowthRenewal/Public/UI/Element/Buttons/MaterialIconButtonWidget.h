@@ -21,7 +21,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMaterialIconButtonUnhovered);
  * - Dynamic Material Instance로 런타임에 아이콘 텍스처 변경 가능
  * - Widget Blueprint에서 MainButton 이름의 Button 위젯과 바인딩
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UMaterialIconButtonWidget : public UUserWidget
 {
 	GENERATED_BODY()

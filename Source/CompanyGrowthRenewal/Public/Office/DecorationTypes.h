@@ -36,7 +36,8 @@ enum class EDecorationCategory : uint8
 	Plant           UMETA(DisplayName = "화분"),
 
 	// 전체 교체 (Surface = None)
-	FloorTile       UMETA(DisplayName = "바닥 타일")
+	FloorTile       UMETA(DisplayName = "바닥 타일"),
+	Carpet          UMETA(DisplayName = "러그·카펫")
 };
 
 /**

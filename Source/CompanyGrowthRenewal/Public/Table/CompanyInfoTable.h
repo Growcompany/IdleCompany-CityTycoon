@@ -35,6 +35,10 @@ struct COMPANYGROWTHRENEWAL_API FCompanyInfoTable : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Company")
 	TSoftObjectPtr<UTexture2D> GlyphIcon;
 
+	// 본사 운영 현황·보유 빌딩 목록의 컬러 업종 아이콘 (흰 판 위에 그대로 올린다 — 틴트 없음)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Company")
+	TSoftObjectPtr<UTexture2D> PanelIcon;
+
 	// 산업 타일 버튼 스타일 (CUI_Style2_Btn_* — 시그니처색 배경/눌림). IndustryButtonWidget 이 SetStyle 로 적용.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Company")
 	TSoftClassPtr<UCommonButtonStyle> ButtonStyle;
@@ -42,6 +46,10 @@ struct COMPANYGROWTHRENEWAL_API FCompanyInfoTable : public FTableRowBase
 	/** 산업별 강조색 (제목/배지/하이라이트 등). 미지정 시 흰색. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Company")
 	FLinearColor AccentColor = FLinearColor::White;
+
+	// 산업 선택 버튼 면색(선형). AccentColor 는 여러 화면이 공유해서 버튼만 따로 조율할 수 없다. 알파 0 = 미지정.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Company")
+	FLinearColor ButtonFaceColor = FLinearColor::Transparent;
 
 	/** 카테고리 라벨 ("프로젝트형", "제조업형" 등) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Company")
@@ -62,4 +70,9 @@ struct COMPANYGROWTHRENEWAL_API FCompanyInfoTable : public FTableRowBase
 	// 해금에 필요한 본사 레벨 (0 = 시작부터). 산업 게이트 = HQ 단일 스파인 (DECISION_RECORDS §1.3)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Company")
 	int32 RequiredHQLevel = 0;
+
+	// 이번 빌드에 포함되는 업종인가. false = 출시 범위 밖(잠김이 아니라 아예 숨김).
+	// 기본 true — CSV 리임포트 누락이 업종을 전멸시키지 않게 여는 쪽으로 실패한다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Company")
+	bool bAvailableAtLaunch = true;
 };

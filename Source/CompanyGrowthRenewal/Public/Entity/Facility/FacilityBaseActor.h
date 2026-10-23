@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Entity/InteractableBaseActor.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/FacilityType.h"
 #include "FacilityBaseActor.generated.h"
 

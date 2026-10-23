@@ -1,12 +1,11 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Panel/BuildingTraitGachaPanelWidget.h"
-#include "Components/Image.h"
 #include "Global/GlobalUtilFunctions.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
 #include "UI/Element/Buttons/IconWithButtonWidget.h"
-#include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Element/Buttons/GachaBannerButton.h"
+#include "UI/Element/Gacha/GachaPanelFrameWidget.h"
 #include "UI/Panel/GachaRevealPresentationWidget.h"
 #include "UI/Panel/TraitGachaProbabilityWidget.h"
 #include "Manager/UIManagerSubsystem.h"
@@ -17,14 +16,46 @@
 #include "Manager/MissionManagerSubsystem.h"
 #include "Core/CGGameInstance.h"
 #include "Player/MainMapPlayerController.h"
-#include "UI/UIBase.h"
 #include "Enum/LootBoxRarity.h"
+#include "Table/ShopItemTable.h"
 #include "Components/TextBlock.h"
-#include "Components/ProgressBar.h"
-#include "Components/HorizontalBox.h"
 #include "Components/WidgetSwitcher.h"
+#include "Components/Image.h"
 #include "Groups/CommonButtonGroupBase.h"
 #include "CommonButtonBase.h"
+#include "Manager/SaveLoadManager.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
+
+namespace
+{
+	TArray<int32> RevealGradeWeights(const TArray<FGachaRarityChance>& Chances)
+	{
+		TArray<int32> Weights;
+		Weights.Init(0, static_cast<int32>(ELootBoxRarity::Mythic) + 1);
+		for (const FGachaRarityChance& Chance : Chances)
+		{
+			const int32 Grade = static_cast<int32>(Chance.Rarity);
+			if (Weights.IsValidIndex(Grade)) { Weights[Grade] = FMath::Max(0, FMath::RoundToInt(Chance.Percent * 10000.f)); }
+		}
+		return Weights;
+	}
+
+	bool TryGetRevealLaunch(UWidget* Hero, FVector2D LayerSize, UWidget* Context,
+		FVector2D& OutPos, float& OutScale)
+	{
+		if (!Hero || LayerSize.X <= 0.f || !Context) { return false; }
+		const FGeometry HeroGeometry = Hero->GetCachedGeometry();
+		const FGeometry ViewportGeometry = UWidgetLayoutLibrary::GetViewportWidgetGeometry(Context);
+		if (HeroGeometry.GetLocalSize().X <= 0.f || ViewportGeometry.GetLocalSize().X <= 0.f) { return false; }
+		const FVector2D HeroCenter = HeroGeometry.LocalToAbsolute(HeroGeometry.GetLocalSize() * .5f);
+		const FVector2D HeroRight = HeroGeometry.LocalToAbsolute(FVector2D(HeroGeometry.GetLocalSize().X, HeroGeometry.GetLocalSize().Y * .5f));
+		OutPos = ViewportGeometry.AbsoluteToLocal(HeroCenter);
+		const float LaunchWidth = (ViewportGeometry.AbsoluteToLocal(HeroRight) - OutPos).Size() * 2.f;
+		if (LaunchWidth <= 0.f) { return false; }
+		OutScale = LaunchWidth / LayerSize.X;
+		return true;
+	}
+}
 
 void UBuildingTraitGachaPanelWidget::NativeConstruct()
 {
@@ -33,64 +64,35 @@ void UBuildingTraitGachaPanelWidget::NativeConstruct()
 	// 저작 프리뷰(고정 35%)가 첫 갱신 전에 보이지 않도록 숨겨두고 시작
 	UGlobalUtilFunctions::InitProgressHead(EpicPityHead);
 	UGlobalUtilFunctions::InitProgressHead(LegendaryPityHead);
-	UGlobalUtilFunctions::InitProgressHead(MileageHead);
 
-	// 서브시스템 캐시
 	if (UGameInstance* GI = GetGameInstance())
 	{
 		TraitManager = GI->GetSubsystem<UBuildingTraitManagerSubsystem>();
 		SkinManager = GI->GetSubsystem<UBuildingSkinManagerSubsystem>();
-		ItemMgr = GI->GetSubsystem<UItemInventoryManager>();
-		TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-		UIMgr = GI->GetSubsystem<UUIManagerSubsystem>();
 	}
 
-	// 닫기 버튼 바인딩
-	if (UIE_CloseButton && !UIE_CloseButton->OnCloseClicked.IsBound())
-	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UBuildingTraitGachaPanelWidget::OnCloseButtonClicked);
-	}
-
-	// 외부 카테고리 그룹 셋업 (특성 / 스킨, 스킨=비활성 스텁) — 그룹 셋업은 NativeConstruct에서만
+	// 외부 카테고리 그룹 셋업 (특성 / 스킨) — 그룹 셋업은 NativeConstruct에서만
 	CategoryGroup = NewObject<UCommonButtonGroupBase>(this);
 	CategoryGroup->SetSelectionRequired(true);
 	CategoryGroup->AddWidget(CategoryTraitBtn);
 	CategoryGroup->AddWidget(CategorySkinBtn);
-	// 스킨 가챠 구현됨 — 더 이상 비활성 스텁 아님(클릭 시 OnCategorySelected 가 스킨 모드로 전환)
 	// OnButtonBaseClicked = 매 클릭 발동(탭이 selectable 아니어도). OnSelectedButtonBaseChanged 는
 	// 선택이 실제로 바뀔 때만 발동 → 탭 버튼이 selectable 아니면 침묵해서 토글이 안 먹음.
 	CategoryGroup->OnButtonBaseClicked.AddDynamic(this, &UBuildingTraitGachaPanelWidget::OnCategorySelected);
-	CategoryGroup->SelectButtonAtIndex(0);
+	// 풀링된 패널은 마지막 카테고리를 기억하므로 하이라이트도 그쪽으로 맞춘다(클릭이 아니라 무음)
+	CategoryGroup->SelectButtonAtIndex(bIsSkinCategory ? 1 : 0, /*bAllowSound*/ false);
 
-	// 내부 배너 그룹 셋업 (일반 / 고급)
-	BannerGroup = NewObject<UCommonButtonGroupBase>(this);
-	BannerGroup->SetSelectionRequired(true);
-	BannerGroup->AddWidget(BannerNormal);
-	BannerGroup->AddWidget(BannerAdvanced);
-	BannerGroup->OnButtonBaseClicked.AddDynamic(this, &UBuildingTraitGachaPanelWidget::OnBannerSelected);
-	BannerGroup->SelectButtonAtIndex(0);
-	bAdvancedSelected = false;
+	MakeBannerGroup({ BannerNormal, BannerAdvanced });
 
-	// CTA + 링크 버튼 바인딩
-	if (PullButton)
-	{
-		PullButton->OnClicked().RemoveAll(this);
-		PullButton->OnClicked().AddUObject(this, &UBuildingTraitGachaPanelWidget::OnPullClicked);
-	}
 	if (PullButton10)
 	{
 		PullButton10->OnClicked().RemoveAll(this);
 		PullButton10->OnClicked().AddUObject(this, &UBuildingTraitGachaPanelWidget::OnPull10Clicked);
 	}
-	if (MileageExchangeButton)
+	if (PullButton30)
 	{
-		MileageExchangeButton->OnClicked().RemoveAll(this);
-		MileageExchangeButton->OnClicked().AddUObject(this, &UBuildingTraitGachaPanelWidget::OnMileageExchangeClicked);
-	}
-	if (ProbabilityInfoButton)
-	{
-		ProbabilityInfoButton->OnClicked().RemoveAll(this);
-		ProbabilityInfoButton->OnClicked().AddUObject(this, &UBuildingTraitGachaPanelWidget::OnProbabilityInfoClicked);
+		PullButton30->OnClicked().RemoveAll(this);
+		PullButton30->OnClicked().AddUObject(this, &UBuildingTraitGachaPanelWidget::OnPull30Clicked);
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[TraitGachaPanel] NativeConstruct - TraitMgr: %s, ItemMgr: %s"),
@@ -98,28 +100,34 @@ void UBuildingTraitGachaPanelWidget::NativeConstruct()
 		ItemMgr ? TEXT("Valid") : TEXT("Null"));
 }
 
+UWidget* UBuildingTraitGachaPanelWidget::GetTraitCategoryTabWidget() const
+{
+	return CategoryTraitBtn;
+}
+
+UWidget* UBuildingTraitGachaPanelWidget::GetSkinCategoryTabWidget() const
+{
+	return CategorySkinBtn;
+}
+
+UWidget* UBuildingTraitGachaPanelWidget::GetNormalBannerWidget() const
+{
+	return BannerNormal;
+}
+
 void UBuildingTraitGachaPanelWidget::NativeDestruct()
 {
-	// 닫기 버튼 해제
-	if (UIE_CloseButton)
-	{
-		UIE_CloseButton->OnCloseClicked.RemoveAll(this);
-	}
-
-	// 그룹 해제 (양쪽)
 	if (CategoryGroup)
 	{
 		CategoryGroup->OnButtonBaseClicked.RemoveAll(this);
+		// 선택 필수인 채로 비우면 엔진이 남은 탭을 재선택한다(클릭음 또는 ensure)
+		CategoryGroup->SetSelectionRequired(false);
+		// 재구성 때 새 그룹이 같은 탭을 받으므로 옛 그룹의 탭 바인딩을 끊는다
+		CategoryGroup->RemoveAll();
+		CategoryGroup = nullptr;
 	}
-	if (BannerGroup)
-	{
-		BannerGroup->OnButtonBaseClicked.RemoveAll(this);
-	}
-
-	// CTA + 링크 버튼 해제
-	if (PullButton) PullButton->OnClicked().RemoveAll(this);
-	if (MileageExchangeButton) MileageExchangeButton->OnClicked().RemoveAll(this);
-	if (ProbabilityInfoButton) ProbabilityInfoButton->OnClicked().RemoveAll(this);
+	if (PullButton10) PullButton10->OnClicked().RemoveAll(this);
+	if (PullButton30) PullButton30->OnClicked().RemoveAll(this);
 
 	Super::NativeDestruct();
 }
@@ -147,9 +155,7 @@ void UBuildingTraitGachaPanelWidget::NativeOnActivated()
 	}
 
 	// 그룹 상태는 건드리지 않고 데이터만 갱신
-	UpdateHeroAndProbability();
-	UpdateGauges();
-	UpdateCTALabel();
+	RefreshAll();
 
 	// M11 — 가챠 패널 열림 신호 + [뽑기] 하이라이트 타겟 등록
 	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
@@ -157,7 +163,7 @@ void UBuildingTraitGachaPanelWidget::NativeOnActivated()
 		MissionMgr->RegisterTraitGachaPanel(this);
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[TraitGachaPanel] NativeOnActivated - BuildingIndex: %d"), ContextBuildingIndex);
+	UE_LOG(LogTemp, Log, TEXT("[TraitGachaPanel] NativeOnActivated"));
 }
 
 void UBuildingTraitGachaPanelWidget::NativeOnDeactivated()
@@ -197,45 +203,36 @@ void UBuildingTraitGachaPanelWidget::NativeOnDeactivated()
 	UE_LOG(LogTemp, Log, TEXT("[TraitGachaPanel] NativeOnDeactivated"));
 }
 
-UWidget* UBuildingTraitGachaPanelWidget::GetPullButtonWidget() const
-{
-	return PullButton;
-}
-
-UWidget* UBuildingTraitGachaPanelWidget::GetSkinCategoryButtonWidget() const
-{
-	return CategorySkinBtn;
-}
-
-UWidget* UBuildingTraitGachaPanelWidget::GetCloseButtonWidget() const
-{
-	return UIE_CloseButton;
-}
-
-// ========== 컨텍스트 ==========
-
-void UBuildingTraitGachaPanelWidget::SetContext(int32 BuildingIndex, bool bOpenTraitTab)
-{
-	ContextBuildingIndex = BuildingIndex;
-
-	// 특성 탭(인덱스 0) 유지. 그룹 셋업은 NativeConstruct에서만 하므로 여기선 인덱스 보장만 필요 시 처리.
-	if (bOpenTraitTab && CategoryGroup)
-	{
-		CategoryGroup->SelectButtonAtIndex(0);
-	}
-
-	UE_LOG(LogTemp, Log, TEXT("[TraitGachaPanel] SetContext - BuildingIndex: %d, OpenTraitTab: %d"),
-		BuildingIndex, bOpenTraitTab ? 1 : 0);
-}
-
 // ========== UI 갱신 함수 ==========
 
 void UBuildingTraitGachaPanelWidget::UpdateHeroAndProbability()
 {
+	UpdateBannerPresentation(BannerNormal, bIsSkinCategory ? EItemType::SkinTicketNormal : EItemType::BuildingTraitTicketNormal);
+	UpdateBannerPresentation(BannerAdvanced, bIsSkinCategory ? EItemType::SkinTicketAdvanced : EItemType::BuildingTraitTicketAdvanced);
+
+	if (GachaFrame)
+	{
+		GachaFrame->SetTitle(FText::FromString(bIsSkinCategory ? TEXT("스킨 뽑기") : TEXT("특성 뽑기")));
+	}
+
+	bool bBoxHeroVisible = false;
+	if (HeroBoxImage && TableMgr)
+	{
+		bool bIconFound = false;
+		UObject* BoxIcon = TableMgr->GetItemIconResource(GetActiveTicketType(), bIconFound);
+		HeroBoxImage->SetBrushResourceObject(bIconFound ? BoxIcon : nullptr);
+		bBoxHeroVisible = bIconFound && BoxIcon;
+		HeroBoxImage->SetVisibility(bBoxHeroVisible ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (UWidget* HeroBoxHost = GetWidgetFromName(TEXT("HeroBoxHost")))
+	{
+		HeroBoxHost->SetVisibility(bBoxHeroVisible ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	}
 	// 쇼케이스 카드 스위처: 특성(0) / 스킨(1)
 	if (HeroCardSwitcher)
 	{
 		HeroCardSwitcher->SetActiveWidgetIndex(bIsSkinCategory ? 1 : 0);
+		HeroCardSwitcher->SetVisibility(bBoxHeroVisible ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
 	}
 
 	if (HeroTitleText)
@@ -253,27 +250,38 @@ void UBuildingTraitGachaPanelWidget::UpdateHeroAndProbability()
 			: TEXT("건물에 장착할 특성을 획득합니다. 60회에 에픽, 150회에 레전드가 확정됩니다")));
 	}
 
-	if (ProbabilityPillRow)
+	RebuildProbabilityPills(bIsSkinCategory
+		? (SkinManager ? SkinManager->GetSkinProbabilityTableForUI(bAdvancedSelected) : TArray<FGachaRarityChance>())
+		: (TraitManager ? TraitManager->GetTraitProbabilityTableForUI(bAdvancedSelected) : TArray<FGachaRarityChance>()));
+}
+
+void UBuildingTraitGachaPanelWidget::UpdateBannerPresentation(UCommonButtonBase* Banner, EItemType Ticket)
+{
+	UGachaBannerButton* GachaBanner = Cast<UGachaBannerButton>(Banner);
+	if (!GachaBanner) { return; }
+
+	FShopItemTable Row;
+	if (!TableMgr || !TableMgr->GetShopItemByItemType(Ticket, Row))
 	{
-		ProbabilityPillRow->ClearChildren();
-		const TArray<FGachaRarityChance> Rows = bIsSkinCategory
-			? (SkinManager ? SkinManager->GetSkinProbabilityTableForUI(bAdvancedSelected) : TArray<FGachaRarityChance>())
-			: (TraitManager ? TraitManager->GetTraitProbabilityTableForUI(bAdvancedSelected) : TArray<FGachaRarityChance>());
-		for (const FGachaRarityChance& Row : Rows)
-		{
-			UTextBlock* Pill = NewObject<UTextBlock>(this);
-			if (PillFont.FontObject) { Pill->SetFont(PillFont); }
-			Pill->SetText(FText::FromString(FString::Printf(TEXT("%s %.0f%%"),
-				*FLootBoxRarityUtility::GetKoreanName(Row.Rarity), Row.Percent)));
-			Pill->SetColorAndOpacity(FSlateColor(FLootBoxRarityUtility::GetRarityColor(Row.Rarity)));
-			ProbabilityPillRow->AddChildToHorizontalBox(Pill);
-		}
+		GachaBanner->SetBannerPresentation(FText::GetEmpty(), nullptr);
+		return;
 	}
+
+	FString BannerName = Row.DisplayName.ToString();
+	BannerName.RemoveFromEnd(TEXT(" 상자"));
+	UObject* IconResource = Row.ResolveIconResource();
+	if (!IconResource)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TraitGachaPanel] Ticket icon missing in DT_ShopItem (ItemType=%d)"), static_cast<int32>(Ticket));
+	}
+	GachaBanner->SetBannerPresentation(FText::FromString(BannerName), IconResource);
 }
 
 void UBuildingTraitGachaPanelWidget::UpdateGauges()
 {
 	// 특성/스킨 천장·마일리지 상수는 동일(60/150/50). 값만 활성 카테고리 매니저에서 읽음.
+	// 문구는 매니저와 무관한 상수라 조기 반환 앞에서 — WBP 에 구워진 직원 패널 문구가 남지 않게
+	SetExchangeLabel(FGachaTraitData::MileageEpicBox);
 	if (bIsSkinCategory && !SkinManager) { return; }
 	if (!bIsSkinCategory && !TraitManager) { return; }
 
@@ -288,43 +296,19 @@ void UBuildingTraitGachaPanelWidget::UpdateGauges()
 		: TraitManager->GetMileagePoints();
 
 	// Epic 하드 천장 (60)
-	if (EpicPityLabel)
-	{
-		EpicPityLabel->SetText(FText::FromString(FString::Printf(TEXT("%s 천장 %d/%d"),
-			*FLootBoxRarityUtility::GetKoreanName(ELootBoxRarity::Epic), EpicPity, FBuildingTraitPityData::HardPity)));
-	}
-	if (EpicPityBar)
-	{
-		const float EpicPct = FMath::Clamp((float)EpicPity / (float)FBuildingTraitPityData::HardPity, 0.f, 1.f);
-		EpicPityBar->SetPercent(EpicPct);
-		UGlobalUtilFunctions::UpdateProgressHead(EpicPityBar, EpicPityHead, EpicPct);
-	}
+	const float EpicPct = FMath::Clamp((float)EpicPity / (float)FBuildingTraitPityData::HardPity, 0.f, 1.f);
+	SetGauge(EpicPityBar, EpicPityHead, EpicPityLabel, EpicPct, FText::FromString(FString::Printf(TEXT("%s 천장 %d/%d"),
+		*FLootBoxRarityUtility::GetKoreanName(ELootBoxRarity::Epic), EpicPity, FBuildingTraitPityData::HardPity)));
 
 	// Legendary 대천장 (150)
-	if (LegendaryPityLabel)
-	{
-		LegendaryPityLabel->SetText(FText::FromString(FString::Printf(TEXT("%s 천장 %d/%d"),
-			*FLootBoxRarityUtility::GetKoreanName(ELootBoxRarity::Legendary), LgdPity, FBuildingTraitPityData::GrandPity)));
-	}
-	if (LegendaryPityBar)
-	{
-		const float LgdPct = FMath::Clamp((float)LgdPity / (float)FBuildingTraitPityData::GrandPity, 0.f, 1.f);
-		LegendaryPityBar->SetPercent(LgdPct);
-		UGlobalUtilFunctions::UpdateProgressHead(LegendaryPityBar, LegendaryPityHead, LgdPct);
-	}
+	const float LgdPct = FMath::Clamp((float)LgdPity / (float)FBuildingTraitPityData::GrandPity, 0.f, 1.f);
+	SetGauge(LegendaryPityBar, LegendaryPityHead, LegendaryPityLabel, LgdPct, FText::FromString(FString::Printf(TEXT("%s 천장 %d/%d"),
+		*FLootBoxRarityUtility::GetKoreanName(ELootBoxRarity::Legendary), LgdPity, FBuildingTraitPityData::GrandPity)));
 
 	// 마일리지 (합산, 150pt = Legendary 상자)
-	if (MileageLabel)
-	{
-		MileageLabel->SetText(FText::FromString(FString::Printf(TEXT("마일리지 %d/%d"),
-			Mileage, FGachaTraitData::MileageLegendaryBox)));
-	}
-	if (MileageBar)
-	{
-		const float MileagePct = FMath::Clamp((float)Mileage / (float)FGachaTraitData::MileageLegendaryBox, 0.f, 1.f);
-		MileageBar->SetPercent(MileagePct);
-		UGlobalUtilFunctions::UpdateProgressHead(MileageBar, MileageHead, MileagePct);
-	}
+	const float MileagePct = FMath::Clamp((float)Mileage / (float)FGachaTraitData::MileageLegendaryBox, 0.f, 1.f);
+	SetGauge(MileageBar, MileageHead, MileageLabel, MileagePct, FText::FromString(FString::Printf(TEXT("마일리지 %d/%d"),
+		Mileage, FGachaTraitData::MileageLegendaryBox)));
 	// 교환 버튼은 Epic 상자(50pt) 이상이면 활성
 	if (MileageExchangeButton)
 	{
@@ -336,35 +320,23 @@ void UBuildingTraitGachaPanelWidget::UpdateCTALabel()
 {
 	if (!ItemMgr || !PullButton) { return; }
 
-	const EItemType Ticket = bIsSkinCategory
-		? (bAdvancedSelected ? EItemType::SkinTicketAdvanced : EItemType::SkinTicketNormal)
-		: (bAdvancedSelected ? EItemType::BuildingTraitTicketAdvanced : EItemType::BuildingTraitTicketNormal);
-
+	const EItemType Ticket = GetActiveTicketType();
 	const int32 TicketCount = ItemMgr->GetItemCount(Ticket);
+	const int32 MultiCount = GetMultiPullCount();
 
-	// 종류(특성=기어/스킨=붓)·티어(색)는 좌측 아이콘이, 보유 개수는 상단 티켓 칩이 표시 — 버튼엔 액션만. 가챠는 티켓 전용(다이아 폴백 없음).
-	const bool bHasOne = TicketCount > 0;
-	PullButton->SetButtonText(FText::FromString(bHasOne ? FString(TEXT("×1 뽑기")) : FString(TEXT("뽑기권 부족"))));
-	PullButton->SetIsEnabled(bHasOne);
-	PullButton->SetCount(0);   // 별도 카운트 칸 숨김 — 비용은 ButtonText 한 줄로 통일
+	// 종류(특성=기어/스킨=붓)·티어(색)는 좌측 아이콘이 표시한다. 가챠는 티켓 전용(다이아 폴백 없음).
+	// 서버 응답 대기 중에는 눌러도 pending 이 막으므로 라벨로 대기를 보여준다(3상태 안내 문구 층은 후속)
+	// 모자라도 누를 수 있다 — 회색 표면과 "보유/필요"로 알리고, 누르면 RequestServerPull 이 부족 안내를 띄운다
+	const FString Label1 = bPullRequestInFlight ? FString(TEXT("처리 중입니다")) : FString(TEXT("뽑기"));
+	ApplyPullButton(PullButton, FText::FromString(Label1), !bPullRequestInFlight, Ticket);
+	PullButton->SetItemCost(TicketCount, 1);
 
-	if (PullButton10)
-	{
-		// 10연 = 티켓 10장 (OnPull10Clicked 의 HasItem(Ticket,10) 과 동일 게이팅). "10연차" 표기는 연차(휴가) 오독으로 폐기.
-		PullButton10->SetButtonText(FText::FromString(TEXT("×10 뽑기")));
-		PullButton10->SetIsEnabled(TicketCount >= 10);
-		PullButton10->SetCount(0);   // 별도 카운트 칸 숨김
-	}
-
-	// 좌측 아이콘 = 현재 카테고리/티어 뽑기권. 1x·10x 동일 티켓.
-	if (TableMgr)
-	{
-		bool bIconFound = false;
-		UTexture2D* TicketIcon = TableMgr->GetItemIcon(Ticket, bIconFound);
-		UTexture2D* IconToSet = bIconFound ? TicketIcon : nullptr;
-		PullButton->SetIcon(IconToSet);
-		if (PullButton10) { PullButton10->SetIcon(IconToSet); }
-	}
+	// 10회 단추 ― 라벨·게이트·요청이 GetMultiPullCount 한 값을 본다. "10연차" 표기는 연차(휴가) 오독으로 폐기.
+	const FString LabelMulti = bPullRequestInFlight ? FString(TEXT("처리 중입니다")) : FString(TEXT("뽑기"));
+	ApplyPullButton(PullButton10, FText::FromString(LabelMulti), !bPullRequestInFlight, Ticket);
+	if (PullButton10) PullButton10->SetItemCost(TicketCount, MultiCount);
+	ApplyPullButton(PullButton30, FText::FromString(LabelMulti), !bPullRequestInFlight, Ticket);
+	if (PullButton30) PullButton30->SetItemCost(TicketCount, 30);
 
 	UpdateTicketCounts();
 }
@@ -377,17 +349,8 @@ void UBuildingTraitGachaPanelWidget::UpdateTicketCounts()
 	const EItemType TNormal = bIsSkinCategory ? EItemType::SkinTicketNormal : EItemType::BuildingTraitTicketNormal;
 	const EItemType TAdvanced = bIsSkinCategory ? EItemType::SkinTicketAdvanced : EItemType::BuildingTraitTicketAdvanced;
 
-	// 배너 BindWidget 타입은 UCommonButtonBase 계약 유지 — 실제 위젯만 캐스팅해서 수량을 넣는다
-	auto SetBannerCount = [this](UCommonButtonBase* Banner, EItemType Ticket)
-	{
-		if (UGachaBannerButton* B = Cast<UGachaBannerButton>(Banner))
-		{
-			B->SetOwnedCount(ItemMgr->GetItemCount(Ticket));
-		}
-	};
-
-	SetBannerCount(BannerNormal, TNormal);
-	SetBannerCount(BannerAdvanced, TAdvanced);
+	SetBannerOwnedCount(BannerNormal, TNormal);
+	SetBannerOwnedCount(BannerAdvanced, TAdvanced);
 }
 
 // ========== 델리게이트 핸들러 ==========
@@ -429,119 +392,169 @@ void UBuildingTraitGachaPanelWidget::OnCategorySelected(UCommonButtonBase* Selec
 	bIsSkinCategory = bNewSkin;
 
 	// 카테고리 전환 시 배너는 일반(0)으로 리셋 — 새 카테고리의 천장/티켓 기준으로 다시 보여줌
-	bAdvancedSelected = false;
+	SetBannerIndex(0);
 	if (BannerGroup) { BannerGroup->SelectButtonAtIndex(0); }
 
-	UpdateHeroAndProbability();
-	UpdateGauges();
-	UpdateCTALabel();
+	RefreshAll();
 }
 
-void UBuildingTraitGachaPanelWidget::OnBannerSelected(UCommonButtonBase* SelectedButton, int32 ButtonIndex)
+void UBuildingTraitGachaPanelWidget::SetBannerIndex(int32 Index)
 {
-	bAdvancedSelected = (ButtonIndex == 1);
-	// 클릭 핸들러(OnButtonBaseClicked) 경유라 선택 하이라이트는 수동 동기화. 우리 핸들러는
-	// 선택 변경 델리게이트에 안 묶여 있어 재진입 없음.
-	if (BannerGroup) { BannerGroup->SelectButtonAtIndex(ButtonIndex); }
-	UpdateHeroAndProbability();
-	UpdateGauges();
-	UpdateCTALabel();
+	bAdvancedSelected = (Index == 1);
 }
 
 void UBuildingTraitGachaPanelWidget::OnPullClicked()
 {
-	// ===== 스킨 카테고리 경로 =====
-	if (bIsSkinCategory)
-	{
-		if (!SkinManager) { return; }
-		if (!SkinManager->CanExecuteGachaPull(bAdvancedSelected))
-		{
-			if (UIMgr) { UIMgr->ShowNotification(NSLOCTEXT("SkinGacha", "NoTicket", "뽑기권이 부족합니다"), 3.0f, ENotificationType::Failed); }
-			return;
-		}
-		FBuildingSkinGachaResult SkinResult;
-		if (SkinManager->ExecuteGachaPull(bAdvancedSelected, SkinResult))
-		{
-			if (UGachaRevealPresentationWidget* Pres = CreateRevealWidget())
-			{
-				Pres->SetupPullSkin({ SkinResult }, bAdvancedSelected);
-			}
-		}
-		return;
-	}
-
-	// ===== 특성 카테고리 경로 =====
-	if (!TraitManager) { return; }
-	if (!TraitManager->CanExecuteGachaPull(bAdvancedSelected))
-	{
-		if (UIMgr) { UIMgr->ShowNotification(NSLOCTEXT("TraitGacha", "NoTicket", "뽑기권이 부족합니다"), 3.0f, ENotificationType::Failed); }
-		return;
-	}
-
-	FBuildingTraitGachaResult Result;
-	if (TraitManager->ExecuteGachaPull(bAdvancedSelected, Result))
-	{
-		if (UGachaRevealPresentationWidget* Pres = CreateRevealWidget())
-		{
-			Pres->SetupPullTrait({ Result }, bAdvancedSelected);
-		}
-	}
+	RequestServerPull(1);
 }
 
 void UBuildingTraitGachaPanelWidget::OnPull10Clicked()
 {
+	RequestServerPull(GetMultiPullCount());
+}
+
+void UBuildingTraitGachaPanelWidget::OnPull30Clicked()
+{
+	RequestServerPull(30);
+}
+
+EItemType UBuildingTraitGachaPanelWidget::GetActiveTicketType() const
+{
+	return bIsSkinCategory
+		? UBuildingSkinManagerSubsystem::GetTicketType(bAdvancedSelected)
+		: UBuildingTraitManagerSubsystem::GetTicketType(bAdvancedSelected);
+}
+
+int32 UBuildingTraitGachaPanelWidget::GetMultiPullCount() const
+{
+	// 1 op 상한(MaxPullsPerOp)은 30 이다 ― 이 단추는 특성·스킨 모두 10회로 고정한다
+	return 10;
+}
+
+void UBuildingTraitGachaPanelWidget::RequestServerPull(int32 RequestedCount)
+{
+	if (bPullRequestInFlight) { return; }
+
+	// 로컬 캐시 선판정 — 서버 왕복을 아끼는 안내일 뿐이고 실제 차감 판정은 서버가 한다
+	const EItemType Ticket = GetActiveTicketType();
+	if (!ItemMgr || !ItemMgr->HasItem(Ticket, RequestedCount))
+	{
+		if (UIMgr)
+		{
+			UIMgr->ShowNotification(RequestedCount > 1
+				? FText::Format(NSLOCTEXT("Gacha", "NoTicketMulti", "상자가 부족합니다 ({0}개 필요)"), FText::AsNumber(RequestedCount))
+				: NSLOCTEXT("Gacha", "NoTicket", "상자가 부족합니다"),
+				3.0f, ENotificationType::Failed);
+		}
+		return;
+	}
+
+	// 대기 중에 배너를 바꿔도 연출은 요청한 티어를 따라야 한다 — 멤버를 다시 읽지 않고 값으로 잡는다
+	const bool bAdvanced = bAdvancedSelected;
+	const UTableManagerSubsystem* TablesAtRequest = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+
 	// ===== 스킨 카테고리 경로 =====
 	if (bIsSkinCategory)
 	{
 		if (!SkinManager) { return; }
-		const EItemType SkinTicket = bAdvancedSelected ? EItemType::SkinTicketAdvanced : EItemType::SkinTicketNormal;
-		if (!ItemMgr || !ItemMgr->HasItem(SkinTicket, 10))
+		const int32 MileageBefore = SkinManager->GetMileagePoints();
+		TSet<int32> OwnedBefore;
+		if (USaveLoadManager* Save = GetGameInstance()->GetSubsystem<USaveLoadManager>())
 		{
-			if (UIMgr) { UIMgr->ShowNotification(NSLOCTEXT("SkinGacha", "NoTicket10", "뽑기권이 부족합니다 (10장 필요)"), 3.0f, ENotificationType::Failed); }
-			return;
-		}
-		TArray<FBuildingSkinGachaResult> SkinResults;
-		if (SkinManager->ExecuteGachaPullMulti(bAdvancedSelected, 10, SkinResults) && SkinResults.Num() > 0)
-		{
-			if (UGachaRevealPresentationWidget* Pres = CreateRevealWidget())
+			if (const USaveGame_GameData* Data = Save->GetCurrentSaveData())
 			{
-				Pres->SetupPullSkin(SkinResults, bAdvancedSelected);
+				for (const FBuildingSkinInstance& Skin : Data->GameData.OwnedBuildingSkins) { OwnedBefore.Add(Skin.SkinID); }
 			}
 		}
+		const TArray<int32> GradeWeights = RevealGradeWeights(SkinManager->GetSkinProbabilityTableForUI(bAdvanced));
+		const EGachaBoxType BoxType = bAdvanced ? EGachaBoxType::SkinAdvanced : EGachaBoxType::SkinNormal;
+		const FGachaBoxVisualRow* BoxVisual = TablesAtRequest ? TablesAtRequest->GetGachaBoxVisual(BoxType) : nullptr;
+		const FVector2D LayerSize = BoxVisual ? BoxVisual->LayerSize : FVector2D::ZeroVector;
+		UWidget* Hero = GetWidgetFromName(TEXT("HeroBoxImage"));
+		FVector2D LaunchPos = FVector2D::ZeroVector;
+		float LaunchScale = 0.f;
+		const bool bHasLaunch = TryGetRevealLaunch(Hero ? Hero : HeroCardSwitcher, LayerSize, this, LaunchPos, LaunchScale);
+
+		bPullRequestInFlight = true;
+		UpdateCTALabel();   // 대기 중 CTA 잠금
+
+		SkinManager->RequestGachaPull(bAdvanced, RequestedCount,
+			UBuildingSkinManagerSubsystem::FOnSkinPullDone::CreateWeakLambda(this,
+				[this, bAdvanced, MileageBefore, OwnedBefore, GradeWeights, bHasLaunch, LaunchPos, LaunchScale](bool bOk, const TArray<FBuildingSkinGachaResult>& Results)
+		{
+			bPullRequestInFlight = false;
+
+			// bOk 여도 Results 가 빌 수 있다(리플레이) — 그때는 연출 없이 라벨만 되돌린다
+			if (bOk && Results.Num() > 0)
+			{
+				if (UGachaRevealPresentationWidget* Pres = CreateRevealWidget())
+				{
+					FGachaRevealAwardContext Award;
+					TSet<int32> SequentialOwned = OwnedBefore;
+					for (const FBuildingSkinGachaResult& Result : Results)
+					{
+						Award.bOwnedBefore.Add(Result.bDuplicate || SequentialOwned.Contains(Result.ResultSkinID));
+						if (!Result.bDuplicate) { SequentialOwned.Add(Result.ResultSkinID); }
+					}
+					Award.GradeWeights = GradeWeights;
+					Award.MileageBalance = SkinManager->GetMileagePoints();
+					Award.MileageGained = Award.MileageBalance - MileageBefore;
+					if (bHasLaunch) { Pres->SetLaunchFrom(LaunchPos, LaunchScale); }
+					Pres->SetupPullSkin(Results, bAdvanced, Award);
+				}
+			}
+			UpdateCTALabel();
+		}));
 		return;
 	}
 
 	// ===== 특성 카테고리 경로 =====
 	if (!TraitManager) { return; }
+	const int32 MileageBefore = TraitManager->GetMileagePoints();
+	TSet<FName> OwnedBefore = TraitManager->GetInventory().EncyclopediaUnlocked;
+	const TArray<int32> GradeWeights = RevealGradeWeights(TraitManager->GetTraitProbabilityTableForUI(bAdvanced));
+	const EGachaBoxType BoxType = bAdvanced ? EGachaBoxType::TraitAdvanced : EGachaBoxType::TraitNormal;
+	const FGachaBoxVisualRow* BoxVisual = TablesAtRequest ? TablesAtRequest->GetGachaBoxVisual(BoxType) : nullptr;
+	const FVector2D LayerSize = BoxVisual ? BoxVisual->LayerSize : FVector2D::ZeroVector;
+	UWidget* Hero = GetWidgetFromName(TEXT("HeroBoxImage"));
+	FVector2D LaunchPos = FVector2D::ZeroVector;
+	float LaunchScale = 0.f;
+	const bool bHasLaunch = TryGetRevealLaunch(Hero ? Hero : HeroCardSwitcher, LayerSize, this, LaunchPos, LaunchScale);
 
-	const EItemType Ticket = bAdvancedSelected
-		? EItemType::BuildingTraitTicketAdvanced
-		: EItemType::BuildingTraitTicketNormal;
-	if (!ItemMgr || !ItemMgr->HasItem(Ticket, 10))
-	{
-		if (UIMgr) { UIMgr->ShowNotification(NSLOCTEXT("TraitGacha", "NoTicket10", "뽑기권이 부족합니다 (10장 필요)"), 3.0f, ENotificationType::Failed); }
-		return;
-	}
+	bPullRequestInFlight = true;
+	UpdateCTALabel();
 
-	TArray<FBuildingTraitGachaResult> Results;
-	if (TraitManager->ExecuteGachaPullMulti(bAdvancedSelected, 10, Results) && Results.Num() > 0)
+	TraitManager->RequestGachaPull(bAdvanced, RequestedCount,
+		UBuildingTraitManagerSubsystem::FOnTraitPullDone::CreateWeakLambda(this,
+			[this, bAdvanced, MileageBefore, OwnedBefore, GradeWeights, bHasLaunch, LaunchPos, LaunchScale](bool bOk, const TArray<FBuildingTraitGachaResult>& Results)
 	{
-		if (UGachaRevealPresentationWidget* Pres = CreateRevealWidget())
+		bPullRequestInFlight = false;
+
+		if (bOk && Results.Num() > 0)
 		{
-			Pres->SetupPullTrait(Results, bAdvancedSelected);
+			if (UGachaRevealPresentationWidget* Pres = CreateRevealWidget())
+			{
+				FGachaRevealAwardContext Award;
+				TSet<FName> SequentialOwned = OwnedBefore;
+				for (const FBuildingTraitGachaResult& Result : Results)
+				{
+					Award.bOwnedBefore.Add(SequentialOwned.Contains(Result.ResultTraitID));
+					SequentialOwned.Add(Result.ResultTraitID);
+				}
+				Award.GradeWeights = GradeWeights;
+				Award.MileageBalance = TraitManager->GetMileagePoints();
+				Award.MileageGained = Award.MileageBalance - MileageBefore;
+				if (bHasLaunch) { Pres->SetLaunchFrom(LaunchPos, LaunchScale); }
+				Pres->SetupPullTrait(Results, bAdvanced, Award);
+			}
 		}
-	}
+		UpdateCTALabel();
+	}));
 }
 
 UGachaRevealPresentationWidget* UBuildingTraitGachaPanelWidget::CreateRevealWidget()
 {
-	// 특성/스킨 공용 연출 위젯 생성 + 패널 위 뷰포트 오버레이로 표시(같은 스택 push면 패널 deactivate→가려짐)
-	if (!TableMgr) { return nullptr; }
-	TSubclassOf<UUserWidget> Cls = TableMgr->GetWidgetClass(EWidgetType::GachaRevealPresentation);
-	if (!Cls) { return nullptr; }
-	APlayerController* PC = GetOwningPlayer();
-	if (!PC) { return nullptr; }
-	UGachaRevealPresentationWidget* Pres = CreateWidget<UGachaRevealPresentationWidget>(PC, Cls.Get());
+	auto* Pres = Cast<UGachaRevealPresentationWidget>(CreateOverlayWidget(EWidgetType::GachaRevealPresentation));
 	if (Pres) { Pres->AddToViewport(1000); }
 	return Pres;
 }
@@ -557,24 +570,10 @@ void UBuildingTraitGachaPanelWidget::OnMileageExchangeClicked()
 
 void UBuildingTraitGachaPanelWidget::OnProbabilityInfoClicked()
 {
-	if (!TableMgr) { return; }
-	TSubclassOf<UUserWidget> Cls = TableMgr->GetWidgetClass(EWidgetType::TraitGachaProbabilityPanel);
-	if (!Cls) { return; }
-
-	// PushPromptClass(PromptStack)로 띄우면 같은 스택의 가챠 패널이 deactivate→가려짐.
-	// 확률 정보는 패널 '위에' 떠야 하므로 뷰포트 오버레이로(UIBase 전체 위, ZOrder 큼). 닫기=RemoveFromParent.
-	APlayerController* PC = GetOwningPlayer();
-	if (!PC) { return; }
-	if (UTraitGachaProbabilityWidget* Prob = CreateWidget<UTraitGachaProbabilityWidget>(PC, Cls.Get()))
+	if (auto* Prob = Cast<UTraitGachaProbabilityWidget>(CreateOverlayWidget(EWidgetType::TraitGachaProbabilityPanel)))
 	{
 		// AddToViewport(=NativeConstruct) 전에 축을 넣어야 첫 빌드부터 현재 카테고리 표가 나온다
 		Prob->SetCategory(bIsSkinCategory);
 		Prob->AddToViewport(1000);
 	}
-}
-
-void UBuildingTraitGachaPanelWidget::OnCloseButtonClicked()
-{
-	// PushPromptClass로 열리므로 DeactivateWidget으로 닫기
-	DeactivateWidget();
 }

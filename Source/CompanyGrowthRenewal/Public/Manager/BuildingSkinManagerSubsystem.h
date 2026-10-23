@@ -7,11 +7,13 @@
 #include "Data/BuildingSkinGachaSaveData.h"
 #include "Data/GachaRecruitmentData.h"
 #include "Enum/LootBoxRarity.h"
+#include "Enum/ItemType.h"
 #include "BuildingSkinManagerSubsystem.generated.h"
 
 class UTableManagerSubsystem;
 class UItemInventoryManager;
 class USaveLoadManager;
+class UCloudEconomySubsystem;
 
 /**
  * 건물 스킨 가챠 매니저 (BUILDING_SKIN_GACHA v1)
@@ -41,6 +43,36 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Skin|Gacha")
 	bool CanExecuteGachaPull(bool bAdvanced) const;
+
+	// ========== 서버 권위 뽑기 ==========
+
+	/** 뽑기 1건 완료. bOk=true 라도 Results 가 빌 수 있다(리플레이·서버 인정 0) — 호출부는 Num() 을 보고 연출을 띄운다 */
+	DECLARE_DELEGATE_TwoParams(FOnSkinPullDone, bool /*bOk*/, const TArray<FBuildingSkinGachaResult>& /*Results*/);
+
+	/**
+	 * `/item/consume`(skin.pull) 1 op -> 성공 응답 뒤에만 로컬 RNG N회.
+	 * 스킨은 티켓 전용이라 다이아 폴백이 없다 — 실패하면 로컬 효과를 적용하지 않는다.
+	 * 수량은 1·10·30 만 받는다 ― 그 밖의 수는 줄이지 않고 Warning 후 Done 에 bOk=false. 같은 배너의 중복 클릭은 pending 플래그가 막는다.
+	 */
+	void RequestGachaPull(bool bAdvanced, int32 RequestedCount, FOnSkinPullDone Done);
+
+	/** consumeRules.json `skin.pull` 의 maxPerOp = 허용 수(GachaBatchMath::IsAllowedPullCount)의 최댓값. 더 보내면 서버가 400 BAD_REQUEST 로 거절한다 */
+	static constexpr int32 MaxPullsPerOp = 30;
+
+	/** 로컬 RNG 횟수 = 서버가 인정한 수량과 요청 수량 중 작은 쪽. 응답을 못 읽었으면 0 */
+	static int32 ResolveRollCount(int32 Requested, int32 ServerAmount);
+
+	/** true = 서버가 영수증을 재생했다. 다시 굴리면 플레이어가 본 스킨이 바뀐다 */
+	static bool ShouldSkipLocalEffect(bool bReplayed);
+
+	/** `/item/consume` reason — consumeRules.json 과 바이트 단위로 같아야 한다(다르면 400) */
+	static FName GetPullConsumeReason();
+
+	/** 티켓 아이템 — 서버 `items` 허용목록과 같은 식별자로 직렬화된다 */
+	static EItemType GetTicketType(bool bAdvanced);
+
+	/** 중복 클릭 차단 키 — 배너별로 따로 잠그고 특성·채용 키와도 겹치지 않는다 */
+	static FName GachaActionKey(bool bAdvanced);
 
 	UFUNCTION(BlueprintPure, Category = "Skin|Gacha")
 	int32 GetPullsSinceEpic(bool bAdvanced) const;
@@ -95,6 +127,17 @@ private:
 
 	void AddMileagePoints(int32 Amount);
 	void SaveGameData();
+
+	// 뽑기 1회의 로컬 효과(등급 롤·지급·마일리지·천장). 등급 풀이 비면 천장을 원복하고 false.
+	// bRefundTicketOnPoolEmpty 는 로컬 차감 경로만 true — 서버가 소모한 티켓을 클라가 되돌리면 유령 수량이 된다.
+	bool ApplyLocalPullEffect(bool bAdvanced, bool bRefundTicketOnPoolEmpty, FBuildingSkinGachaResult& OutResult);
+
+	void SendConsumeThenRoll(bool bAdvanced, int32 RequestedCount, FName ActionKey, FOnSkinPullDone Done);
+
+	// 성공·실패 모든 경로의 유일한 종료 지점 — pending 해제와 Done 호출이 여기 하나로 모인다.
+	void FinishServerPull(bool bAdvanced, bool bOk, int32 Rolls, bool bReplayed, FName ActionKey, FOnSkinPullDone Done);
+
+	UCloudEconomySubsystem* GetCloudEconomy() const;
 
 	// 캐시
 	UPROPERTY()

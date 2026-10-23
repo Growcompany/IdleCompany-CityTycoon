@@ -13,7 +13,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBuildCardSelected, const FBuildab
 /**
  * 건물 카드 위젯
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UBuildEntityCardWidget : public UEntityCardWidgetBase
 {
 	GENERATED_BODY()

@@ -2,8 +2,86 @@
 #include "Player/PlayerCamera.h"
 #include "UI/HUD/GuideTooltipPlacement.h"
 #include "UI/HUD/MissionGuideOverlayWidget.h"
+#include "UI/HUD/PanelIntroOverlayWidget.h"
+#include "UI/Element/Common/GuideTooltipWidget.h"
+#include "UI/HUD/GuideHoleTransition.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRGuideHoleTransitionTest,
+	"CGR.GuideTooltip.HoleTransition",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRGuideHoleTransitionTest::RunTest(const FString& Parameters)
+{
+	FGuideHoleTransition Motion;
+	FVector2D Center(100.f, 200.f);
+	FVector2D Half(40.f, 60.f);
+	Motion.Advance(Center, Half, 0.f);
+	TestTrue(TEXT("first target appears without flying from origin"), Motion.IsSettled());
+	Motion.Retarget();
+	Center = FVector2D(900.f, 600.f);
+	Half = FVector2D(160.f, 100.f);
+	Motion.Advance(Center, Half, 0.f);
+	TestEqual(TEXT("target change starts at visible center"), Center, FVector2D(100.f, 200.f));
+	TestEqual(TEXT("target change starts at visible size"), Half, FVector2D(40.f, 60.f));
+	TestFalse(TEXT("moving target is not yet actionable"), Motion.IsSettled());
+	Center = FVector2D(900.f, 600.f);
+	Half = FVector2D(160.f, 100.f);
+	Motion.Advance(Center, Half, 0.12f);
+	TestTrue(TEXT("center travels between targets"), Center.X > 100.f && Center.X < 900.f);
+	TestTrue(TEXT("size morphs between targets"), Half.X > 40.f && Half.X < 160.f);
+	const FVector2D VisibleCenter = Center;
+	const FVector2D VisibleHalf = Half;
+	Motion.Retarget();
+	Center = FVector2D(300.f, 100.f);
+	Half = FVector2D(70.f, 30.f);
+	Motion.Advance(Center, Half, 0.f);
+	TestEqual(TEXT("interrupted move continues from visible center"), Center, VisibleCenter);
+	TestEqual(TEXT("interrupted move continues from visible size"), Half, VisibleHalf);
+	Center = FVector2D(320.f, 120.f);
+	Half = FVector2D(72.f, 32.f);
+	Motion.Advance(Center, Half, 0.3f);
+	TestTrue(TEXT("moving destination cannot prolong fixed transition"), Motion.IsSettled());
+	TestEqual(TEXT("arrives at current destination"), Center, FVector2D(320.f, 120.f));
+	TestEqual(TEXT("arrives at current size"), Half, FVector2D(72.f, 32.f));
+	Motion.Reset();
+	Center = FVector2D(1500.f, 800.f);
+	Half = FVector2D(100.f, 80.f);
+	Motion.Advance(Center, Half, 0.f);
+	TestEqual(TEXT("reopening never flies from a hidden old target"), Center, FVector2D(1500.f, 800.f));
+	TestTrue(TEXT("reopening is settled"), Motion.IsSettled());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRGuideTooltipRevealTest,
+	"CGR.GuideTooltip.RevealLifecycle",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRGuideTooltipRevealTest::RunTest(const FString& Parameters)
+{
+	UGuideTooltipWidget* Tip = NewObject<UGuideTooltipWidget>();
+	const FText Line = FText::FromString(TEXT("first hint"));
+	Tip->SetContent(FText::GetEmpty(), Line);
+	Tip->AdvanceReveal(0.21f);
+	const float MidOpacity = Tip->GetRenderOpacity();
+	TestTrue(TEXT("hint fades in"), MidOpacity > 0.f && MidOpacity < 1.f);
+	TestFalse(TEXT("polling same content preserves reveal"), Tip->SetContent(FText::GetEmpty(), Line));
+	Tip->AdvanceReveal(0.26f);
+	TestEqual(TEXT("repeated polling can finish reveal"), Tip->GetRenderOpacity(), 1.f);
+	TestEqual(TEXT("settled hint stops moving"), Tip->GetRenderTransform().Translation, FVector2D::ZeroVector);
+	Tip->HideGuide();
+	TestEqual(TEXT("unresolved target hides hint"), Tip->GetVisibility(), ESlateVisibility::Collapsed);
+	Tip->AdvanceReveal(0.f);
+	TestEqual(TEXT("reappearing hint starts transparent"), Tip->GetRenderOpacity(), 0.f);
+	Tip->AdvanceReveal(0.5f);
+	Tip->SetContent(FText::GetEmpty(), FText::FromString(TEXT("next hint")));
+	Tip->AdvanceReveal(0.f);
+	TestEqual(TEXT("new content gets its own reveal"), Tip->GetRenderOpacity(), 0.f);
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCGRGuideTooltipPositionTest,
@@ -54,6 +132,109 @@ bool FCGRGuideTooltipPositionTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("과대 툴팁 Y"), P.Y, 72.0);
 	}
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGRGuideTooltipAvoidanceTest,
+	"CGR.GuideTooltip.ContentAvoidance",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRGuideTooltipAvoidanceTest::RunTest(const FString& Parameters)
+{
+	const FVector2D Tip(580., 170.);
+	const FVector2D Button(320., 100.);
+	for (const double Width : {2304., 2880., 3120.})
+	{
+		const FVector2D Screen(Width, 1440.);
+		const FVector2D Anchor(Width * 0.5, 1240.);
+		const FSlateRect Rewards(Width * 0.5 - 720., 850., Width * 0.5 + 720., 1170.);
+		const TArray<FSlateRect> Obstacles{Rewards};
+		const FGuideTooltipLayout Result = ResolveGuideTooltipLayout(
+			EGuideTooltipDir::Down, Anchor, Button, Tip, Screen, 72.f, 30.f, Obstacles);
+		TestTrue(TEXT("launch reward row remains readable at each supported width"), Result.bAvoidsContent);
+		TestTrue(TEXT("tooltip clears reward bottom or side"),
+			Result.Position.Y >= Rewards.Bottom || Result.Position.X + Tip.X <= Rewards.Left || Result.Position.X >= Rewards.Right);
+		TestTrue(TEXT("launch tooltip stays inside safe screen"), Result.Position.X >= 72. && Result.Position.Y >= 72.
+			&& Result.Position.X + Tip.X <= Width - 72. && Result.Position.Y + Tip.Y <= 1368.);
+	}
+	{
+		const FVector2D Anchor(1152., 800.);
+		const FVector2D Screen(2304., 1440.);
+		const TArray<FSlateRect> Obstacles{FSlateRect(900., 450., 1400., 740.)};
+		const FGuideTooltipLayout Result = ResolveGuideTooltipLayout(
+			EGuideTooltipDir::Down, Anchor, Button, Tip, Screen, 72.f, 30.f, Obstacles);
+		TestTrue(TEXT("chooses unoccupied opposite side instead of covering price text"), Result.bAvoidsContent);
+		TestEqual(TEXT("tail follows resolved side"), Result.Direction, EGuideTooltipDir::Up);
+	}
+	{
+		const FGuideTooltipLayout Result = ResolveGuideTooltipLayout(EGuideTooltipDir::Down,
+			FVector2D(200., 120.), Button, Tip, FVector2D(2304., 1440.), 72.f, 30.f, {});
+		TestTrue(TEXT("screen-edge panel intro can flip without hiding its anchor"), Result.bAvoidsContent);
+		TestEqual(TEXT("top-edge tail points up"), Result.Direction, EGuideTooltipDir::Up);
+	}
+	{
+		// 우측 공장 패널 ― 인부 버튼이 든 자기 행과 위아래 다른 강화 행. 패널 밖 멀리 나가지 않고 자기 행 위에 놓인다
+		const FVector2D FactoryButton(2110., 720.);
+		const TArray<FSlateRect> FactoryRows{FSlateRect(1450., 170., 2260., 420.), FSlateRect(1450., 600., 2260., 840.),
+			FSlateRect(1450., 1020., 2260., 1270.)};
+		const FGuideTooltipLayout Result = ResolveGuideTooltipLayout(EGuideTooltipDir::Right,
+			FactoryButton, Button, Tip, FVector2D(2304., 1440.), 72.f, 30.f, FactoryRows);
+		const FSlateRect TipRect(Result.Position.X, Result.Position.Y, Result.Position.X + Tip.X, Result.Position.Y + Tip.Y);
+		const FSlateRect ButtonRect(FactoryButton.X - Button.X * 0.5, FactoryButton.Y - Button.Y * 0.5,
+			FactoryButton.X + Button.X * 0.5, FactoryButton.Y + Button.Y * 0.5);
+		const double GapX = FMath::Max3(0., double(ButtonRect.Left - TipRect.Right), double(TipRect.Left - ButtonRect.Right));
+		const double GapY = FMath::Max3(0., double(ButtonRect.Top - TipRect.Bottom), double(TipRect.Top - ButtonRect.Bottom));
+		TestTrue(TEXT("dense factory content keeps the tooltip next to its button"), FMath::Max(GapX, GapY) <= 30. + 48. + 1.);
+		TestTrue(TEXT("the button's own row is not content to avoid, other rows stay clear"), Result.bAvoidsContent);
+		TestEqual(TEXT("factory tooltip sits beside its button"), Result.Direction, EGuideTooltipDir::Right);
+	}
+	{
+		// 오른쪽 위 닫기(X)를 짚는데 아래가 행으로 꽉 차 있다 ― 마지막 행 밑까지 내려가지 않는다
+		const FVector2D CloseCenter(2150., 150.);
+		const FVector2D CloseSize(104., 104.);
+		const FSlateRect Rows(1300., 230., 2260., 1300.);
+		const FGuideTooltipLayout Result = ResolveGuideTooltipLayout(EGuideTooltipDir::Down,
+			CloseCenter, CloseSize, Tip, FVector2D(2304., 1440.), 72.f, 30.f, {Rows});
+		const double DistanceBelow = Result.Position.Y - (CloseCenter.Y + CloseSize.Y * 0.5);
+		const double DistanceLeft = (CloseCenter.X - CloseSize.X * 0.5) - (Result.Position.X + Tip.X);
+		TestTrue(TEXT("close-button tooltip stays beside the button"),
+			FMath::Max(DistanceBelow, DistanceLeft) <= 30. + 48. + 1.);
+	}
+	{
+		// 덮으면 안 되는 것(다른 창의 닫기 X·손 그림)은 읽는 내용보다 먼저 피한다
+		const FVector2D Anchor(1152., 800.);
+		const FVector2D Screen(2304., 1440.);
+		FGuideTooltipAvoid Avoid;
+		Avoid.Hard.Add(FSlateRect(1100., 520., 1204., 624.));   // 기본 자리(위쪽)를 지나는 닫기 X
+		Avoid.Hard.Add(FSlateRect(1000., 880., 1300., 1100.));  // 아래쪽을 덮는 손 그림
+		const FGuideTooltipLayout Result = ResolveGuideTooltipLayoutAvoiding(
+			EGuideTooltipDir::Down, Anchor, Button, Tip, Screen, 72.f, 30.f, Avoid);
+		TestEqual(TEXT("hard rects are never covered when a side is free"),
+			SumGuideTooltipOverlap(Result.Position, Tip, Avoid.Hard, 0.), 0.);
+		TestTrue(TEXT("free side is the left or right of the button"),
+			Result.Direction == EGuideTooltipDir::Left || Result.Direction == EGuideTooltipDir::Right);
+	}
+	{
+		// 같은 거리 후보 중에서는 다른 버튼보다 글자를 덮는 편을 고른다
+		const FVector2D Anchor(1152., 800.);
+		FGuideTooltipAvoid Avoid;
+		Avoid.Controls.Add(FSlateRect(992., 890., 1312., 990.));  // 바로 아래 다른 버튼
+		Avoid.Soft.Add(FSlateRect(700., 540., 1600., 735.));      // 위쪽 설명 글자
+		const FGuideTooltipLayout Result = ResolveGuideTooltipLayoutAvoiding(
+			EGuideTooltipDir::Up, Anchor, Button, Tip, FVector2D(2304., 1440.), 72.f, 30.f, Avoid);
+		TestEqual(TEXT("neighbor button stays uncovered"), SumGuideTooltipOverlap(Result.Position, Tip, Avoid.Controls, 0.), 0.);
+	}
+	{
+		// 버튼만 비워 두고 사방이 내용으로 찬 화면(버튼을 감싼 하나짜리 묶음은 대상 자신이라 피할 내용이 아니다)
+		const TArray<FSlateRect> Full{FSlateRect(0., 0., 2304., 700.), FSlateRect(0., 900., 2304., 1440.),
+			FSlateRect(0., 700., 900., 900.), FSlateRect(1404., 700., 2304., 900.)};
+		const FGuideTooltipLayout Result = ResolveGuideTooltipLayout(EGuideTooltipDir::Down,
+			FVector2D(1152., 800.), Button, Tip, FVector2D(2304., 1440.), 72.f, 30.f, Full);
+		TestFalse(TEXT("crowded fallback is not reported as unobstructed"), Result.bAvoidsContent);
+		TestTrue(TEXT("crowded fallback still keeps actionable button uncovered"),
+			Result.Position.Y + Tip.Y <= 750. || Result.Position.Y >= 850.
+			|| Result.Position.X + Tip.X <= 992. || Result.Position.X >= 1312.);
+	}
 	return true;
 }
 
@@ -256,6 +437,36 @@ bool FCGRGuideExplainStepTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGRGuideExplainReadGateTest,
+	"CGR.GuideTooltip.ExplainReadGate",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRGuideExplainReadGateTest::RunTest(const FString& Parameters)
+{
+	FGuideExplainReadGate Gate;
+	constexpr float ReadSeconds = 1.2f;
+	Gate.Update(0, true, 0.5f);
+	TestFalse(TEXT("first visible frame cannot skip"), Gate.CanAdvance(0, ReadSeconds));
+	Gate.Update(0, true, 0.7f);
+	TestFalse(TEXT("rapid tap before reading time"), Gate.CanAdvance(0, ReadSeconds));
+	Gate.Update(0, true, 0.51f);
+	TestTrue(TEXT("visible reading time permits tap"), Gate.CanAdvance(0, ReadSeconds));
+	Gate.Reset();
+	TestFalse(TEXT("second tap in the same frame cannot advance"), Gate.CanAdvance(0, ReadSeconds));
+	Gate.Update(1, true, 0.5f);
+	Gate.Update(1, true, 1.21f);
+	TestTrue(TEXT("next step earns its own reading time"), Gate.CanAdvance(1, ReadSeconds));
+	TestFalse(TEXT("old step cannot use next step time"), Gate.CanAdvance(0, ReadSeconds));
+	Gate.Update(2, true, 2.f);
+	TestFalse(TEXT("external step change clears old reading time"), Gate.CanAdvance(2, ReadSeconds));
+	Gate.Update(2, true, 1.21f);
+	Gate.Update(2, false, 2.f);
+	TestFalse(TEXT("hidden or moving explanation loses reading time"), Gate.CanAdvance(2, ReadSeconds));
+	Gate.Update(2, true, 0.5f);
+	TestFalse(TEXT("reappearing explanation starts over"), Gate.CanAdvance(2, ReadSeconds));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGRGuideExplainAtomicAdvanceTest,
 	"CGR.GuideTooltip.AtomicAdvance",
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
@@ -304,6 +515,43 @@ bool FCGRCameraFocusSettleTest::RunTest(const FString& Parameters)
 	// 한 축만 만족하면 보조 탈출로는 안 열린다(둘 다여야 한다)
 	TestFalse(TEXT("위치만 가까움"), ShouldTreatFocusAsSettled(true, 0.f, Settle, 10.f, LocTol, 0.5f, ZoomTol));
 	TestFalse(TEXT("줌만 가까움"), ShouldTreatFocusAsSettled(true, 0.f, Settle, 5000.f, LocTol, 0.001f, ZoomTol));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRPanelIntroAnchorActionTest,
+	"CGR.GuideTooltip.AnchorAction",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRPanelIntroAnchorActionTest::RunTest(const FString& Parameters)
+{
+	const float Timeout = 0.5f;
+
+	// 해결됐고 사각형도 유효 = 그린다
+	TestEqual(TEXT("정상 앵커"),
+		ResolvePanelIntroAnchorAction(true, true, 0.0f, Timeout),
+		EPanelIntroAnchorAction::Draw);
+
+	// 레이아웃 전 1~2프레임 ― 진짜 앵커도 여기 걸린다. 기다려야 한다
+	TestEqual(TEXT("레이아웃 전은 대기"),
+		ResolvePanelIntroAnchorAction(true, false, 0.016f, Timeout),
+		EPanelIntroAnchorAction::Wait);
+
+	// 상한을 넘도록 못 잡으면 화면에 없는 앵커다 ― 건너뛴다
+	TestEqual(TEXT("상한 초과는 스킵"),
+		ResolvePanelIntroAnchorAction(true, false, 0.6f, Timeout),
+		EPanelIntroAnchorAction::Skip);
+
+	// 앵커 자체를 못 찾은 경우도 같은 상한을 탄다
+	TestEqual(TEXT("미해결 앵커도 상한 적용"),
+		ResolvePanelIntroAnchorAction(false, false, 0.6f, Timeout),
+		EPanelIntroAnchorAction::Skip);
+
+	// 경계값 ― 같으면 아직 대기(초과해야 스킵)
+	TestEqual(TEXT("경계는 대기"),
+		ResolvePanelIntroAnchorAction(true, false, Timeout, Timeout),
+		EPanelIntroAnchorAction::Wait);
 
 	return true;
 }

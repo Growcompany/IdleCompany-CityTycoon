@@ -8,11 +8,11 @@ struct FOperationData;
 
 /**
  * 판매 감쇠 곡선 라이브 그래프 (UIE_SalesCurve) — 순수 Slate MakeLines, 텍스처/트리 0.
- * 실현선(지금까지 rps 샘플) + 투영 점선(감쇠 외삽) + 현재점 + 그리드.
+ * 실현선(지금까지 rps 샘플) + 투영 점선(감쇠 외삽) + 현재점. 바탕 칸은 호스트(운영 카드)가 그린다.
  * 자가 트리(RebuildWidget) — WBP는 빈 껍데기(reparent만), 배치는 호스트 슬롯이 담당.
  * 피드: OfficeMainWidget이 OnOperationUpdated 틱마다 PushSample. 새 운영 감지 시 자동 리셋.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API USalesCurveWidget : public UUserWidget
 {
 	GENERATED_BODY()

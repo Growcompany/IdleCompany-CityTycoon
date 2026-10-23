@@ -14,7 +14,7 @@ class UImage;
  * 개별 채팅 메시지 엘리먼트 위젯
  * - ScrollBox 내에서 메시지 한 줄을 표시
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UChatMessageWidget : public UUserWidget
 {
 	GENERATED_BODY()

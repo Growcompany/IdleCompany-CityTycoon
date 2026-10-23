@@ -52,6 +52,28 @@ inline bool IsProjectType(ECompanyType Type)
 		|| Type == ECompanyType::IT;
 }
 
+// 직원·개발 분야의 활성 슬롯 수. 미지정 회사는 기존 프로젝트형 프로필을 사용한다.
+inline int32 GetDisciplineCountForCompany(ECompanyType Type)
+{
+	return IsManufacturingType(Type) ? 3 : 6;
+}
+
+// 산업 타일 표시 상태. 잠김과 미가용은 다른 축이다 —
+// 잠김은 갈망 티저로 보여주고, 미가용(이번 빌드 범위 밖)은 접는다.
+UENUM()
+enum class EIndustryTileState : uint8
+{
+	Unlocked,
+	Locked,
+	Hidden
+};
+
+inline EIndustryTileState DecideIndustryTileState(bool bAvailable, bool bUnlocked)
+{
+	if (!bAvailable) return EIndustryTileState::Hidden;
+	return bUnlocked ? EIndustryTileState::Unlocked : EIndustryTileState::Locked;
+}
+
 // 문자열을 회사 타입으로 변환
 inline ECompanyType StringToCompanyType(const FString& TypeString)
 {

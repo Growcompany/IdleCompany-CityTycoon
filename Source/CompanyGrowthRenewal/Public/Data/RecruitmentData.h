@@ -4,7 +4,6 @@
 
 #include "CoreMinimal.h"
 #include "Data/EmployeeTypes.h"
-#include "Data/CharacterAppearanceTypes.h"
 #include "Enum/LootBoxRarity.h"
 #include "RecruitmentData.generated.h"
 
@@ -29,9 +28,6 @@ struct FApplicantResume
 
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Applicant|Identity")
 	EEmployeeDepartment Department = EEmployeeDepartment::None;
-
-	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Applicant|Appearance")
-	FCharacterAppearance Appearance;
 
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Applicant|Rarity")
 	ELootBoxRarity Rarity = ELootBoxRarity::Common;

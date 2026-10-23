@@ -1,7 +1,11 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Panel/BuildingManagePanelWidget.h"
+#include "UI/Element/Common/PanelHeaderWidget.h"
+#include "Manager/PanelIntroSubsystem.h"
 #include "UI/Panel/BuildingEnhancementLockPolicy.h"
+#include "UI/Panel/BuildingManageCameraFraming.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
 #include "Core/CGGameInstance.h"
 #include "Player/MainMapPlayerController.h"
 #include "Player/PlayerCamera.h"
@@ -15,10 +19,8 @@
 #include "UI/Element/Buttons/CostActionButtonWidget.h"
 #include "UI/Panel/BuildPlacementWidget.h"
 #include "UI/Panel/BuildPlacementPanelWidget.h"
-#include "UI/Panel/TierRoadmapWidget.h"
 #include "Manager/UIManagerSubsystem.h"
-#include "Manager/EntityManager.h"
-#include "Manager/KeystoneAuraSubsystem.h"
+#include "Utils/FWidgetAnimationUtils.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "UI/Panel/InGameLayerWidget.h"
 #include "Manager/SoundManagerSubsystem.h"
@@ -27,6 +29,7 @@
 #include "Manager/SaveLoadManager.h"
 #include "Manager/ResourceItemManager.h"
 #include "Manager/BuildingTraitManagerSubsystem.h"
+#include "Manager/CloudEconomySubsystem.h"
 #include "Table/BuildingTraitTable.h"
 #include "UI/Element/Building/TraitCardSlotWidget.h"
 #include "UI/Element/Building/TraitSlotWidget.h"
@@ -69,6 +72,13 @@ void UBuildingManagePanelWidget::NativeOnActivated()
 	// 자체 Show/Hide 애님(UIE_PanelBorder 오른쪽↔왼쪽)은 베이스가 재생. 여기선 입력 모드 복원 + 우측 컬럼 트윈을 추가.
 	Super::NativeOnActivated();
 
+	// 최초 진입 코치마크 — 등장 트윈이 끝난 뒤 딤을 덮는다(EmployeeWindow 와 같은 0.5s)
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().SetTimer(
+			PanelIntroTimer, this, &UBuildingManagePanelWidget::TryPlayPanelIntro, 0.5f, false);
+	}
+
 	// 자식 위젯을 push 하면 컨테이너가 이 패널을 deactivate 해 Normal 로 내려가는데, 재활성 시 아무도 되돌리지 않는다
 	UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
 	if (GameInstance)
@@ -96,8 +106,15 @@ void UBuildingManagePanelWidget::NativeOnActivated()
 	}
 }
 
+void UBuildingManagePanelWidget::NativeOnInitialized()
+{
+	Super::NativeOnInitialized();
+	InfoColumnAuthoredVisibility = LeftPanelRightBox->GetVisibility();
+}
+
 void UBuildingManagePanelWidget::NativeConstruct()
 {
+	bIsBackHandler = true;
 	Super::NativeConstruct();
 
 	UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
@@ -108,6 +125,14 @@ void UBuildingManagePanelWidget::NativeConstruct()
 
 	// 풀 재사용 인스턴스는 이전 세션의 TargetBuilding 을 들고 들어온다 — 소유권은 매 세션 SetTargetBuilding 이 다시 준다
 	bOwnsFocusTarget = false;
+	bCameraFocusPending = false;
+	LastCameraFocusViewportSize = FVector2D::ZeroVector;
+	LastCameraFocusScreenCenterX = -1.f;
+	CameraFocusPanelBoundary = GetWidgetFromName(TEXT("UIE_PanelBorder"));
+	if (!CameraFocusPanelBoundary.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanel] Camera framing boundary UIE_PanelBorder is missing"));
+	}
 
 	// 탭 버튼 그룹 초기화
 	TabButtonGroup = NewObject<UCommonButtonGroupBase>(this);
@@ -122,6 +147,8 @@ void UBuildingManagePanelWidget::NativeConstruct()
 		{
 			TabButtonGroup->AddWidget(Btn);
 			Btn->SetIsSelectable(true);
+			// 전환음은 OnTabSelectionChanged 가 낸다 — 버튼 자체 클릭음을 끊어 두 발을 막는다
+			if (UButtonWidget* TabBtn = Cast<UButtonWidget>(Btn)) TabBtn->SetPlayClickSound(false);
 		}
 	};
 	RegisterTab(EnhancementTab);
@@ -138,33 +165,15 @@ void UBuildingManagePanelWidget::NativeConstruct()
 	SetupTraitSortButtonGroup();
 
 	// 닫기 버튼 바인딩
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UBuildingManagePanelWidget::OnCloseButtonClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UBuildingManagePanelWidget::OnCloseButtonClicked);
 	}
 
 	// 배경 클릭 시 닫기
 	if (BackgroundBtn)
 	{
 		BackgroundBtn->OnClicked.AddDynamic(this, &UBuildingManagePanelWidget::OnBackgroundClicked);
-	}
-
-	// 레벨 배지 → 해금 로드맵 (NativeDestruct 와 쌍)
-	if (LevelBadgeButton)
-	{
-		LevelBadgeButton->OnClicked.AddDynamic(this, &UBuildingManagePanelWidget::HandleLevelChipClicked);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanel] LevelBadgeButton 미배치 — 레벨 로드맵 진입 불가 (WBP 확인)"));
-	}
-
-	// 상주 배지는 레벨업에 스스로 반응한다 (NativeDestruct 와 쌍)
-	if (GameInstance)
-	{
-		if (USaveLoadManager* SaveMgr = GameInstance->GetSubsystem<USaveLoadManager>())
-		{
-		}
 	}
 
 	// [재배치] — 좌하단 정적 버튼 (클릭 사운드는 버튼이 자체 재생)
@@ -200,7 +209,7 @@ void UBuildingManagePanelWidget::NativeConstruct()
 	// 미션 가이드(M3 EnterOffice) — 관리 패널 열림 = 빌딩 클릭 → [입장] 유도 페이즈로 전환 + [입장] 버튼 하이라이트 등록
 	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
 	{
-		bLastTutorialCompleted = MissionMgr->IsTutorialCompleted();
+		bLastCompanyEnhancementUnlocked = MissionMgr->IsCompanyEnhancementUnlocked();
 		MissionMgr->OnMissionCompleted.AddUObject(this, &UBuildingManagePanelWidget::HandleMissionCompleted);
 		MissionMgr->NotifyManagePanelOpened(this);
 	}
@@ -247,12 +256,7 @@ void UBuildingManagePanelWidget::NativeConstruct()
 		bTraitDelegatesBound = true;
 	}
 
-	// 모달 레이어 크롬 (정적 트리 위젯 — Construct/Destruct 쌍)
-	if (TraitModalDimButton) TraitModalDimButton->OnClicked.AddDynamic(this, &UBuildingManagePanelWidget::OnTraitModalDimClicked);
-	if (TraitNavPrevButton) TraitNavPrevButton->OnClicked().AddUObject(this, &UBuildingManagePanelWidget::HandleTraitNavPrev);
-	if (TraitNavNextButton) TraitNavNextButton->OnClicked().AddUObject(this, &UBuildingManagePanelWidget::HandleTraitNavNext);
-
-	// 팝업/딤 초기 숨김
+	// 특성 상세 초기 숨김
 	CloseTraitDetailPopup();
 
 	// 1분 주기 기대 수익 폴링 — 패널 열린 동안만 동작, 이벤트 델리게이트 누락 대비 fallback
@@ -273,6 +277,22 @@ void UBuildingManagePanelWidget::NativeConstruct()
 		PopulateBuildingStats();
 		UpdateProjectStatus();
 	}
+
+	// 잠금이 풀리는 순간 서버값으로 정정된 보석 잔액으로 슬롯 해금 비용 표시를 다시 계산한다
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UCloudEconomySubsystem* Cloud = GI->GetSubsystem<UCloudEconomySubsystem>())
+		{
+			Cloud->OnEconomyReady.AddUObject(this, &UBuildingManagePanelWidget::HandleEconomyReady);
+		}
+	}
+}
+
+void UBuildingManagePanelWidget::HandleEconomyReady(bool bReady)
+{
+	// 잠긴 동안에도 버튼은 살려 둔다 — 조용히 죽은 버튼은 "보석이 사라졌다" 로 읽힌다.
+	// 탭하면 NotifyCloudOpFailure 가 3상태 중 하나를 말해준다(§7.2)
+	RebuildTraitSlots();
 }
 
 void UBuildingManagePanelWidget::NativeDestruct()
@@ -302,18 +322,20 @@ void UBuildingManagePanelWidget::NativeDestruct()
 		{
 			MissionMgr->OnMissionCompleted.RemoveAll(this);
 		}
+
+		if (UCloudEconomySubsystem* Cloud = GI->GetSubsystem<UCloudEconomySubsystem>())
+		{
+			Cloud->OnEconomyReady.RemoveAll(this);
+		}
 	}
 
-	// 특성 상세 팝업/딤 언바인딩
+	// 특성 상세 팝업 언바인딩
 	if (TraitDetailPopup)
 	{
 		TraitDetailPopup->OnEquipClicked.Unbind();
 		TraitDetailPopup->OnUnequipClicked.Unbind();
 		TraitDetailPopup->OnCloseClicked.Unbind();
 	}
-	if (TraitModalDimButton) TraitModalDimButton->OnClicked.RemoveDynamic(this, &UBuildingManagePanelWidget::OnTraitModalDimClicked);
-	if (TraitNavPrevButton) TraitNavPrevButton->OnClicked().RemoveAll(this);
-	if (TraitNavNextButton) TraitNavNextButton->OnClicked().RemoveAll(this);
 	bTraitDelegatesBound = false;
 
 	// 기대 수익 폴링 타이머 해제
@@ -338,14 +360,10 @@ void UBuildingManagePanelWidget::NativeDestruct()
 		RelocateButton->OnClicked().RemoveAll(this);
 	}
 
-	if (LevelBadgeButton)
-	{
-		LevelBadgeButton->OnClicked.RemoveDynamic(this, &UBuildingManagePanelWidget::HandleLevelChipClicked);
-	}
 
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.RemoveAll(this);
+		PanelCloseButton->OnCloseClicked.RemoveAll(this);
 	}
 
 	// TabButtonGroup 정리
@@ -394,7 +412,7 @@ void UBuildingManagePanelWidget::NativeDestruct()
 void UBuildingManagePanelWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
-	RefreshEnhancementLocksIfTutorialStateChanged();
+	UpdateRejectShake(InDeltaTime);
 
 	// 우측 컬럼 등장 슬라이드 (CubicOut, 위치만 — 투명도 페이드는 스택 FADE_ONLY 담당)
 	if (bRightAppearing && RightColumn)
@@ -410,16 +428,112 @@ void UBuildingManagePanelWidget::NativeTick(const FGeometry& MyGeometry, float I
 		}
 	}
 
-	// 건물이 파괴되었거나 없어진 경우 위젯 닫기
-	if (!TargetBuilding || !TargetBuilding->IsValidLowLevel())
+	// IsValidLowLevel 은 메모리 생존만 본다 - PendingKill(파괴 예약) 액터를 유효로 통과시킨다
+	if (!IsValid(TargetBuilding))
 	{
 		OnCloseButtonClicked();
+		return;
 	}
+	if (IsActivated() && !IsCloseRequested())
+	{
+		RefreshTargetBuildingFocus();
+	}
+}
+
+void UBuildingManagePanelWidget::RefreshTargetBuildingFocus()
+{
+	if ((!bCameraFocusPending && !bOwnsFocusTarget) || !IsValid(Player) || !IsValid(TargetBuilding)
+		|| !CameraFocusPanelBoundary.IsValid())
+	{
+		return;
+	}
+
+	// 레이아웃 좌표로 읽어 등장 애니메이션의 render translation을 프레이밍에 섞지 않는다.
+	const FSlateRect ViewportRect = UWidgetLayoutLibrary::GetViewportWidgetGeometry(this).GetLayoutBoundingRect();
+	const FSlateRect RightUIRect = CameraFocusPanelBoundary->GetCachedGeometry().GetLayoutBoundingRect();
+	if (RightUIRect.Right <= RightUIRect.Left || RightUIRect.Bottom <= RightUIRect.Top)
+	{
+		return;
+	}
+
+	float ScreenCenterRatioX = 0.f;
+	if (!BuildingManageCameraFraming::TryGetScreenCenterRatioX(ViewportRect, RightUIRect, ScreenCenterRatioX))
+	{
+		return;
+	}
+	const FVector2D ViewportSize(ViewportRect.Right - ViewportRect.Left, ViewportRect.Bottom - ViewportRect.Top);
+	if (!bCameraFocusPending && LastCameraFocusViewportSize.Equals(ViewportSize, 1.f)
+		&& FMath::IsNearlyEqual(LastCameraFocusScreenCenterX, ScreenCenterRatioX, 0.0005f))
+	{
+		return;
+	}
+
+	Player->FocusOnBuilding(TargetBuilding, CameraFocusTopPadding, CameraFocusBottomPadding, ScreenCenterRatioX);
+	bOwnsFocusTarget = true;
+	bCameraFocusPending = false;
+	LastCameraFocusViewportSize = ViewportSize;
+	LastCameraFocusScreenCenterX = ScreenCenterRatioX;
+	UE_LOG(LogTemp, Log, TEXT("[BuildingManageFocus] Viewport=%.0fx%.0f, RightUILeft=%.1f, CenterX=%.4f"),
+		ViewportSize.X, ViewportSize.Y, RightUIRect.Left - ViewportRect.Left, ScreenCenterRatioX);
+}
+
+void UBuildingManagePanelWidget::TryPlayPanelIntro()
+{
+	// 타이머 대기 중 창이 닫혔을 수 있다
+	if (!IsActivated())
+	{
+		return;
+	}
+	UPanelIntroSubsystem* IntroMgr = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UPanelIntroSubsystem>() : nullptr;
+	if (!IntroMgr)
+	{
+		return;
+	}
+	// 함수 지역 static 이라 유니티 빌드 셰도잉이 없다
+	static const FName IntroKey(TEXT("BuildingManage"));
+	PanelIntroOverlay = IntroMgr->PlayIntro(this, IntroKey, /*bIgnoreSeen=*/false);
+	if (UPanelIntroOverlayWidget* Overlay = PanelIntroOverlay.Get())
+	{
+		Overlay->OnIntroFinished.AddUObject(this, &UBuildingManagePanelWidget::HandlePanelIntroFinished);
+	}
+}
+
+void UBuildingManagePanelWidget::HandlePanelIntroFinished()
+{
+	PanelIntroOverlay.Reset();
+}
+
+bool UBuildingManagePanelWidget::NativeOnHandleBackAction()
+{
+	if (!CGBackNav::IsTopWindow(*this)) return false;
+
+	// 안쪽부터: 열린 특성 상세의 X → 없으면 패널 자신의 닫기 수단(루트 처리기와 같은 경로)
+	UWidget* Press = (IsTraitDetailOpen() && TraitDetailPopup)
+		? CGBackNav::FindDismissControl(*TraitDetailPopup, /*bAllowBackdrop*/ false)
+		: CGBackNav::FindDismissControl(*this);
+	if (Press && !CGBackNav::IsBlockedByGuide(*this, Press))
+	{
+		CGBackNav::Press(*Press);
+	}
+	return true;
 }
 
 void UBuildingManagePanelWidget::NativeOnDeactivated()
 {
 	Super::NativeOnDeactivated();
+	bCameraFocusPending = false;
+
+	// 인트로는 뷰포트 오버레이라 스택이 안 거둬간다 — RemoveFromParent → NativeDestruct 가 복구 신호를 쏜다
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(PanelIntroTimer);
+	}
+	if (UPanelIntroOverlayWidget* Intro = PanelIntroOverlay.Get())
+	{
+		Intro->RemoveFromParent();
+	}
+	PanelIntroOverlay.Reset();
 
 	// 우측 컬럼 트윈 잔여 상태 정리 (풀 재사용 시 오프셋 박제 방지)
 	bRightAppearing = false;
@@ -428,32 +542,21 @@ void UBuildingManagePanelWidget::NativeOnDeactivated()
 		RightColumn->SetRenderTranslation(FVector2D::ZeroVector);
 	}
 
-	// 패널이 닫히면 어떤 모뉴먼트도 선택 상태가 아니므로 모든 영향권 링 + 바닥 하이라이트를 숨김
-	if (UWorld* World = GetWorld())
-	{
-		if (UEntityManager* EntityMgr = World->GetSubsystem<UEntityManager>())
-		{
-			for (ABuildingBaseActor* BuildingActor : EntityMgr->GetBuildings())
-			{
-				if (BuildingActor)
-				{
-					BuildingActor->SetKeystoneRingVisible(false);
-					BuildingActor->SetAuraHighlight(false);
-				}
-			}
-		}
-	}
-
-	// 키스톤 와이드 포커스로 임시 확장했던 줌 상한 원복 + 가림 고스트 해제 (복귀는 NativeOnActivated 가 재등록)
+	// 가림 고스트 해제 (복귀는 NativeOnActivated 가 재등록)
 	if (Player)
 	{
-		Player->RestoreZoomRange();
 		Player->ClearFocusTarget();
 	}
 
 	// 특성 상세 팝업 닫기 + 타겟 슬롯 초기화 (재활성 시 깨끗한 상태)
 	CloseTraitDetailPopup();
 	SetPendingTargetSlot(INDEX_NONE);
+
+	// 입장 없이 닫혔으면 당겨둔 오피스 맵을 놓는다 (전환 중이면 지금 쓰이는 중이라 유지)
+	if (UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance()))
+	{
+		GameInstance->CancelLevelPreloadIfIdle();
+	}
 
 	// 선택 셰브론 마커 해제
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
@@ -489,59 +592,6 @@ void UBuildingManagePanelWidget::SetTargetBuilding(ABuildingBaseActor* Building,
 {
 	TargetBuilding = Building;
 
-	// 모뉴먼트(키스톤)는 직원/특성 루프 제외 → [강화][스킨]만 노출, [특성] 탭 숨김
-	const bool bKeystone = TargetBuilding && TargetBuilding->IsKeystoneMonument();
-
-	// 영향권 링/하이라이트는 선택된 모뉴먼트에만 표시 — 먼저 전체 링 + 바닥 하이라이트를 끄고, 대상이 모뉴먼트면 그 링 + 영향권 멤버 하이라이트를 켠다
-	if (UWorld* World = GetWorld())
-	{
-		if (UEntityManager* EntityMgr = World->GetSubsystem<UEntityManager>())
-		{
-			for (ABuildingBaseActor* BuildingActor : EntityMgr->GetBuildings())
-			{
-				if (BuildingActor)
-				{
-					BuildingActor->SetKeystoneRingVisible(false);
-					BuildingActor->SetAuraHighlight(false);
-				}
-			}
-		}
-
-		// 대상이 모뉴먼트면 영향권에 드는 이웃 빌딩들에 파란 바닥 하이라이트
-		if (bKeystone)
-		{
-			if (UKeystoneAuraSubsystem* AuraSys = World->GetSubsystem<UKeystoneAuraSubsystem>())
-			{
-				for (ABuildingBaseActor* Member : AuraSys->GetBuildingsInKeystoneZone(TargetBuilding))
-				{
-					if (Member)
-					{
-						Member->SetAuraHighlight(true);
-					}
-				}
-			}
-		}
-	}
-	if (bKeystone)
-	{
-		TargetBuilding->SetKeystoneRingVisible(true);
-	}
-
-	// 입장(오피스) 버튼은 모뉴먼트엔 의미 없음(직원 미수용) → 숨김
-	if (UWidget* EnterBtn = GetWidgetFromName(TEXT("EnterOfficeButton")))
-	{
-		EnterBtn->SetVisibility(bKeystone ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
-	}
-
-	if (TraitTab)
-	{
-		TraitTab->SetVisibility(bKeystone ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
-	}
-	if (bKeystone && CurrentTab == EBuildingManageTab::Trait && TabButtonGroup)
-	{
-		TabButtonGroup->SelectButtonAtIndex(0);  // 숨겨진 특성 탭에 머물지 않도록 강화로 강제
-	}
-
 	// 선택 셰브론 마커 (단일 슬롯이라 대상 교체 시 자동 대체)
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
@@ -555,15 +605,14 @@ void UBuildingManagePanelWidget::SetTargetBuilding(ABuildingBaseActor* Building,
 	if (UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance()))
 	{
 		GameInstance->SetCurrentManagedBuilding(TargetBuilding);
+		// 패널을 읽는 동안 오피스 맵을 비동기로 당겨둔다 — 입장 눌렀을 때 블로킹 로드에서 디스크 I/O 를 뺀다
+		GameInstance->PrewarmLevelPreload(TEXT("OfficeMap"));
 	}
 
-	// 카메라 프레이밍 요청 지점 (우측 패널 회피 → 건물은 화면 왼쪽)
+	// 첫 유효 레이아웃에서 오른쪽 UI를 제외한 구간의 중앙으로 포커싱한다.
 	if (Player && TargetBuilding)
 	{
-		// 층수 비례 포커싱. 키스톤은 영향권 반경이 보이게 더 넓게 (화면 왼쪽 1/4)
-		const float AuraRadius = TargetBuilding->IsKeystoneMonument() ? TargetBuilding->GetKeystoneAuraRadiusCm() : 0.f;
-		Player->FocusOnBuildingOrAura(TargetBuilding, CameraFocusTopPadding, CameraFocusBottomPadding, 0.3f, AuraRadius);
-		bOwnsFocusTarget = true;
+		bCameraFocusPending = true;
 	}
 
 	// 건물이 설정되면 데이터 로드
@@ -603,11 +652,7 @@ void UBuildingManagePanelWidget::SetTargetBuilding(ABuildingBaseActor* Building,
 	// NativeConstruct 의 탭 세팅은 최초 1회뿐이고 재사용 인스턴스는 유저가 마지막에 보던 탭이 남는다
 	// (726행 "매 셋업 기본값 리셋" 원칙과 동일 뿌리). 여긴 여는 쪽이 의도를 주입하는 1회성 데이터
 	// 셋업이라 NativeOnActivated 탭 조작 금지 규칙과 무관하다.
-	EBuildingManageTab ResolvedTab = InitialTab;
-	if (bKeystone && ResolvedTab == EBuildingManageTab::Trait)
-	{
-		ResolvedTab = EBuildingManageTab::Enhancement;  // 키스톤은 특성 탭 숨김 → 강화로
-	}
+	const EBuildingManageTab ResolvedTab = InitialTab;
 	const int32 TabIndex = static_cast<int32>(ResolvedTab);
 	if (TabButtonGroup)
 	{
@@ -643,12 +688,6 @@ void UBuildingManagePanelWidget::HandleRelocateRequested()
 
 	// 클릭 사운드는 RelocateButton(CommonButtonBase)이 자체 재생 — 여기서 중복 재생 금지
 
-	// 스택 규칙: 닫기 먼저(마커 해제 + UI→Normal 복원), push 나중
-	DeactivateWidget();
-
-	PlayerCam->StartBuildingRelocation(Building);
-
-	// BuildPlacement 하단 확인/취소 패널 — 구 롱프레스 경로 이식
 	UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
 	if (!GameInstance)
 	{
@@ -662,19 +701,38 @@ void UBuildingManagePanelWidget::HandleRelocateRequested()
 	}
 	TSubclassOf<UUserWidget> BuildPlacementClass = TableManager->GetWidgetClass(EWidgetType::BuildPlacementPanel);
 	UUIBase* UIBase = UIManager->GetUIBase();
-	if (!BuildPlacementClass || !UIBase)
+	if (!BuildPlacementClass || !UIBase || !PlayerCam->PlacementHandler
+		|| !BuildPlacementClass->IsChildOf(UBuildPlacementPanelWidget::StaticClass()))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanelWidget] Relocation controls are unavailable."));
 		return;
 	}
+
+	// 스택 규칙: 닫기 먼저(마커 해제 + UI→Normal 복원), push 나중
+	DeactivateWidget();
+	PlayerCam->StartBuildingRelocation(Building);
+
 	if (UBuildPlacementPanelWidget* PlacementWidget =
 		Cast<UBuildPlacementPanelWidget>(UIBase->PushBottomClass(BuildPlacementClass.Get())))
 	{
 		PlacementWidget->SetBuildableInfo(FBuildableCardTable(), true);
 	}
+	else
+	{
+		PlayerCam->PlacementHandler->CancelBuildingMove();
+		PlayerCam->EndBuildingRelocation();
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanelWidget] Failed to open relocation controls."));
+	}
 }
 
 void UBuildingManagePanelWidget::OnBackgroundClicked()
 {
+	// 딤 없는 특성 상세가 열려 있으면 빈 곳 클릭은 그것만 닫는다
+	if (IsTraitDetailOpen())
+	{
+		HandlePopupClose();
+		return;
+	}
 	OnCloseButtonClicked();
 }
 
@@ -778,12 +836,11 @@ void UBuildingManagePanelWidget::OnBuildingUpgradeButtonClicked()
 			FloorSlot->PlayUpgradeEffect(false);
 		}
 
-		// 건물이 높아졌으므로 카메라 다시 포커싱 (키스톤은 층수 강화로 영향권도 커지므로 더 큰 줌을 반영)
+		// 건물이 높아졌으므로 카메라 다시 포커싱
 		if (Player)
 		{
 			Player->StopCameraTransition();
-			const float AuraRadius = TargetBuilding->IsKeystoneMonument() ? TargetBuilding->GetKeystoneAuraRadiusCm() : 0.f;
-			Player->FocusOnBuildingOrAura(TargetBuilding, CameraFocusTopPadding, CameraFocusBottomPadding, 0.3f, AuraRadius);
+			bCameraFocusPending = true;
 		}
 
 		// 좌측 패널 건물 정보 갱신
@@ -920,6 +977,7 @@ void UBuildingManagePanelWidget::RebuildTraitCardList()
 		int32 TotalCount;
 		int32 EquippedCount;
 		FBuildingTraitTableRow Row;
+		bool bCanEquipHere = true;
 	};
 
 	// 보유 + "현 건물" 장착 합산 ― 장착하면 인벤 맵에서 빠져 카드가 사라지던 문제 해결.
@@ -956,10 +1014,24 @@ void UBuildingManagePanelWidget::RebuildTraitCardList()
 		Entries.Add(Entry);
 	}
 
+	// 이 건물 업종에 못 끼는 특성(제조 전용 ↔ 프로젝트 전용)은 정렬 기준과 무관하게 맨 뒤
+	if (TargetBuilding)
+	{
+		const int32 BIdx = TargetBuilding->GetBuildingIndex();
+		for (FTraitEntry& Entry : Entries)
+		{
+			Entry.bCanEquipHere = TraitMgr->CanEquipTraitToBuilding(BIdx, Entry.TraitID);
+		}
+	}
+
 	// 정렬
 	const bool bAsc = bTraitSortAscending;
 	Entries.Sort([this, bAsc](const FTraitEntry& A, const FTraitEntry& B)
 	{
+		if (A.bCanEquipHere != B.bCanEquipHere)
+		{
+			return A.bCanEquipHere;
+		}
 		switch (TraitSortMode)
 		{
 		case ETraitSortMode::Rarity:
@@ -1006,6 +1078,9 @@ void UBuildingManagePanelWidget::RebuildTraitCardList()
 	{
 		TraitEmptyStateBox->SetVisibility(Entries.IsEmpty() ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
 	}
+
+	// 상세가 열린 채 정렬·수량 변경으로 다시 지어지면 새 카드에 선택 표시를 옮긴다
+	RefreshTraitCardSelection(bDetailInventoryMode ? CurrentDetailTraitID : NAME_None);
 
 	UE_LOG(LogTemp, Log, TEXT("[BuildingManagePanelWidget] Trait cards rebuilt: %d (Mode=%d, Asc=%d)"),
 		Entries.Num(), static_cast<int32>(TraitSortMode), bAsc ? 1 : 0);
@@ -1059,12 +1134,6 @@ void UBuildingManagePanelWidget::RebuildTraitSlots()
 		}
 
 		SlotWidget->SetSelected(i == PendingTargetSlotIndex);
-	}
-
-	if (TraitSlotCountText)
-	{
-		TraitSlotCountText->SetText(FText::FromString(FString::Printf(TEXT("슬롯 %d/%d 해금"),
-			TraitMgr->GetUnlockedSlotCount(BIdx), UBuildingTraitManagerSubsystem::GetMaxSlotCount())));
 	}
 
 	// 빈(해금) 슬롯이 있으면 첫 빈 슬롯을 기본 타겟으로 — 현재 타겟이 유효한 빈 슬롯이 아닐 때만 (사용자 명시 선택은 보존)
@@ -1143,7 +1212,9 @@ void UBuildingManagePanelWidget::HandleTraitSlotClicked(int32 SlotIndex)
 		{
 			if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 			{
-				UIMgr->ShowNotification(NSLOCTEXT("Notification", "NotEnoughDiamond", "보석이 부족합니다"), 3.0f, ENotificationType::Failed);
+				// 선판정이지만 잠긴 동안엔 로컬 잔액이 아직 서버값으로 정정되지 않았다 —
+				// 그때 "보석이 부족합니다" 는 거짓 원인이라 3상태 안내로 갈라진다(1-B-4c)
+				UIMgr->NotifyCloudOpFailure(CloudErr::InsufficientFunds, EResourceType::Diamond, Cost);
 			}
 		}
 		else
@@ -1190,7 +1261,7 @@ void UBuildingManagePanelWidget::ShowSlotUnlockConfirm(int32 SlotIndex, int32 Di
 
 	Confirm->SetTitle(NSLOCTEXT("TraitSlot", "UnlockTitle", "특성 슬롯 개방"));
 	Confirm->SetMessage(FText::Format(
-		NSLOCTEXT("TraitSlot", "UnlockMsg", "보석 {0}개로 이 슬롯을 개방할까요?"),
+		NSLOCTEXT("TraitSlot", "UnlockMsg", "다이아 {0}개로 이 슬롯을 개방할까요?"),
 		FText::AsNumber(DiamondCost)));
 	Confirm->SetConfirmButtonText(NSLOCTEXT("TraitSlot", "UnlockConfirm", "개방"));
 	Confirm->SetCancelButtonText(NSLOCTEXT("TraitSlot", "Cancel", "취소"));
@@ -1205,35 +1276,47 @@ void UBuildingManagePanelWidget::HandleSlotUnlockConfirmed(int32 SlotIndex)
 	UBuildingTraitManagerSubsystem* TraitMgr = GetGameInstance()->GetSubsystem<UBuildingTraitManagerSubsystem>();
 	if (!TraitMgr) return;
 
-	const bool bUnlocked = TraitMgr->UnlockSlotWithDiamond(TargetBuilding->GetBuildingIndex(), SlotIndex);
-	if (!bUnlocked)
+	// 차감은 서버가 한다 — 성공 응답 뒤에 마스크가 서고 OnTraitSlotUnlocked -> RebuildTraitSlots 가 돈다
+	TraitMgr->RequestUnlockSlotWithDiamond(TargetBuilding->GetBuildingIndex(), SlotIndex,
+		FOnCloudEconomyOpDone::CreateWeakLambda(this, [this, SlotIndex](bool bOk, FName Code)
 	{
-		// 확인~클릭 사이 잔액 변동 등 — 방어적 Toast
-		if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+		UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+		if (!bOk)
 		{
-			UIMgr->ShowNotification(NSLOCTEXT("Notification", "NotEnoughDiamond", "보석이 부족합니다"), 3.0f, ENotificationType::Failed);
+			// 원인별로 갈린다 — 잔액 부족만 부족액 토스트, 잠금/네트워크/서버는 3상태·DT 문구(1-B-4c)
+			if (UIMgr)
+			{
+				UIMgr->NotifyCloudOpFailure(Code, EResourceType::Diamond,
+					UBuildingTraitManagerSubsystem::GetDiamondCostForSlot(SlotIndex));
+			}
+			return;
 		}
-		return;
-	}
 
-	// 차감은 매니저 소관, 지출 피드백은 구매를 개시한 패널 응답 지점에서 (매니저를 UI 무관하게 유지)
-	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
-	{
-		if (UInGameLayerWidget* InGame = UIMgr->GetInGameLayer())
+		// 차감은 매니저 소관, 지출 피드백은 구매를 개시한 패널 응답 지점에서 (매니저를 UI 무관하게 유지)
+		if (UIMgr)
 		{
-			InGame->SpawnSpendPopup(EResourceType::Diamond, UBuildingTraitManagerSubsystem::GetDiamondCostForSlot(SlotIndex));
+			if (UInGameLayerWidget* InGame = UIMgr->GetInGameLayer())
+			{
+				InGame->SpawnSpendPopup(EResourceType::Diamond, UBuildingTraitManagerSubsystem::GetDiamondCostForSlot(SlotIndex));
+			}
 		}
-	}
+	}));
 }
 
 void UBuildingManagePanelWidget::HandleTraitCardClicked(FName TraitID)
 {
+	// 격자가 계속 눌리므로 다른 카드 = 내용 교체, 보고 있는 카드 재탭 = 닫기
+	if (IsTraitDetailOpen() && bDetailInventoryMode && CurrentDetailTraitID == TraitID)
+	{
+		HandlePopupClose();
+		return;
+	}
 	OpenTraitDetailForInventory(TraitID);
 }
 
 void UBuildingManagePanelWidget::EnsureTraitDetailPopup()
 {
-	// 정상 경로 = 트리 정적 배치(BindWidgetOptional). 아래 생성은 paste 소실 폴백.
+	// 정상 경로 = 트리 정적 배치. 아래 생성은 paste 소실 폴백.
 	if (!TraitDetailPopup)
 	{
 		UClass* PopupClass = LoadClass<UTraitDetailPopupWidget>(nullptr,
@@ -1248,18 +1331,13 @@ void UBuildingManagePanelWidget::EnsureTraitDetailPopup()
 		UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanelWidget] TraitDetailPopup 정적 바인딩 소실 — 동적 생성 폴백"));
 	}
 
-	if (!TraitDetailPopup->GetParent() && TraitModalLayer)
+	if (!TraitDetailPopup->GetParent())
 	{
-		// 폴백 부착 — 내비 사이 중앙 HBox 가 있으면 그 안에(끝에 붙어 순서는 어긋나지만 동작 우선), 없으면 레이어 중앙
-		UHorizontalBox* CenterBox = TraitNavPrevButton ? Cast<UHorizontalBox>(TraitNavPrevButton->GetParent()) : nullptr;
-		if (CenterBox)
+		// 폴백 부착 — 정적 배치와 같은 자리(패널 쪽 오른쪽 위). 위 여백은 저작값을 모르므로 0
+		if (UOverlaySlot* PopupSlot = TraitModalLayer->AddChildToOverlay(TraitDetailPopup))
 		{
-			CenterBox->AddChildToHorizontalBox(TraitDetailPopup);
-		}
-		else if (UOverlaySlot* PopupSlot = TraitModalLayer->AddChildToOverlay(TraitDetailPopup))
-		{
-			PopupSlot->SetHorizontalAlignment(HAlign_Center);
-			PopupSlot->SetVerticalAlignment(VAlign_Center);
+			PopupSlot->SetHorizontalAlignment(HAlign_Right);
+			PopupSlot->SetVerticalAlignment(VAlign_Top);
 		}
 	}
 
@@ -1276,7 +1354,7 @@ void UBuildingManagePanelWidget::OpenTraitDetailForInventory(FName TraitID)
 
 	TraitDetailPopup->ConfigureForTrait(TraitID, TargetBuilding->GetBuildingIndex(), INDEX_NONE);
 
-	// 타겟 힌트 ― HandlePopupEquip 의 타겟 결정 규칙과 동일 (명시 타겟 우선, 없으면 첫 빈 해금 슬롯)
+	// [장착] 이 향할 슬롯 ― HandlePopupEquip 의 타겟 결정 규칙과 동일 (명시 타겟 우선, 없으면 첫 빈 해금 슬롯)
 	UBuildingTraitManagerSubsystem* TraitMgr = GetGameInstance()->GetSubsystem<UBuildingTraitManagerSubsystem>();
 	const int32 BIdx = TargetBuilding->GetBuildingIndex();
 	int32 HintTarget = PendingTargetSlotIndex;
@@ -1284,29 +1362,14 @@ void UBuildingManagePanelWidget::OpenTraitDetailForInventory(FName TraitID)
 	{
 		HintTarget = FindFirstEmptyUnlockedSlot();
 	}
-	if (TraitMgr && !TraitMgr->CanEquipTraitToBuilding(BIdx, TraitID))
-	{
-		// 업종 제한 특성 ― RestrictionText 가 사유를 표시하므로 타겟 힌트는 숨겨 메시지 상충 방지
-		TraitDetailPopup->SetTargetSlotHint(FText::GetEmpty());
-	}
-	else if (HintTarget == INDEX_NONE)
-	{
-		TraitDetailPopup->SetTargetSlotHint(NSLOCTEXT("Trait", "TargetHintFull", "빈 슬롯이 없습니다 ― 닫고 슬롯을 눌러 교체할 수 있습니다"));
-	}
-	else
-	{
-		const TArray<FName> EquippedNow = TraitMgr ? TraitMgr->GetEquippedTraits(BIdx) : TArray<FName>();
-		const bool bSwap = EquippedNow.IsValidIndex(HintTarget) && !EquippedNow[HintTarget].IsNone();
-		TraitDetailPopup->SetTargetSlotHint(bSwap
-			? FText::Format(NSLOCTEXT("Trait", "TargetHintSwap", "슬롯 {0} 특성과 교체됩니다"), FText::AsNumber(HintTarget + 1))
-			: FText::Format(NSLOCTEXT("Trait", "TargetHint", "빈 슬롯 {0}에 장착됩니다"), FText::AsNumber(HintTarget + 1)));
-	}
+	const TArray<FName> EquippedNow = TraitMgr ? TraitMgr->GetEquippedTraits(BIdx) : TArray<FName>();
+	const bool bSwap = EquippedNow.IsValidIndex(HintTarget) && !EquippedNow[HintTarget].IsNone();
+	const bool bNoUnlocked = TraitMgr && TraitMgr->GetUnlockedSlotCount(BIdx) == 0;
+	TraitDetailPopup->SetEquipTarget(HintTarget, bSwap, bNoUnlocked);
 
 	CurrentDetailTraitID = TraitID;
 	bDetailInventoryMode = true;
-	UpdateTraitNavVisibility();
-	TraitDetailPopup->SetVisibility(ESlateVisibility::Visible);
-	if (TraitModalLayer) TraitModalLayer->SetVisibility(ESlateVisibility::Visible);
+	ShowTraitDetailLayer();
 }
 
 void UBuildingManagePanelWidget::OpenTraitDetailForSlot(int32 SlotIndex)
@@ -1321,20 +1384,41 @@ void UBuildingManagePanelWidget::OpenTraitDetailForSlot(int32 SlotIndex)
 	if (TraitID.IsNone()) return;
 
 	TraitDetailPopup->ConfigureForTrait(TraitID, TargetBuilding->GetBuildingIndex(), SlotIndex);
-	TraitDetailPopup->SetTargetSlotHint(FText::GetEmpty());
 	CurrentDetailTraitID = TraitID;
 	bDetailInventoryMode = false;
-	UpdateTraitNavVisibility();
+	ShowTraitDetailLayer();
+}
+
+void UBuildingManagePanelWidget::ShowTraitDetailLayer()
+{
 	TraitDetailPopup->SetVisibility(ESlateVisibility::Visible);
-	if (TraitModalLayer) TraitModalLayer->SetVisibility(ESlateVisibility::Visible);
+	// 딤이 없으므로 카드 밖 빈 곳은 아래(배경 버튼·왼쪽 행동 버튼)로 통과시킨다
+	TraitModalLayer->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	LeftPanelRightBox->SetVisibility(ESlateVisibility::Collapsed);
+	RefreshTraitCardSelection(bDetailInventoryMode ? CurrentDetailTraitID : NAME_None);
 }
 
 void UBuildingManagePanelWidget::CloseTraitDetailPopup()
 {
 	if (TraitDetailPopup) TraitDetailPopup->SetVisibility(ESlateVisibility::Collapsed);
-	if (TraitModalLayer) TraitModalLayer->SetVisibility(ESlateVisibility::Collapsed);
+	TraitModalLayer->SetVisibility(ESlateVisibility::Collapsed);
+	LeftPanelRightBox->SetVisibility(InfoColumnAuthoredVisibility);
 	CurrentDetailTraitID = NAME_None;
 	bDetailInventoryMode = false;
+	RefreshTraitCardSelection(NAME_None);
+}
+
+bool UBuildingManagePanelWidget::IsTraitDetailOpen() const
+{
+	return TraitModalLayer->GetVisibility() != ESlateVisibility::Collapsed;
+}
+
+void UBuildingManagePanelWidget::RefreshTraitCardSelection(FName SelectedTraitID)
+{
+	for (UTraitCardSlotWidget* Card : SpawnedTraitCards)
+	{
+		if (Card) Card->SetDetailSelected(!SelectedTraitID.IsNone() && Card->GetTraitID() == SelectedTraitID);
+	}
 }
 
 void UBuildingManagePanelWidget::SetPendingTargetSlot(int32 SlotIndex)
@@ -1405,7 +1489,7 @@ void UBuildingManagePanelWidget::HandlePopupEquip(FName TraitID)
 
 	if (bOk)
 	{
-		// 장착 성공 = 모달 닫힘 (B안) — 닫히면서 슬롯이 채워지는 것이 피드백. 타겟은 첫 빈 슬롯 복귀.
+		// 장착 성공 = 상세 닫힘 — 닫히면서 슬롯이 채워지는 것이 피드백. 타겟은 첫 빈 슬롯 복귀.
 		CloseTraitDetailPopup();
 		SetPendingTargetSlot(FindFirstEmptyUnlockedSlot());
 
@@ -1441,43 +1525,6 @@ void UBuildingManagePanelWidget::HandlePopupClose()
 	CloseTraitDetailPopup();
 	SetPendingTargetSlot(FindFirstEmptyUnlockedSlot());  // 닫으면 기본 선택(첫 빈 슬롯)으로 복귀
 }
-
-void UBuildingManagePanelWidget::UpdateTraitNavVisibility()
-{
-	// 내비 = 인벤 모드 + 카드 2장 이상일 때만 (해제 모달/외길에선 숨김)
-	const bool bShow = bDetailInventoryMode && SpawnedTraitCards.Num() > 1;
-	const ESlateVisibility V = bShow ? ESlateVisibility::Visible : ESlateVisibility::Collapsed;
-	if (TraitNavPrevButton) TraitNavPrevButton->SetVisibility(V);
-	if (TraitNavNextButton) TraitNavNextButton->SetVisibility(V);
-}
-
-void UBuildingManagePanelWidget::NavigateTraitDetail(int32 Delta)
-{
-	if (!bDetailInventoryMode || SpawnedTraitCards.Num() < 2) return;
-
-	int32 CurIdx = INDEX_NONE;
-	for (int32 i = 0; i < SpawnedTraitCards.Num(); ++i)
-	{
-		if (SpawnedTraitCards[i] && SpawnedTraitCards[i]->GetTraitID() == CurrentDetailTraitID)
-		{
-			CurIdx = i;
-			break;
-		}
-	}
-	if (CurIdx == INDEX_NONE) CurIdx = 0;
-
-	const int32 Num = SpawnedTraitCards.Num();
-	const int32 NextIdx = ((CurIdx + Delta) % Num + Num) % Num;   // wrap-around 순환
-	if (SpawnedTraitCards[NextIdx])
-	{
-		OpenTraitDetailForInventory(SpawnedTraitCards[NextIdx]->GetTraitID());
-	}
-}
-
-void UBuildingManagePanelWidget::HandleTraitNavPrev() { NavigateTraitDetail(-1); }
-void UBuildingManagePanelWidget::HandleTraitNavNext() { NavigateTraitDetail(+1); }
-
-void UBuildingManagePanelWidget::OnTraitModalDimClicked() { HandlePopupClose(); }
 
 void UBuildingManagePanelWidget::HandleTraitSlotChanged(int32 ChangedBuildingIndex, int32 SlotIndex, FName NewTraitID)
 {
@@ -1588,6 +1635,29 @@ void UBuildingManagePanelWidget::LoadAvailableSkins()
 	UE_LOG(LogTemp, Log, TEXT("[BuildingManagePanelWidget] Loaded %d skin cards"), AllSkins.Num());
 }
 
+void UBuildingManagePanelWidget::UpdateRejectShake(float DeltaTime)
+{
+	if (RejectShakeElapsed < 0.f) return;
+
+	UBuildingSkinCardWidget* Card = RejectShakeCard.Get();
+	if (!Card)
+	{
+		RejectShakeElapsed = -1.f;
+		return;
+	}
+
+	RejectShakeElapsed += DeltaTime;
+	if (RejectShakeElapsed >= RejectShakeDuration)
+	{
+		RejectShakeElapsed = -1.f;
+		RejectShakeCard = nullptr;
+		Card->SetRenderTranslation(FVector2D::ZeroVector);
+		return;
+	}
+
+	Card->SetRenderTranslation(FWidgetAnimationUtils::ShakeOffset(RejectShakeElapsed, RejectShakeDuration, RejectShakeAmplitude));
+}
+
 void UBuildingManagePanelWidget::OnSkinCardClicked(UBuildingSkinCardWidget* ClickedCard)
 {
 	if (!ClickedCard)
@@ -1598,9 +1668,11 @@ void UBuildingManagePanelWidget::OnSkinCardClicked(UBuildingSkinCardWidget* Clic
 	if (!ClickedCard->IsUnlocked())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanelWidget] Attempted to select locked skin"));
+		RejectShakeCard = ClickedCard;
+		RejectShakeElapsed = 0.f;
 		if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 		{
-			UIMgr->ShowNotification(NSLOCTEXT("Notification", "SkinLocked", "이 스킨은 잠금 해제되지 않았습니다"), 3.0f, ENotificationType::Failed);
+			UIMgr->ShowRejectNotification(NSLOCTEXT("Notification", "SkinLocked", "이 스킨은 잠금 해제되지 않았습니다"));
 		}
 		return;
 	}
@@ -1684,9 +1756,6 @@ void UBuildingManagePanelWidget::RebuildEnhancementSlots()
 		return;
 	}
 
-	// 모뉴먼트(키스톤)는 층수 강화(=영향권 성장)만 노출 — 일반 빌딩과 같은 UpgradeSlot/메커닉, 나머지 타입은 스킵
-	const bool bKeystone = TargetBuilding->IsKeystoneMonument();
-
 	UCGGameInstance* GI = UCGGameInstance::GetInstance();
 	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
 	if (!TableMgr)
@@ -1716,36 +1785,11 @@ void UBuildingManagePanelWidget::RebuildEnhancementSlots()
 	const TArray<FBuildingEnhancementDefinition> Defs = TableMgr->GetEnhancementsForCompanyType(BuildingCompanyType);
 	for (const FBuildingEnhancementDefinition& Def : Defs)
 	{
-		// 모뉴먼트는 두 슬롯만 노출 — 층수(BuildingFloor)=영향 범위, 영향력(KeystoneAuraPower)=버프 효과. 나머지 타입은 스킵
-		if (bKeystone
-			&& Def.EnhancementType != EBuildingEnhancementType::BuildingFloor
-			&& Def.EnhancementType != EBuildingEnhancementType::KeystoneAuraPower)
-		{
-			continue;
-		}
-
-		// 역방향 — 영향력은 키스톤만. KeystoneAuraSubsystem 이 키스톤 액터만 순회하므로 일반 빌딩에선 소비처가 없다
-		if (!bKeystone && Def.EnhancementType == EBuildingEnhancementType::KeystoneAuraPower)
-		{
-			continue;
-		}
-
 		UUpgradeSlot* NewSlot = CreateWidget<UUpgradeSlot>(this, SlotClass);
 		if (!NewSlot) continue;
 
 		// DT 정의 주입 (아이콘/이름/설명/단위/정수표시 여부)
 		ApplySlotDefinition(NewSlot, Def);
-
-		// 모뉴먼트 층수 슬롯은 같은 아이콘/메커닉을 쓰되 설명만 영향권 메시지로 덮어씀
-		if (bKeystone && Def.EnhancementType == EBuildingEnhancementType::BuildingFloor)
-		{
-			NewSlot->SubDescription = FText::FromString(TEXT("영향 범위가 넓어집니다"));
-		}
-		// 영향력 슬롯은 버프 효과(%) 성장을 안내
-		else if (bKeystone && Def.EnhancementType == EBuildingEnhancementType::KeystoneAuraPower)
-		{
-			NewSlot->SubDescription = FText::FromString(TEXT("영향권 버프가 강해집니다"));
-		}
 
 		FText LockConditionText;
 		const bool bLocked = ResolveEnhancementLockState(Def.EnhancementType, LockConditionText);
@@ -1778,14 +1822,14 @@ bool UBuildingManagePanelWidget::ResolveEnhancementLockState(
 	const UMissionManagerSubsystem* MissionMgr = GameInstance
 		? GameInstance->GetSubsystem<UMissionManagerSubsystem>()
 		: nullptr;
-	const bool bTutorialCompleted = MissionMgr && MissionMgr->IsTutorialCompleted();
+	const bool bCompanyEnhancementUnlocked = MissionMgr && MissionMgr->IsCompanyEnhancementUnlocked();
 	const bool bUnlockedByTier = IsEnhancementUnlockedByTier(EnhancementType);
 	const bool bAuthorityAllowsPurchase = TargetBuilding
 		&& TargetBuilding->IsEnhancementPurchaseAllowed(EnhancementType);
 
 	const CGR::UI::EBuildingEnhancementLockReason LockReason = CGR::UI::ResolveEnhancementLockReason(
 		EnhancementType,
-		bTutorialCompleted,
+		bCompanyEnhancementUnlocked,
 		bUnlockedByTier,
 		bAuthorityAllowsPurchase);
 
@@ -1806,8 +1850,7 @@ bool UBuildingManagePanelWidget::ResolveEnhancementLockState(
 
 bool UBuildingManagePanelWidget::IsEnhancementUnlockedByTier(EBuildingEnhancementType EnhancementType) const
 {
-	if (EnhancementType == EBuildingEnhancementType::BuildingFloor
-		|| EnhancementType == EBuildingEnhancementType::KeystoneAuraPower)
+	if (EnhancementType == EBuildingEnhancementType::BuildingFloor)
 	{
 		return true;
 	}
@@ -1866,15 +1909,16 @@ void UBuildingManagePanelWidget::RefreshEnhancementLocksIfTutorialStateChanged()
 		return;
 	}
 
-	const bool bTutorialCompleted = MissionMgr->IsTutorialCompleted();
+	// M7 수령 뒤 M8 활성 전환(회사 강화 해금)도 여기서 잡힌다
+	const bool bCompanyEnhancementUnlocked = MissionMgr->IsCompanyEnhancementUnlocked();
 	if (!CGR::UI::ShouldRefreshEnhancementLocksOnTutorialStateChange(
-		bLastTutorialCompleted,
-		bTutorialCompleted))
+		bLastCompanyEnhancementUnlocked,
+		bCompanyEnhancementUnlocked))
 	{
 		return;
 	}
 
-	bLastTutorialCompleted = bTutorialCompleted;
+	bLastCompanyEnhancementUnlocked = bCompanyEnhancementUnlocked;
 	RefreshAllEnhancementSlots();
 }
 
@@ -2018,7 +2062,7 @@ void UBuildingManagePanelWidget::UpdateEnhancementSlot(EBuildingEnhancementType 
 		const int32 NextFloorNumber = static_cast<int32>(FMath::Min<int64>(
 			static_cast<int64>(NextLevel) + 1LL,
 			static_cast<int64>(MAX_int32)));
-		// 모뉴먼트는 직원을 안 받는다(FBuildingData::GetEmployeeCapacity 가 0) — 인원으로 쓰면 "0명"이 거짓이 된다
+		// 수용 0 인 데이터면 인원을 값 행에 쓸 수 없다 — "0명"이 거짓이 된다
 		bFloorShowsCapacity = (NextCap > 0);
 		// 증축 0회가 1층 (Body_Module_Copies 가 레벨 정본)
 		DisplayCurrent = static_cast<float>(bFloorShowsCapacity ? CurCap : CurrentFloorNumber);
@@ -2039,12 +2083,6 @@ void UBuildingManagePanelWidget::UpdateEnhancementSlot(EBuildingEnhancementType 
 		}
 		break;
 
-	case EBuildingEnhancementType::EventResistance:
-		// 악재 피해 잔존률 = 1/배율 (ProjectTraitEventHandler 의 PenaltyRetention 과 같은 식)
-		DisplayCurrent = 100.0f / FMath::Max(CurrentMultiplier, KINDA_SMALL_NUMBER);
-		DisplayNext = 100.0f / FMath::Max(NextMultiplier, KINDA_SMALL_NUMBER);
-		break;
-
 	case EBuildingEnhancementType::ViralBoost:
 		// 호재 효과 = 배율 그대로 (ProjectTraitEventHandler 의 ViralMult)
 		DisplayCurrent = CurrentMultiplier * 100.0f;
@@ -2055,37 +2093,6 @@ void UBuildingManagePanelWidget::UpdateEnhancementSlot(EBuildingEnhancementType 
 		// 진행 중 운영의 TotalOperationTime 은 착수 시 1회 확정이라 강화해도 안 움직인다 —
 		// 분 단위를 앵커로 쓰면 플레이어가 끝내 관측 못 할 숫자를 약속하게 된다. 배율이 덜 구체적이지만 정직하다.
 		bMultiplierFallback = true;
-		break;
-
-	case EBuildingEnhancementType::KeystoneAuraPower:
-		{
-			// 오라 기본 효과에 KeystoneAuraPower DT의 EffectPerLevel 배수를 적용해 실제 버프와 표시를 일치시킨다.
-			bool bAuraRowOk = false;
-			FBuildingData AuraRow;
-			if (UTableManagerSubsystem* AuraTableMgr = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>())
-			{
-				AuraRow = AuraTableMgr->GetBuildingData(TargetBuilding->GetBuildingID(), bAuraRowOk);
-			}
-			// 소비처의 스킵 조건(AuraTarget=None, Percent<=0)까지 같이 봐야 "안 걸리는 오라"를 숫자로 약속하지 않는다
-			const float NextPercent = bAuraRowOk
-				? AuraRow.KeystoneAura.BasePercent
-					* UBuildingEnhancementHelper::CalculateEffectMultiplier(
-						EBuildingEnhancementType::KeystoneAuraPower, NextLevel)
-				: 0.0f;
-			if (bAuraRowOk && AuraRow.KeystoneAura.bIsKeystone
-				&& AuraRow.KeystoneAura.AuraTarget != EBuildingTraitTarget::None
-				&& NextPercent > 0.0f)
-			{
-				DisplayCurrent = AuraRow.KeystoneAura.BasePercent
-					* UBuildingEnhancementHelper::CalculateEffectMultiplier(
-						EBuildingEnhancementType::KeystoneAuraPower, CurrentLevel);
-				DisplayNext = NextPercent;
-			}
-			else
-			{
-				bMultiplierFallback = true;
-			}
-		}
 		break;
 
 	default:
@@ -2113,7 +2120,7 @@ void UBuildingManagePanelWidget::UpdateEnhancementSlot(EBuildingEnhancementType 
 		UpgradeSlot->bIsInteger = SlotDef.bIsInteger;
 	}
 
-	// 빌드업 뱃지 = 층수. 인원을 값 행에 쓸 때만 — 모뉴먼트는 값 행이 이미 층수라 뱃지까지 층수면 중복이다
+	// 빌드업 뱃지 = 층수. 인원을 값 행에 쓸 때만 — 값 행이 이미 층수면 뱃지까지 층수가 되어 중복이다
 	if (EnhancementType == EBuildingEnhancementType::BuildingFloor)
 	{
 		UpgradeSlot->SetLevelBadgeOverride(bFloorShowsCapacity
@@ -2350,10 +2357,10 @@ int32 UBuildingManagePanelWidget::ComputeBulkCount(EBuildingEnhancementType Enha
 	Count = static_cast<int32>(AllowedCount);
 
 	// Count=0(최대 모드 빈털터리)이어도 부족액 표기는 1레벨 비용 기준.
-	// ⚠ 칸수는 청구(액터)와 같은 출처여야 표시=청구가 유지된다 — TargetBuilding 없으면 1칸으로 폴백.
+	// ⚠ 기본 건설비는 청구(액터)와 같은 출처여야 표시=청구가 유지된다 — TargetBuilding 없으면 배수 1로 폴백.
 	OutTotalCost = UBuildingEnhancementHelper::CalculateBulkUpgradeCost(
 		EnhancementType, NormalizedCurrentLevel, FMath::Max(Count, 1),
-		TargetBuilding ? TargetBuilding->GetFootprintCells() : 1);
+		TargetBuilding ? TargetBuilding->GetBaseBuildCostBricks() : 1);
 	return Count;
 }
 
@@ -2422,6 +2429,11 @@ void UBuildingManagePanelWidget::OnEnhancementBulkPurchase(EBuildingEnhancementT
 }
 
 // ========== 오피스 입장 ==========
+
+UWidget* UBuildingManagePanelWidget::GetCloseButtonWidget() const
+{
+	return PanelHeader ? PanelHeader->GetCloseButton() : nullptr;
+}
 
 UWidget* UBuildingManagePanelWidget::GetEnterOfficeButtonWidget() const
 {
@@ -2541,6 +2553,93 @@ UWidget* UBuildingManagePanelWidget::GetBuildingFloorUpgradeButtonWidget() const
 	return nullptr;
 }
 
+UWidget* UBuildingManagePanelWidget::GetFirstAffordableStatEnhanceButtonWidget() const
+{
+	if (!IsEnhancementTabActive() || !TargetBuilding) return nullptr;
+	UGameInstance* GameInstance = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const UResourceItemManager* ResMgr = GameInstance ? GameInstance->GetSubsystem<UResourceItemManager>() : nullptr;
+	if (!TableMgr || !ResMgr) return nullptr;
+
+	// 화면 순서(DT SortOrder)로 훑는다 — DynamicSlots 는 TMap 이라 순회 순서가 화면과 같다는 보장이 없다
+	for (const FBuildingEnhancementDefinition& Def : TableMgr->GetEnhancementsForCompanyType(TargetBuilding->GetCompanyType()))
+	{
+		const EBuildingEnhancementType Type = Def.EnhancementType;
+		if (Type == EBuildingEnhancementType::BuildingFloor
+			|| LockedEnhancementTypes.Contains(Type)
+			|| !IsEnhancementInteractionAllowed(Type))
+		{
+			continue;
+		}
+		const UUpgradeSlot* EnhanceSlot = DynamicSlots.FindRef(Type);
+		UCostActionButtonWidget* UpgradeButton = EnhanceSlot ? EnhanceSlot->GetUpgradeButton() : nullptr;
+		if (!UpgradeButton || !EnhanceSlot->IsVisible()) continue;
+
+		const int32 CurrentLevel = FMath::Max(TargetBuilding->GetEnhancementLevel(Type), 0);
+		if (Def.MaxLevel > 0 && CurrentLevel >= Def.MaxLevel) continue;
+		if (ResMgr->GetResourceAmount(Def.CostResourceType) >= TargetBuilding->GetUpgradeCost(Type))
+		{
+			return UpgradeButton;
+		}
+	}
+	return nullptr;
+}
+
+UWidget* UBuildingManagePanelWidget::GetEquippableTraitCardWidget(FName PreferredTraitID) const
+{
+	if (!IsTraitTabActive() || !TargetBuilding) return nullptr;
+	const UBuildingTraitManagerSubsystem* TraitMgr = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UBuildingTraitManagerSubsystem>()
+		: nullptr;
+	if (!TraitMgr) return nullptr;
+
+	const int32 BIdx = TargetBuilding->GetBuildingIndex();
+	const TArray<FName> EquippedHere = TraitMgr->GetEquippedTraits(BIdx);
+	UTraitCardSlotWidget* FirstEquippable = nullptr;
+	for (const TObjectPtr<UTraitCardSlotWidget>& Card : SpawnedTraitCards)
+	{
+		if (!Card) continue;
+		const FName CardTraitID = Card->GetTraitID();
+		// 그리드는 이 건물에 꽂힌 특성도 카드로 보여 준다 — EquipTrait 와 같은 조건(인벤 잔량·업종·중복 금지)으로 거른다
+		if (!TraitMgr->HasTrait(CardTraitID, 1)
+			|| !TraitMgr->CanEquipTraitToBuilding(BIdx, CardTraitID)
+			|| EquippedHere.Contains(CardTraitID))
+		{
+			continue;
+		}
+		if (CardTraitID == PreferredTraitID) return Card.Get();
+		if (!FirstEquippable) FirstEquippable = Card.Get();
+	}
+	return FirstEquippable;
+}
+
+UWidget* UBuildingManagePanelWidget::GetOwnedGachaSkinCardWidget(int32 PreferredSkinID) const
+{
+	if (!IsSkinTabActive() || !TargetBuilding || !SkinCardContainer) return nullptr;
+	if (SkinSwitcher && SkinSwitcher->GetActiveWidgetIndex() != 0) return nullptr;
+
+	// UBuildingSkinManagerSubsystem 의 BaseSkinID 와 같은 값 — 새 세이브 지급분이라 「뽑은 스킨」이 아니다
+	constexpr int32 StarterSkinID = 100;
+	const int32 AppliedSkinID = TargetBuilding->GetAppliedSkinID();
+	UBuildingSkinCardWidget* FirstOwned = nullptr;
+	for (UWidget* Child : SkinCardContainer->GetAllChildren())
+	{
+		UBuildingSkinCardWidget* Card = Cast<UBuildingSkinCardWidget>(Child);
+		if (!Card || !Card->IsUnlocked()) continue;
+		const int32 CardSkinID = Card->GetSkinID();
+		if (CardSkinID == StarterSkinID || CardSkinID == AppliedSkinID) continue;
+		if (CardSkinID == PreferredSkinID) return Card;
+		if (!FirstOwned) FirstOwned = Card;
+	}
+	return FirstOwned;
+}
+
+UWidget* UBuildingManagePanelWidget::GetSkinExteriorSubTabWidget() const
+{
+	if (!IsSkinTabActive() || !SkinSwitcher || SkinSwitcher->GetActiveWidgetIndex() == 0) return nullptr;
+	return ExteriorBtn;
+}
+
 void UBuildingManagePanelWidget::OnEnterOfficeButtonClicked()
 {
 	UE_LOG(LogTemp, Log, TEXT("[BuildingManagePanelWidget] Enter Office button clicked"));
@@ -2558,6 +2657,7 @@ void UBuildingManagePanelWidget::OnEnterOfficeButtonClicked()
 		UE_LOG(LogTemp, Error, TEXT("[BuildingManagePanelWidget] GameInstance is null"));
 		return;
 	}
+	if (GameInstance->IsLevelTransitionActive()) return;
 
 	// 현재 관리 중인 건물 저장
 	GameInstance->SetCurrentManagedBuilding(TargetBuilding);
@@ -2568,19 +2668,6 @@ void UBuildingManagePanelWidget::OnEnterOfficeButtonClicked()
 	UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanelWidget] TargetBuilding BuildingIndex: %d"), TargetBuilding->GetBuildingIndex());
 	UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanelWidget] TargetBuilding Address: %p"), TargetBuilding);
 
-	// 레벨 전환 전 현재 데이터 저장 (Pending 카드 등 메모리 데이터 보존)
-	if (USaveLoadManager* SaveMgr = GameInstance->GetSubsystem<USaveLoadManager>())
-	{
-		if (!SaveMgr->SaveGameData())
-		{
-			UE_LOG(LogTemp, Error, TEXT("[BuildingManagePanelWidget] Failed to save game data before level transition!"));
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanelWidget] Game data saved before level transition"));
-		}
-	}
-
 	UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanelWidget] Transitioning to Office scene (Normal mode)"));
 
 	// 오피스 씬으로 전환 (TransitionToLevel 사용해서 MapType 설정)
@@ -2588,29 +2675,6 @@ void UBuildingManagePanelWidget::OnEnterOfficeButtonClicked()
 }
 
 // ========== 좌측 패널 건물 정보 ==========
-
-void UBuildingManagePanelWidget::HandleLevelChipClicked()
-{
-	UCGGameInstance* GI = UCGGameInstance::GetInstance();
-	if (!GI) { return; }
-	UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-	UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>();
-	if (!TableMgr || !UIMgr || !UIMgr->GetUIBase()) { return; }
-
-	TSubclassOf<UUserWidget> Cls = TableMgr->GetWidgetClass(EWidgetType::TierRoadmap);
-	if (!Cls)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[BuildingManagePanel] TierRoadmap 위젯 미등록(DT_WidgetClass)"));
-		return;
-	}
-
-	// 관리 패널을 닫지 않고 위에 적층 — 로드맵을 닫으면 이 패널이 그대로 남아야 한다
-	UCommonActivatableWidget* W = UIMgr->GetUIBase()->PushPromptClass(Cls.Get());
-	if (UTierRoadmapWidget* Roadmap = Cast<UTierRoadmapWidget>(W))
-	{
-		Roadmap->ConfigureForBuilding(GI->GetCurrentManagedBuildingIndex());
-	}
-}
 
 void UBuildingManagePanelWidget::PopulateBuildingStats()
 {
@@ -2643,10 +2707,7 @@ void UBuildingManagePanelWidget::PopulateBuildingStats()
 	ECompanyType CT = TargetBuilding->GetCompanyType();
 	CreateStatRow(TEXT("업종"), CompanyTypeToString(CT));
 
-	// 2. 건물 레벨 → 레벨 배지 (레벨업 델리게이트도 같은 함수를 호출한다)
-	RefreshLevelBadge();
-
-	// 3. 층수
+	// 2. 층수
 	int32 Floor = TargetBuilding->GetEnhancementLevel(EBuildingEnhancementType::BuildingFloor) + 1;
 	CreateStatRow(TEXT("층수"), FString::Printf(TEXT("%d층"), Floor));
 
@@ -2696,25 +2757,6 @@ void UBuildingManagePanelWidget::PopulateBuildingStats()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[BuildingManagePanelWidget] PopulateBuildingStats: %d rows created"), BuildingStatRows.Num());
-}
-
-void UBuildingManagePanelWidget::RefreshLevelBadge()
-{
-	int32 BldgTier = 1;
-	int32 BIdx = INDEX_NONE;
-	UCGGameInstance* GI = UCGGameInstance::GetInstance();
-	if (GI)
-	{
-		BIdx = GI->GetCurrentManagedBuildingIndex();
-		if (USaveLoadManager* SM = GI->GetSubsystem<USaveLoadManager>())
-		{
-			BldgTier = SM->GetBuildingTier(BIdx);
-		}
-	}
-	if (LevelText)
-	{
-		LevelText->SetText(FText::AsNumber(BldgTier));
-	}
 }
 
 void UBuildingManagePanelWidget::UpdateProjectStatus()

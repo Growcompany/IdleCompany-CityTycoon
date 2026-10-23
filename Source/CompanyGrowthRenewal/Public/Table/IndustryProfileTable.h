@@ -30,6 +30,13 @@ struct FIndustryProfileRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "IndustryProfile|Balance")
 	float PeakMult = 1.f;
 
+	// 프로젝트 번호가 시작 인덱스를 넘을 때마다 기본 초당 수익에 누적 적용한다.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "IndustryProfile|Balance")
+	double RevenueGrowthPerProject = 1.0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "IndustryProfile|Balance")
+	int32 RevenueGrowthStartIndex = 2;
+
 	// 판매 수익 반감기(운영시간 대비 비율).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "IndustryProfile|Balance")
 	float HalfLifeFrac = 0.5f;

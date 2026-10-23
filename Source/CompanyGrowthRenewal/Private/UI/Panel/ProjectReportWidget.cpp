@@ -1,5 +1,6 @@
 #include "UI/Panel/ProjectReportWidget.h"
 #include "CommonTextBlock.h"
+#include "UI/Element/Common/QualityGradeMedalUtils.h"
 #include "UI/Element/Common/ConfirmCancelWidget.h"
 #include "UI/Element/Common/DisciplineBarWidget.h"
 #include "UI/Element/Cards/IconCardWidget.h"
@@ -8,6 +9,8 @@
 #include "Enum/QualityGrade.h"
 #include "Components/Border.h"
 #include "Components/Image.h"
+#include "Components/Overlay.h"
+#include "Utils/FWidgetAnimationUtils.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
 void UProjectReportWidget::NativePreConstruct()
@@ -37,6 +40,29 @@ void UProjectReportWidget::NativeConstruct()
 		ConfirmCancelWidget->OnCancel.AddUObject(this, &UProjectReportWidget::OnDialogCancelled);
 		ConfirmCancelWidget->OnConfirm.RemoveAll(this);
 	}
+}
+
+void UProjectReportWidget::NativeOnActivated()
+{
+	Super::NativeOnActivated();
+
+	if (!GradeStampStack)
+	{
+		return;
+	}
+
+	if (FMotionGate::IsReduced())
+	{
+		StampRevealElapsed = -1.f;
+		GradeStampStack->SetRenderOpacity(1.f);
+		GradeStampStack->SetRenderScale(FVector2D(1.f, 1.f));
+		return;
+	}
+
+	StampRevealElapsed = 0.f;
+	// 첫 틱 전 완성된 스탬프가 한 프레임 비치는 것 방지
+	GradeStampStack->SetRenderOpacity(0.f);
+	GradeStampStack->SetRenderScale(FVector2D(StampRevealStartScale, StampRevealStartScale));
 }
 
 void UProjectReportWidget::SetReportData(const FProjectReportData& InData)
@@ -84,11 +110,12 @@ void UProjectReportWidget::SetReportData(const FProjectReportData& InData)
 		Text_QualityGrade->SetText(FText::FromString(GradeLetter));
 	}
 	ApplyGradeStampColor(GradeLetterToColor(GradeLetter));
+	CGQualityGradeMedal::Apply(GI, InData.CompanyType, InData.QualityGrade, LetterPlate, Text_QualityGrade);
 
-	// 품질 점수 — 배율 표기(×). 0.5~2.0 범위라 "점수 / 만점" 형태는 1.0 초과 시 거짓이 된다
+	// 출시 시 확정된 품질 수익 배율을 결산에 표시한다.
 	if (Text_QualityScore)
 	{
-		Text_QualityScore->SetText(FText::FromString(FString::Printf(TEXT("×%.2f"), InData.QualityScore)));
+		Text_QualityScore->SetText(FText::FromString(FString::Printf(TEXT("×%.2f"), InData.QualityRevenueMultiplier)));
 	}
 
 	// 분야별 성과 — 축 고정 6칸(EProductionDiscipline 슬롯 순서). 비활성 분야는 빈 트랙으로
@@ -132,7 +159,7 @@ void UProjectReportWidget::SetReportData(const FProjectReportData& InData)
 	// 기본 수익 (초당 수익률, 콤마 포맷 + 소수점 최대 1자리)
 	if (Text_RevenuePerSecond && InData.TotalOperationTime > 0.0f)
 	{
-		float AvgRevenuePerSec = InData.TotalRevenueEarned / InData.TotalOperationTime;
+		const double AvgRevenuePerSec = InData.TotalRevenueEarned / InData.TotalOperationTime;
 		FNumberFormattingOptions Opts;
 		Opts.SetUseGrouping(true);
 		// Min 0 = 정수면 소수점을 달지 않는다 ("15.0원/초" 의 .0 은 정보가 없다)
@@ -181,6 +208,7 @@ void UProjectReportWidget::NativeTick(const FGeometry& MyGeometry, float InDelta
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 	UpdateStampMaterialSize();
+	TickStampReveal(InDeltaTime);
 }
 
 void UProjectReportWidget::UpdateStampMaterialSize()
@@ -216,6 +244,33 @@ void UProjectReportWidget::UpdateStampMaterialSize()
 	}
 }
 
+void UProjectReportWidget::TickStampReveal(float InDeltaTime)
+{
+	if (StampRevealElapsed < 0.f || !GradeStampStack)
+	{
+		return;
+	}
+
+	StampRevealElapsed += InDeltaTime;
+	if (StampRevealElapsed < StampRevealDelay)
+	{
+		return;
+	}
+
+	const float A = FMath::Clamp((StampRevealElapsed - StampRevealDelay) / StampRevealDuration, 0.f, 1.f);
+	const float E = FWidgetAnimationUtils::EaseOutQuad(A);
+	const float S = StampRevealStartScale + (1.f - StampRevealStartScale) * E;
+	GradeStampStack->SetRenderOpacity(E);
+	GradeStampStack->SetRenderScale(FVector2D(S, S));
+
+	if (A >= 1.f)
+	{
+		StampRevealElapsed = -1.f;
+		GradeStampStack->SetRenderOpacity(1.f);
+		GradeStampStack->SetRenderScale(FVector2D(1.f, 1.f));
+	}
+}
+
 void UProjectReportWidget::ApplyGradeStampColor(const FLinearColor& GradeColor)
 {
 	// 스탬프는 SDF 머티리얼 3층이라 SetBrushColor 가 아니라 MID 파라미터로 색이 들어간다.
@@ -241,14 +296,6 @@ void UProjectReportWidget::ApplyGradeStampColor(const FLinearColor& GradeColor)
 		}
 	}
 
-	// 컬러 면 위 라벨은 그 색 계열 진한 섀이드로 아웃라인 (UI_STYLE_CATALOG 마감 §6)
-	if (Text_QualityGrade)
-	{
-		FSlateFontInfo Font = Text_QualityGrade->GetFont();
-		Font.OutlineSettings.OutlineSize = 2;
-		Font.OutlineSettings.OutlineColor = Deep;   // FLinearColor 필드 — sRGB 왕복 변환 불필요
-		Text_QualityGrade->SetFont(Font);
-	}
 }
 
 void UProjectReportWidget::OnDialogCancelled()
@@ -257,3 +304,12 @@ void UProjectReportWidget::OnDialogCancelled()
 	DeactivateWidget();
 }
 
+UWidget* UProjectReportWidget::GetCloseTargetWidget() const
+{
+	if (!ConfirmCancelWidget)
+	{
+		return nullptr;
+	}
+	UWidget* Confirm = ConfirmCancelWidget->GetConfirmButtonWidget();
+	return Confirm && Confirm->IsVisible() ? Confirm : ConfirmCancelWidget->GetCancelButtonWidget();
+}

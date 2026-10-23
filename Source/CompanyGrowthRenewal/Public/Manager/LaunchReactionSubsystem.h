@@ -8,7 +8,7 @@
 
 class UTableManagerSubsystem;
 
-// 레일에 한 장씩 흘러오는 반응 1건 (비평가 = 이름+점수, SNS = 닉). Band = 칩 밴드색 키(High/Mid/Low).
+// 오피스 TV에 한 건씩 방송되는 반응 1건 (비평가 = 이름+점수, SNS = 닉).
 USTRUCT(BlueprintType)
 struct FLaunchReaction
 {
@@ -18,7 +18,6 @@ struct FLaunchReaction
 	UPROPERTY() FText Source;    // 비평가 이름 | @닉
 	UPROPERTY() int32 Score = 0; // 비평가만 1~10, SNS 0
 	UPROPERTY() FText Comment;
-	UPROPERTY() FName Band;      // High | Mid | Low
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLaunchReactionReady, int32, BuildingID, const FLaunchReaction&, Reaction);
@@ -26,7 +25,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLaunchReactionReady, int32, Buil
 /**
  * 출시 반응 드립 (specs/2026-08-22 §4). OfficeMap 전용 WorldSubsystem.
  * StartLaunch(RequestLaunchConfirm) 말미에 PrepareReactions 로 7건을 뽑아 두고, 리빌이 닫히면 BeginDrip 이
- * 타이머로 OnReactionReady 를 쏜다. 구독자(OfficeMainWidget)가 없거나 다른 건물이면 그 건은 소실(의도 — 저장 없음).
+ * 타이머로 OnReactionReady 를 쏜다. 구독자(오피스 TV 뉴스 데스크)가 없거나 다른 건물이면 그 건은 소실(의도 — 저장 없음).
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API ULaunchReactionSubsystem : public UWorldSubsystem

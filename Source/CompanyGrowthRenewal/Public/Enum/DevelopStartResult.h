@@ -12,5 +12,6 @@ enum class EDevelopStartResult : uint8
 {
 	Success,
 	NoIndustry,			// 산업 미확인 (Game 산업 빌딩에서 진입하지 않음)
-	NoProjectRow		// DT_Project_* 에 해당 행이 없음
+	NoProjectRow,		// DT_Project_* 에 해당 행이 없음
+	TutorialRestricted	// 현재 미션에서 안내하는 프로젝트가 아님
 };

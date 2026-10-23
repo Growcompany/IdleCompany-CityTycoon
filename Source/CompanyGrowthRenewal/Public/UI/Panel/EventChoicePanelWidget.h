@@ -14,7 +14,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEventChoiceMade, int32, ChoiceInd
  * 3선택지 이벤트 모달 (UI_EventChoicePanel WBP에 부착)
  * - WBP 구조: BackgroundImage / TitleText (이벤트 제목) / HorizontalBox 안 UIE_EventChoiceCard 3개
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UEventChoicePanelWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()

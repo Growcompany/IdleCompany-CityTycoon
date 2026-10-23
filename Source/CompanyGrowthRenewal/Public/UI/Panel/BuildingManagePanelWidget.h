@@ -6,6 +6,7 @@
 #include "UI/AnimatedActivatableWidget.h"
 #include "Enum/TraitSortMode.h"
 #include "UI/Element/Common/BulkModeSelectorWidget.h"   // EEnhanceBulkMode + 공용 배율 선택기
+#include "UI/Element/Common/HelpTableProvider.h"
 #include "BuildingManagePanelWidget.generated.h"
 
 class UTraitCardSlotWidget;
@@ -30,7 +31,7 @@ class UCommonButtonBase;
 class UImage;
 class UButton;
 class UOverlay;
-class UCloseButtonWidget;
+class UPanelHeaderWidget;
 class UStatRowWidget;
 class UCommonTextBlock;
 struct FOperationData;
@@ -54,17 +55,34 @@ enum class EBuildingManageTab : uint8
  * (직원 관리/프로젝트 진행은 OfficeMap에서 처리)
  */
 UCLASS()
-class COMPANYGROWTHRENEWAL_API UBuildingManagePanelWidget : public UAnimatedActivatableWidget
+class COMPANYGROWTHRENEWAL_API UBuildingManagePanelWidget
+	: public UAnimatedActivatableWidget
+	, public IHelpTableProvider
 {
 	GENERATED_BODY()
 
 public:
 	APlayerCamera* Player = nullptr;
 
+	// IHelpTableProvider ― 도움말 "?" 에 강화 곡선을 넘긴다.
+	// 곡선은 DT/헬퍼가 소유하고 도움말은 읽기만 한다 (설계 R2 §2.7)
+	virtual bool GetHelpTableInfo(FName HelpKey, FHelpTableInfo& Out) const override;
+	virtual void GetHelpTableRows(FName HelpKey, int32 PageIndex, int32 AxisIndex,
+		TArray<FHelpTableRow>& Out) const override;
+
+	virtual void NativeOnInitialized() override;
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 	virtual void NativeOnDeactivated() override;
+	// 뒤로가기 = 안쪽부터 ― 특성 상세가 열려 있으면 그것만 닫는다(트리 순서상 패널 X 가 먼저 잡히기 때문)
+	virtual bool NativeOnHandleBackAction() override;
+
+	// 최초 진입 코치마크 (DT_PanelIntro PanelKey="BuildingManage") — EmployeeWindowWidget 선례와 같은 짝
+	void TryPlayPanelIntro();
+	void HandlePanelIntroFinished();
+	FTimerHandle PanelIntroTimer;
+	TWeakObjectPtr<class UPanelIntroOverlayWidget> PanelIntroOverlay;
 	virtual void NativeOnActivated() override;
 
 	// 타겟 건물 설정. InitialTab = 열릴 때 활성화할 탭 (딥링크용 — 예: 금고 강화 유도는 Enhancement).
@@ -92,9 +110,9 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UButton* BackgroundBtn;
 
-	// 닫기 버튼 (UIE_CloseButton)
+	// 공통 제목·도움말·닫기 영역
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UCloseButtonWidget* UIE_CloseButton;
+	TObjectPtr<UPanelHeaderWidget> PanelHeader;
 
 	// 탭 버튼들 — 합성 래퍼(Overlay+ClipToBounds 마스킹 + 디자인 baked-in)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
@@ -131,25 +149,16 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UHorizontalBox* TraitSlotRow;
 
-	// 좌측 컬럼 컨테이너 — (2026-07-21) 특성 팝업 부착처 역할은 TraitModalLayer 로 이관됨
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	// 패널 바로 왼쪽의 건물 정보 카드 열 — 특성 상세 카드가 같은 자리에 붙으므로 열린 동안 숨긴다
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UVerticalBox* LeftPanelRightBox;
 
-	// ===== 특성 상세 중앙 모달 (2026-07-21 B안: 딤 + 중앙 팝업 + 이전/다음 내비) =====
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	// ===== 특성 상세 = 패널 왼쪽 가장자리에 붙는 카드 (2026-10-22 A안, 딤 없음) =====
+	// 왼쪽 영역 래퍼 안에 Right/Top 으로 두어 패널에 붙인다. 열림 = SelfHitTestInvisible(빈 곳 클릭 통과)
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UOverlay* TraitModalLayer;
 
-	// 딤 = 닫기 (ProductSellModal BackgroundBtn 패턴)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UButton* TraitModalDimButton;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UButtonWidget* TraitNavPrevButton;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UButtonWidget* TraitNavNextButton;
-
-	// 특성 상세 팝업 — 모달 레이어에 정적 배치. paste 소실 대비 EnsureTraitDetailPopup 동적 생성 폴백
+	// 특성 상세 팝업 — 레이어에 정적 배치. paste 소실 대비 EnsureTraitDetailPopup 동적 생성 폴백
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UTraitDetailPopupWidget> TraitDetailPopup;
 
@@ -162,10 +171,6 @@ protected:
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UButtonWidget* SortNameBtn;
-
-	// 특성 탭 - 장착 밴드 "슬롯 N/5 해금"
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCommonTextBlock* TraitSlotCountText;
 
 	// 특성 탭 - 보유 헤더 "N종"
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -221,16 +226,6 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UVerticalBox* BuildingStatContainer;
 
-	// 건물 레벨 텍스트 (좌측 패널 상단)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UCommonTextBlock* LevelText;
-
-	// 숫자 단계 배지 — 탭하면 해금 로드맵
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UButton* LevelBadgeButton;
-	UFUNCTION()
-	void HandleLevelChipClicked();
-
 	// 프로젝트/생산 상태 텍스트 (읽기 전용, 업종별 상태 표시)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* ProjectStatusText;
@@ -247,11 +242,24 @@ protected:
 	float CameraRefocusBottomPadding = 50.f;
 
 private:
+	void RefreshTargetBuildingFocus();
+	TWeakObjectPtr<UWidget> CameraFocusPanelBoundary;
+	FVector2D LastCameraFocusViewportSize = FVector2D::ZeroVector;
+	float LastCameraFocusScreenCenterX = -1.f;
+	bool bCameraFocusPending = false;
+
 	// 우측 컬럼 등장 트윈 상태 (좌측 고정, 우측만 아래→위) — 슬라이드는 코드, 페이드는 스택 FADE_ONLY
 	bool bRightAppearing = false;
 	float RightAppearElapsed = 0.f;
 	static constexpr float RightRiseDistance = 48.f;
 	static constexpr float RightAppearDuration = 0.2f;
+
+	// 잠긴 카드 거절 셰이크를 패널 틱이 돌린다 - 카드마다 NativeTick 을 달면 카드 수만큼 틱이 늘어난다.
+	void UpdateRejectShake(float DeltaTime);
+	TWeakObjectPtr<UBuildingSkinCardWidget> RejectShakeCard;
+	float RejectShakeElapsed = -1.f;
+	static constexpr float RejectShakeDuration = 0.28f;
+	static constexpr float RejectShakeAmplitude = 6.f;
 
 	// 현재 관리 중인 건물
 	UPROPERTY()
@@ -292,7 +300,7 @@ private:
 
 	// 표시 전용 잠금 캐시 — 구매 권위는 매 입력마다 Actor API에서 직접 판정한다.
 	TSet<EBuildingEnhancementType> LockedEnhancementTypes;
-	bool bLastTutorialCompleted = false;
+	bool bLastCompanyEnhancementUnlocked = false;
 
 	// 강화 배율 모드 (패널 세션 유지)
 	EEnhanceBulkMode BulkMode = EEnhanceBulkMode::x1;
@@ -379,11 +387,18 @@ private:
 	// 잠긴 슬롯 클릭 → 다이아 충분 시 개방 확인 다이얼로그(ConfirmCancel), 부족 시 Toast
 	void ShowSlotUnlockConfirm(int32 SlotIndex, int32 DiamondCost);
 	void HandleSlotUnlockConfirmed(int32 SlotIndex);
+	// 경제 잠금/해제 — 해제 시 서버값으로 정정된 보석 잔액으로 특성 슬롯 재구성
+	void HandleEconomyReady(bool bReady);
 	void HandleTraitCardClicked(FName TraitID);
 	void OpenTraitDetailForInventory(FName TraitID);
 	void OpenTraitDetailForSlot(int32 SlotIndex);
 	void CloseTraitDetailPopup();
-	// 첫 특성 클릭 시 LeftPanelRightBox 에 팝업 1회 동적 생성 + 델리게이트 바인딩 (lazy, 이후 재사용)
+	bool IsTraitDetailOpen() const;
+	// 열기 공통 — 레이어 표시 + 건물 정보 카드 숨김 + 격자 선택 표시
+	void ShowTraitDetailLayer();
+	// 상세가 보여 주는 인벤 카드만 선택 테두리 (NAME_None = 전부 해제)
+	void RefreshTraitCardSelection(FName SelectedTraitID);
+	// 정적 팝업 바인딩 확인 + 델리게이트 재바인딩. 정적 배치가 사라졌으면 레이어에 동적 생성 폴백
 	void EnsureTraitDetailPopup();
 	void SetPendingTargetSlot(int32 SlotIndex);
 	int32 FindFirstEmptyUnlockedSlot() const;
@@ -393,16 +408,11 @@ private:
 	void HandlePopupUnequip(int32 SlotIndex);
 	void HandlePopupClose();
 
-	// 모달 내비 — 인벤 모드 전용, SpawnedTraitCards(그리드 정렬 순서) 순환
-	void NavigateTraitDetail(int32 Delta);
-	void UpdateTraitNavVisibility();
-	UFUNCTION() void OnTraitModalDimClicked();
-	void HandleTraitNavPrev();
-	void HandleTraitNavNext();
-
-	// 현재 모달 표시 특성 (내비 기준점, 닫으면 NAME_None)
+	// 현재 상세 표시 특성 (재탭 닫기 판정, 닫으면 NAME_None)
 	FName CurrentDetailTraitID = NAME_None;
 	bool bDetailInventoryMode = false;
+	// 건물 정보 카드 열의 저작 Visibility — 상세를 닫을 때 이 값으로 되돌린다 (NativeOnInitialized 에서 1회 기억)
+	ESlateVisibility InfoColumnAuthoredVisibility = ESlateVisibility::SelfHitTestInvisible;
 
 	// 매니저 멀티캐스트 델리게이트 핸들러 (장착 변경 / 슬롯 해금)
 	void HandleTraitSlotChanged(int32 ChangedBuildingIndex, int32 SlotIndex, FName NewTraitID);
@@ -433,9 +443,6 @@ private:
 
 	// 좌측 패널 건물 정보 갱신 (StatRow 동적 생성)
 	void PopulateBuildingStats();
-
-	// 티어 배지 숫자만 갱신 — 패널 오픈/탭 전환 시 호출
-	void RefreshLevelBadge();
 
 	// 프로젝트/생산 상태 표시 갱신 (읽기 전용)
 	void UpdateProjectStatus();
@@ -470,6 +477,7 @@ public:
 
 	// 미션 가이드(M3 EnterOffice)가 [입장] 버튼을 하이라이트 링 타겟으로 쓰기 위한 노출
 	UWidget* GetEnterOfficeButtonWidget() const;
+	UWidget* GetCloseButtonWidget() const;
 
 	// 미션 가이드(M11 EquipFirstTrait) 하이라이트 링 타겟 노출
 	UWidget* GetTraitTabButtonWidget() const;
@@ -489,4 +497,17 @@ public:
 	bool IsEnhancementTabActive() const { return CurrentTab == EBuildingManageTab::Enhancement; }
 	UWidget* GetEnhancementTabButtonWidget() const;       // [강화] 탭 버튼
 	UWidget* GetBuildingFloorUpgradeButtonWidget() const; // 빌드업 슬롯 강화 버튼 (강화탭 활성 시), 없으면 nullptr
+
+	// 튜토리얼 M10 — 빌드업 외 강화 중 지금 살 수 있는 첫 슬롯 버튼(표시 순서). 잠금·만렙·재화 부족은 건너뛰고, 없으면 nullptr
+	UWidget* GetFirstAffordableStatEnhanceButtonWidget() const;
+
+	// 튜토리얼 M11/M12 — 탭이 안 보이면 카드도 못 누르므로 카드 게터는 해당 탭 활성일 때만 값을 준다
+	bool IsTraitTabActive() const { return CurrentTab == EBuildingManageTab::Trait; }
+	bool IsSkinTabActive() const { return CurrentTab == EBuildingManageTab::Skin; }
+	// 이 건물에 바로 장착할 수 있는 보유 특성 카드(인벤 1장 이상·업종 허용·미장착). 힌트 ID 우선, 없으면 그리드 첫 후보
+	UWidget* GetEquippableTraitCardWidget(FName PreferredTraitID = NAME_None) const;
+	// 뽑아서 얻은 보유 스킨 카드(시작 스킨·현재 적용 스킨 제외). 힌트 ID 우선. 조명 하위 탭이면 nullptr
+	UWidget* GetOwnedGachaSkinCardWidget(int32 PreferredSkinID = INDEX_NONE) const;
+	// 스킨 탭이 조명 하위 탭에 머물러 있으면 [외관] 버튼, 이미 외관이면 nullptr
+	UWidget* GetSkinExteriorSubTabWidget() const;
 };

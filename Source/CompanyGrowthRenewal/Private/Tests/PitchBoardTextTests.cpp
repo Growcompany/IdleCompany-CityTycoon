@@ -1,5 +1,4 @@
 #include "Misc/AutomationTest.h"
-#include "Manager/TrendManagerSubsystem.h"
 #include "UI/PitchBoardText.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -20,7 +19,6 @@ bool FCGRPitchBoardWordingTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("이"), MakeShortageSentence(FText::FromString(TEXT("그래픽"))).ToString(), FString(TEXT("그래픽이 부족합니다")));
 	TestEqual(TEXT("가"), MakeShortageSentence(FText::FromString(TEXT("사운드"))).ToString(), FString(TEXT("사운드가 부족합니다")));
 	TestEqual(TEXT("QA 가"), MakeShortageSentence(FText::FromString(TEXT("QA"))).ToString(), FString(TEXT("QA가 부족합니다")));
-	TestEqual(TEXT("타일 한 단어"), MakeShortageWord(FText::FromString(TEXT("개발"))).ToString(), FString(TEXT("개발 부족")));
 	TestEqual(TEXT("다음 등급 C→B"), NextGradeLetter(TEXT("C")), FString(TEXT("B")));
 	TestEqual(TEXT("S 는 없음"), NextGradeLetter(TEXT("S")), FString());
 	TestEqual(TEXT("힌트"), MakeNextGradeHint(FText::FromString(TEXT("개발")), TEXT("B")).ToString(), FString(TEXT("개발 투자 시 예상 B")));
@@ -105,25 +103,6 @@ bool FCGRPitchBoardRecommendTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("잠금은 대기보다도 우선"), (int32)ClassifyTile(NoOutlookTile, true, false), (int32)ETileVerdict::Locked);
 		TestEqual(TEXT("잠금+선착수 동시 = 잠금"), (int32)ClassifyTile(E(11, false, false, 1, 2.f), true, true), (int32)ETileVerdict::Locked);
 	}
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCGRTrendRerollPickTest,
-	"CGR.Pitch.TrendRerollPick",
-	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
-
-bool FCGRTrendRerollPickTest::RunTest(const FString& Parameters)
-{
-	const TArray<FName> Pool = { TEXT("동전"), TEXT("보석"), TEXT("우주") };
-	TestNotEqual(TEXT("현재 소재 제외"), UTrendManagerSubsystem::PickTrendFromPool(Pool, TEXT("보석"), 1).ToString(), FString(TEXT("보석")));
-	TestEqual(TEXT("인덱스 0 = 동전"), UTrendManagerSubsystem::PickTrendFromPool(Pool, TEXT("보석"), 0).ToString(), FString(TEXT("동전")));
-	TestEqual(TEXT("풀 1개 = 변경 없음(None)"), UTrendManagerSubsystem::PickTrendFromPool({ TEXT("보석") }, TEXT("보석"), 0).ToString(), FString(TEXT("None")));
-	// 인덱스가 남은 풀 밖으로 나가도 클램프 — 호출부 상한이 어긋나도 마지막 칸이 여기서 살아난다
-	TestEqual(TEXT("인덱스 초과 = 마지막(우주)"), UTrendManagerSubsystem::PickTrendFromPool(Pool, TEXT("보석"), 9).ToString(), FString(TEXT("우주")));
-	// 제외 소재가 풀에 없으면 뺄 것이 없다 — 마지막 칸(Num()-1)까지 실제로 뽑혀야 한다
-	TestEqual(TEXT("제외 미포함 = 마지막 칸 도달"), UTrendManagerSubsystem::PickTrendFromPool(Pool, TEXT("없는소재"), Pool.Num() - 1).ToString(), FString(TEXT("우주")));
-	TestEqual(TEXT("제외 미포함 = 첫 칸도 그대로"), UTrendManagerSubsystem::PickTrendFromPool(Pool, TEXT("없는소재"), 0).ToString(), FString(TEXT("동전")));
 	return true;
 }
 

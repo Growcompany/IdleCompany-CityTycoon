@@ -3,7 +3,9 @@
 #include "Data/BuildingEnhancementData.h"
 #include "Data/EmployeePotentialData.h"
 #include "Data/EmployeeStatsData.h"
+#include "Data/FatigueConfig.h"
 #include "Data/ProjectBoardData.h"
+#include "Data/ShippedRecord.h"
 #include "Data/TierLayout.h"
 #include "Manager/EmployeeManager.h"
 #include "Manager/ResourceItemManager.h"
@@ -12,7 +14,7 @@
 #include "Manager/ProductionOrderManager.h"
 #include "Manager/SaveLoadManager.h"
 #include "Manager/TableManagerSubsystem.h"
-#include "Manager/TrendManagerSubsystem.h"
+#include "Manager/EmployeeEquipmentManagerSubsystem.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "Manager/LaunchLootManagerSubsystem.h"
 #include "Manager/LaunchReactionSubsystem.h"
@@ -24,43 +26,55 @@
 #include "GameMode/OfficeGameMode.h"
 #include "Entity/Officeworker/Officeworker.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
+#include "Office/WorkstationActorBase.h"
 #include "EngineUtils.h"
 #include "Manager/BuildingTraitManagerSubsystem.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Data/CloudEconomyData.h"
+
+namespace
+{
+	// 서버 카탈로그 reason/source — spendRules.json / creditRules.json 과 바이트 단위로 같아야 한다(다르면 400)
+	const FName SpendReason_OfficeRetryDevelopment(TEXT("office.retryDevelopment"));
+	const FName CreditSource_CodexTier(TEXT("codex.tierMilestone"));
+	const FName CreditSource_CodexFull(TEXT("codex.fullMilestone"));
+
+	// 지급 성공 알림 — 매니저는 UI 를 모르지만 마일스톤은 화면에 뜨지 않으면 받은 줄 모른다
+	void ShowCodexMilestoneToast(const FText& Msg)
+	{
+		if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
+		{
+			if (UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>())
+			{
+				UIMgr->ShowNotification(Msg);
+			}
+		}
+	}
+}
 #include "Enum/BuildingTraitTarget.h"
 
 namespace
 {
 	// 튜토리얼 종료 시 빌딩 Lv3(4번째 워크스테이션+강화 2종 해금) 도달용 배수 — 직원 레벨업은 별도 결손 보정이 담당
 
-	// 튜토리얼 M9 선행 보장: 첫 프로젝트로 반드시 1회 레벨업(=SP 1)시킨다.
-	// SP 를 직접 주면 "SP == 누적 레벨업" 불변식이 깨지므로, 모자란 XP 만 채워 정상 레벨업을 일으킨다.
-	void TopUpExperienceForGuaranteedLevelUp(UEmployeeManager* EmployeeMgr, int32 BuildingIndex)
+	// 첫 프로젝트에 참여한 직원 한 명의 수동 레벨업 비용 부족분만 채운다.
+	void TopUpExperienceForGuaranteedLevelUp(UEmployeeManager* EmployeeMgr, int32 BuildingIndex, const TSet<int32>& ParticipantIds)
 	{
-		if (!EmployeeMgr)
+		if (!EmployeeMgr) { return; }
+		for (const FEmployeeInstance& ActiveEmployee : EmployeeMgr->GetActiveEmployeesInBuilding(BuildingIndex))
 		{
-			return;
-		}
-
-		for (const FEmployeeInstance& Emp : EmployeeMgr->GetEmployeesInBuilding(BuildingIndex))
-		{
-			if (Emp.Level > 1 || Emp.AvailableSkillPoints > 0)
-			{
-				continue;
-			}
-
-			const int32 Required = EmployeeMgr->GetMaxExperienceForLevel(Emp.Level);
-			const float Deficit = static_cast<float>(Required) - Emp.Experience;
-			if (Deficit <= 0.f)
-			{
-				continue;
-			}
-
-			EmployeeMgr->AddExperience(Emp.EmployeeID, Deficit);
-			UE_LOG(LogTemp, Log,
-				TEXT("[Tutorial] M9 선행 보장 — Employee %d 에 XP %.1f 보정(요구 %d) → 레벨업"),
-				Emp.EmployeeID, Deficit, Required);
+			const int32 EmployeeId = ActiveEmployee.EmployeeID;
+			if (!ParticipantIds.Contains(EmployeeId)) continue;
+			const FEmployeeInstance* Emp = EmployeeMgr->GetEmployeeData(EmployeeId);
+			if (!Emp || GetPrimaryDisciplineSlot(*Emp) == INDEX_NONE) { continue; }
+			const int32 Required = EmployeeMgr->GetLevelUpCost(EmployeeId);
+			if (Required <= 0) { continue; }
+			const double Deficit = static_cast<double>(Required) - EmployeeMgr->GetExperience(EmployeeId);
+			if (Deficit > 0.0) { EmployeeMgr->CommitResolvedExperience(EmployeeId, Deficit); }
+			break;
 		}
 	}
+
 }
 
 UOfficeStageProgressManager::UOfficeStageProgressManager()
@@ -86,6 +100,9 @@ bool UOfficeStageProgressManager::ShouldCreateSubsystem(UObject* Outer) const
 void UOfficeStageProgressManager::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+	if (UWorld* CurrentWorld = GetWorld())
+		EquipmentActorSpawnedHandle = CurrentWorld->AddOnActorSpawnedHandler(
+			FOnActorSpawned::FDelegate::CreateUObject(this, &UOfficeStageProgressManager::HandleEquipmentActorSpawned));
 
 	ProgressData = FStageProgressData();
 	ProgressData.InitializeSteps();
@@ -96,6 +113,8 @@ void UOfficeStageProgressManager::Initialize(FSubsystemCollectionBase& Collectio
 	// Operation 완료 델리게이트 바인딩
 	if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance()))
 	{
+		if (auto* Equipment = GI->GetSubsystem<UEmployeeEquipmentManagerSubsystem>())
+			Equipment->OnEquipmentChanged.AddUObject(this, &UOfficeStageProgressManager::HandleEquipmentChanged);
 		if (UProjectOperationManager* OpMgr = GI->GetSubsystem<UProjectOperationManager>())
 		{
 			OpMgr->OnOperationCompleted.AddDynamic(this, &UOfficeStageProgressManager::OnOperationCompletedHandler);
@@ -113,6 +132,17 @@ void UOfficeStageProgressManager::OnWorldBeginPlay(UWorld& InWorld)
 	// Subsystem::Initialize 시점엔 World 세팅만 끝난 상태라 빌딩 인덱스 미확정 가능성 있어,
 	// OnWorldBeginPlay (Actors BeginPlay 직후) 에서 로드.
 	LoadTierProgressFromSave();
+	if (const auto* GI = Cast<UCGGameInstance>(InWorld.GetGameInstance()); GI && IsManufacturingType(GI->GetCurrentBuildingCompanyType()))
+	{
+		// 다른 맵이나 오프라인에서 개발을 마친 제품의 도감 보상을 진입 시 확인한다.
+		for (int32 Tier = 1; Tier <= FTierLayout::MaxTier(); ++Tier)
+		{
+			if (TierProgress.GetTierClearedCount(Tier) < FTierLayout::ProjectsPerTier(Tier)) continue;
+			int32 StartIndex = 0, EndIndex = 0;
+			FTierLayout::GetRange(Tier, StartIndex, EndIndex);
+			CheckAndGrantCodexMilestone(StartIndex);
+		}
+	}
 }
 
 void UOfficeStageProgressManager::LoadTierProgressFromSave()
@@ -158,10 +188,12 @@ void UOfficeStageProgressManager::SyncTierProgressToSave()
 
 void UOfficeStageProgressManager::Deinitialize()
 {
+	FinalizeEquipmentAttempt(EEquipmentAttemptOutcome::Aborted);
 	StopTimer();
 
 	if (UWorld* World = GetWorld())
 	{
+		World->RemoveOnActorSpawnedHandler(EquipmentActorSpawnedHandle);
 		World->GetTimerManager().ClearTimer(EffectDelayTimerHandle);
 		World->GetTimerManager().ClearTimer(LaunchPopupTimerHandle);
 		World->GetTimerManager().ClearTimer(FeverTimerHandle);
@@ -171,6 +203,7 @@ void UOfficeStageProgressManager::Deinitialize()
 	// Operation 완료 델리게이트 언바인딩
 	if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance()))
 	{
+		if (auto* Equipment = GI->GetSubsystem<UEmployeeEquipmentManagerSubsystem>()) Equipment->OnEquipmentChanged.RemoveAll(this);
 		if (UProjectOperationManager* OpMgr = GI->GetSubsystem<UProjectOperationManager>())
 		{
 			OpMgr->OnOperationCompleted.RemoveAll(this);
@@ -186,6 +219,7 @@ void UOfficeStageProgressManager::Deinitialize()
 
 void UOfficeStageProgressManager::SelectProject(const FProjectData& ProjectData, int32 ProjectNumber, int32 StageNumber)
 {
+	if (IsManufacturingType(ProjectData.CompanyType)) return;
 	// 이전 Operation 정리
 	UCGGameInstance* GI = UCGGameInstance::GetInstance();
 	if (GI)
@@ -272,6 +306,7 @@ void UOfficeStageProgressManager::SelectProject(const FProjectData& ProjectData,
 
 void UOfficeStageProgressManager::StartNewStage(const FProjectData& ProjectData, int32 ProjectNumber, int32 StageNumber)
 {
+	if (IsManufacturingType(ProjectData.CompanyType)) return;
 	SelectProject(ProjectData, ProjectNumber, StageNumber);
 
 	// 직원들에게 Stage 모드 알림
@@ -283,6 +318,7 @@ void UOfficeStageProgressManager::StartNewStage(const FProjectData& ProjectData,
 
 void UOfficeStageProgressManager::EndCurrentStage()
 {
+	FinalizeEquipmentAttempt(EEquipmentAttemptOutcome::Aborted);
 	StopTimer();
 	EndFever();
 	bStageInProgress = false;
@@ -302,6 +338,8 @@ void UOfficeStageProgressManager::EndCurrentStage()
 
 void UOfficeStageProgressManager::StartSimultaneousTimer(bool bShowEffect)
 {
+	const UCGGameInstance* CurrentGI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
+	if (CurrentGI && IsManufacturingType(CurrentGI->GetCurrentBuildingCompanyType())) return;
 	if (ProgressData.bIsTimerRunning)
 	{
 		return;
@@ -391,6 +429,7 @@ void UOfficeStageProgressManager::BeginTimerRun(float Duration, bool bResetScore
 
 	// 직원들 Stage 모드로 전환
 	NotifyEmployeesBehaviorMode(EEmployeeBehaviorMode::Stage);
+	BeginEquipmentAttempt(bResetScores, Duration);
 
 	// 초기 델리게이트 브로드캐스트
 	OnTimeUpdated.Broadcast(ProgressData.RemainingTime);
@@ -428,6 +467,7 @@ void UOfficeStageProgressManager::SimultaneousTimerTick()
 		return;
 	}
 
+	TickEquipmentClock(FMath::Min(TimerTickInterval, ProgressData.RemainingTime));
 	ProgressData.RemainingTime -= TimerTickInterval;
 
 	// 시간 업데이트 브로드캐스트 (UI 타이머 바 갱신)
@@ -471,6 +511,9 @@ void UOfficeStageProgressManager::SimultaneousTimerTick()
 
 void UOfficeStageProgressManager::OnSimultaneousTimerEnded()
 {
+	// 완료 콜백의 중복 진입으로 동일 버킷이 재지급되지 않게 타이머 상태를 먼저 검사한다.
+	if (!bStageInProgress || !ProgressData.bIsTimerRunning || Lifecycle != EProjectLifecycle::Developing) return;
+	if (auto* Attempt = FindEquipmentAttempt()) ++Attempt->CompletedSegments;
 	StopTimer();
 	EndFever();  // 개발 종료 시 피버 해제 (결과 모달로 새어나가지 않게)
 
@@ -493,10 +536,24 @@ void UOfficeStageProgressManager::OnSimultaneousTimerEnded()
 		ProgressData.Step3AchievementRate * 100.0f);
 
 	// Step별 경험치 분배 (3개 동시에)
-	LastRoundEmployeeExp = 0.0f;
 	DistributeStepExperience(1);
 	DistributeStepExperience(2);
 	DistributeStepExperience(3);
+	TSet<int32> ParticipantIds;
+	if (const auto* Attempt = FindEquipmentAttempt())
+	{
+		for (const auto& Pair : Attempt->Employees)
+			if (Pair.Value.bStartParticipant || Pair.Value.TypedSeconds > 0.0) ParticipantIds.Add(Pair.Key);
+	}
+	else
+	{
+		for (const FEquipmentParticipant& Participant : GetEquipmentParticipants())
+			if (Participant.bSeated) ParticipantIds.Add(Participant.EmployeeId);
+	}
+
+	// 성공한 개발의 장비 보너스도 결과 창 전에 실제 직원에게 지급한다.
+	// 실패한 개발은 같은 시도로 컨티뉴할 수 있으므로 정산을 미룬다.
+	if (!IsLaunchBlocked()) FinalizeEquipmentAttempt(EEquipmentAttemptOutcome::Launched);
 
 	// M10 진행 중에만 — 첫 프로젝트는 반드시 직원을 1회 레벨업시킨다(M9 직능 [+] 활성 선행)
 	if (UCGGameInstance* TutorialGI = UCGGameInstance::GetInstance())
@@ -505,8 +562,8 @@ void UOfficeStageProgressManager::OnSimultaneousTimerEnded()
 		{
 			if (MissionMgr->GetActiveConditionType() == EMissionConditionType::LaunchFirstInHouseProject)
 			{
-				// LastRoundEmployeeExp 에 더하지 않는다 — M10 의 각본된 보정이지 이번 판이 벌어준 몫이 아니다
-				TopUpExperienceForGuaranteedLevelUp(GetEmployeeManager(), TutorialGI->GetCurrentManagedBuildingIndex());
+				// M10의 각본된 보정은 개발에서 벌어들인 양에 포함하지 않는다.
+				TopUpExperienceForGuaranteedLevelUp(GetEmployeeManager(), TutorialGI->GetCurrentManagedBuildingIndex(), ParticipantIds);
 			}
 		}
 	}
@@ -550,6 +607,7 @@ void UOfficeStageProgressManager::ShowLaunchPopupAfterEffect()
 	{
 		TransitionTo(EProjectLifecycle::LaunchPending);
 	}
+	PrepareLaunchLoot();
 
 	// 결과 모달 표시 (OfficeMainWidget → LaunchConfirmWidget). 탭 시 RequestLaunchConfirm →
 	// InHouse=StartOperation→Operating / 수주=계약금→Idle
@@ -573,6 +631,28 @@ void UOfficeStageProgressManager::StartLaunch()
 		{
 			SaveMgr->SaveGameData();
 		}
+	}
+}
+
+void UOfficeStageProgressManager::PrepareLaunchLoot()
+{
+	if (ProgressData.bLaunchLootPrepared || Lifecycle != EProjectLifecycle::LaunchPending
+		|| ProgressData.ActiveMode != EProjectMode::InHouse || ProgressData.bIsManufacturing
+		|| !ProgressData.MeetsMinimumClearScore())
+	{
+		return;
+	}
+
+	UCGGameInstance* GameInstance = UCGGameInstance::GetInstance();
+	ULaunchLootManagerSubsystem* LootMgr = GameInstance ? GameInstance->GetSubsystem<ULaunchLootManagerSubsystem>() : nullptr;
+	if (!LootMgr) { return; }
+	const int32 ProjectTier = FProjectTierProgress::GetTierForProject(ProgressData.ProjectID);
+	ProgressData.PendingLaunchLoot = LootMgr->RollAndGrant(
+		ULaunchLootManagerSubsystem::ReviewScoreToTableKey(ProgressData.ReviewScore), ProjectTier, 0, 0, false, false);
+	ProgressData.bLaunchLootPrepared = true;
+	if (USaveLoadManager* SaveMgr = GameInstance->GetSubsystem<USaveLoadManager>())
+	{
+		SaveMgr->SaveGameData();
 	}
 }
 
@@ -631,6 +711,17 @@ bool UOfficeStageProgressManager::TryRetryDevelopment()
 	}
 	ResMgr->SpendResource(EResourceType::Diamond, Cost);
 
+	return ApplyRetryDevelopmentEffect();
+}
+
+bool UOfficeStageProgressManager::ApplyRetryDevelopmentEffect()
+{
+	// 서버 왕복 사이에 출시가 확정·폐기됐을 수 있다 — 게이트를 다시 검사한다
+	if (Lifecycle != EProjectLifecycle::LaunchPending || !CanRetryDevelopment())
+	{
+		return false;
+	}
+
 	++ProgressData.RetryCount;
 
 	// 원 개발 시간의 일부만 추가 — 전체 재실행이면 실패의 무게가 사라진다
@@ -645,8 +736,101 @@ bool UOfficeStageProgressManager::TryRetryDevelopment()
 	bStageInProgress = true;
 	BeginTimerRun(Duration, /*bResetScores=*/false);
 
-	UE_LOG(LogTemp, Log, TEXT("[Lifecycle] 컨티뉴 개시 - 다이아 %d 소모, 추가 %.1f초"), Cost, Duration);
+	UE_LOG(LogTemp, Log, TEXT("[Lifecycle] 컨티뉴 개시 - 다이아 %d 소모, 추가 %.1f초"), GetRetryDiamondCost(), Duration);
 	return true;
+}
+
+// ===== 서버 권위 컨티뉴 =====
+
+UCloudEconomySubsystem* UOfficeStageProgressManager::GetCloudEconomy() const
+{
+	UWorld* W = GetWorld();
+	UGameInstance* GI = W ? W->GetGameInstance() : nullptr;
+	return GI ? GI->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+}
+
+FName UOfficeStageProgressManager::GetRetryDevelopmentSpendReason()
+{
+	return SpendReason_OfficeRetryDevelopment;
+}
+
+FName UOfficeStageProgressManager::RetryDevelopmentActionKey()
+{
+	return SpendReason_OfficeRetryDevelopment;
+}
+
+void UOfficeStageProgressManager::RequestRetryDevelopment(FOnStageEconomyDone Done)
+{
+	RequestRetryDevelopment(FOnCloudEconomyOpDone::CreateLambda(
+		[Done](bool bOk, FName) { Done.ExecuteIfBound(bOk); }));
+}
+
+void UOfficeStageProgressManager::RequestRetryDevelopment(FOnCloudEconomyOpDone Done)
+{
+	const FName ActionKey = RetryDevelopmentActionKey();
+
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Lifecycle] 컨티뉴 실패 - CloudEconomySubsystem 없음"));
+		Done.ExecuteIfBound(false, CloudErr::Internal);
+		return;
+	}
+
+	// 중복 클릭 — 내가 잡은 pending 이 아니므로 풀지 않는다
+	if (!Cloud->BeginPendingAction(ActionKey))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[Lifecycle] 컨티뉴 중복 - 진행 중"));
+		Done.ExecuteIfBound(false, NAME_None);
+		return;
+	}
+
+	// 로컬 캐시로 가능 판정만 — 차감은 서버가 한다
+	const int32 Cost = GetRetryDiamondCost();
+	UResourceItemManager* ResMgr = GetResourceItemManager();
+	const bool bHasDiamond = Cost > 0 && ResMgr && ResMgr->HasResource(EResourceType::Diamond, Cost);
+	const bool bLocallyPossible = Lifecycle == EProjectLifecycle::LaunchPending && CanRetryDevelopment()
+		&& bHasDiamond;
+
+	if (!bLocallyPossible)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[Lifecycle] 컨티뉴 미전송 - 로컬 판정 실패(Lifecycle=%s, Retry=%d, Cost=%d)"),
+			*LexToString(Lifecycle), ProgressData.RetryCount, Cost);
+		Cloud->EndPendingAction(ActionKey);
+		// 잔액 부족만 부족액 토스트 — 게이트(1회 소진·라이프사이클)는 부족이 아니다
+		Done.ExecuteIfBound(false, bHasDiamond ? NAME_None : CloudErr::InsufficientFunds);
+		return;
+	}
+
+	Cloud->RequestSpend(CloudCurrency::Diamond, Cost, GetRetryDevelopmentSpendReason(), FCloudMeta(),
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, ActionKey, Done](const FCloudOpResult& OpResult)
+	{
+		bool bApplied = false;
+		FName FailureCode = OpResult.Code;
+		if (OpResult.bOk)
+		{
+			bApplied = ApplyRetryDevelopmentEffect();
+			if (!bApplied)
+			{
+				// 되돌릴 수 없다 — 왕복 사이에 라이프사이클이 움직였다는 뜻이라 조용히 넘기면 재화만 사라진다
+				UE_LOG(LogTemp, Error, TEXT("[Lifecycle] 다이아는 나갔는데 컨티뉴 게이트가 깨졌다 (Lifecycle=%s, Retry=%d)"),
+					*LexToString(Lifecycle), ProgressData.RetryCount);
+				FailureCode = CloudErr::Internal;
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Lifecycle] office.retryDevelopment 실패 - Code=%s Http=%d"),
+				*OpResult.Code.ToString(), OpResult.HttpStatus);
+		}
+
+		if (UCloudEconomySubsystem* CloudEnd = GetCloudEconomy())
+		{
+			CloudEnd->EndPendingAction(ActionKey);
+		}
+		Done.ExecuteIfBound(bApplied, bApplied ? NAME_None : FailureCode);
+	}));
 }
 
 
@@ -732,6 +916,8 @@ void UOfficeStageProgressManager::StartFever()
 
 	if (!bWasActive)
 	{
+		if (auto* Attempt = FindEquipmentAttempt())
+			FEmployeeEquipmentEffectEvaluator::RecordFever(*Attempt, GetEquipmentParticipants());
 		OnFeverChanged.Broadcast(true);
 		UE_LOG(LogTemp, Log, TEXT("[OfficeStageProgressManager] Fever STARTED (%.1fs, x%.1f, crit+%.0f%%)"),
 			FeverDuration, FeverOutputMult, FeverCritBonus * 100.0f);
@@ -748,6 +934,249 @@ void UOfficeStageProgressManager::EndFever()
 	}
 	OnFeverChanged.Broadcast(false);
 	UE_LOG(LogTemp, Log, TEXT("[OfficeStageProgressManager] Fever ENDED"));
+}
+
+float UOfficeStageProgressManager::GetContributionYieldMultiplier() const
+{
+	return GetCurrentBuildingProjectYieldMultiplier();
+}
+
+TArray<FEquipmentDisciplineState> UOfficeStageProgressManager::GetEquipmentDisciplines() const
+{
+	TArray<FEquipmentDisciplineState> Result;
+	for (const auto& Step : ProgressData.Steps)
+		if (Step.DisciplineSlot != INDEX_NONE) Result.Add({Step.DisciplineSlot, Step.AcquiredScore, Step.TargetScore, Step.MinimumScore});
+	return Result;
+}
+
+FEquipmentAttemptRuntime* UOfficeStageProgressManager::FindEquipmentAttempt() const
+{
+	const UGameInstance* GameInstance = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
+	auto* EquipmentManager = GameInstance ? GameInstance->GetSubsystem<UEmployeeEquipmentManagerSubsystem>() : nullptr;
+	return EquipmentManager ? EquipmentManager->State.RuntimeData.Attempts.Find(ProgressData.EquipmentAttemptId) : nullptr;
+}
+
+const FEquipmentEffectLoadout& UOfficeStageProgressManager::GetEquipmentLoadout(int32 EmployeeId) const
+{
+	const UGameInstance* GameInstance = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
+	const auto* EquipmentManager = GameInstance ? GameInstance->GetSubsystem<UEmployeeEquipmentManagerSubsystem>() : nullptr;
+	const auto* Tables = GetTableManager();
+	const auto* Economy = Tables ? Tables->GetEmployeeEquipmentEconomy() : nullptr;
+	if (!EquipmentManager || !Economy)
+	{
+		static const FEquipmentEffectLoadout Empty;
+		return Empty;
+	}
+	if (EquipmentCachedRevision != EquipmentManager->GetState().Revision)
+	{
+		EquipmentLoadoutCache.Reset();
+		EquipmentCachedRevision = EquipmentManager->GetState().Revision;
+	}
+	if (!EquipmentLoadoutCache.Contains(EmployeeId))
+	{
+		auto Resolved = FEmployeeEquipmentEffectEvaluator::BuildLoadout(EquipmentManager->GetState(), EmployeeId,
+			Tables->GetEmployeeEquipmentDefinitions(), Tables->GetEmployeeEquipmentEffects(), *Economy);
+		if (!Resolved.bValid)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Equipment] Invalid effect loadout for employee %d"), EmployeeId);
+			Resolved.BasicValues.Reset(); Resolved.UniqueEffects.Reset();
+		}
+		EquipmentLoadoutCache.Add(EmployeeId, MoveTemp(Resolved));
+	}
+	return EquipmentLoadoutCache.FindChecked(EmployeeId);
+}
+
+void UOfficeStageProgressManager::HandleEquipmentActorSpawned(AActor* SpawnedActor)
+{
+	if (SpawnedActor && SpawnedActor->IsA<AOfficeworker>()) bEquipmentWorkerCacheDirty = true;
+}
+
+void UOfficeStageProgressManager::HandleEquipmentChanged()
+{
+	EquipmentCachedRevision = -1;
+	EquipmentLoadoutCache.Reset();
+}
+
+void UOfficeStageProgressManager::RefreshEquipmentWorkerCache() const
+{
+	for (const auto& Pair : EquipmentWorkerCache)
+		if (!Pair.Value.IsValid() || Pair.Value->GetEmployeeID() != Pair.Key) { bEquipmentWorkerCacheDirty = true; break; }
+	if (!bEquipmentWorkerCacheDirty) return;
+	EquipmentWorkerCache.Reset();
+	if (UWorld* CurrentWorld = GetWorld())
+	{
+		const AOfficeGameMode* OfficeMode = CurrentWorld->GetAuthGameMode<AOfficeGameMode>();
+		if (OfficeMode)
+		{
+			for (TActorIterator<AOfficeworker> It(CurrentWorld); It; ++It)
+			{
+				const int32 EmployeeId = It->GetEmployeeID();
+				// 미리보기 액터도 동일 직원 ID를 사용하므로 게임모드의 실제 배치 직원만 효과를 받는다.
+				if (!It->bIsPortraitMode && EmployeeId >= 0 && OfficeMode->FindEmployeeActorByID(EmployeeId) == *It)
+					EquipmentWorkerCache.Add(EmployeeId, *It);
+			}
+		}
+	}
+	bEquipmentWorkerCacheDirty = false;
+}
+
+TArray<FEquipmentParticipant> UOfficeStageProgressManager::GetEquipmentParticipants() const
+{
+	TArray<FEquipmentParticipant> Result;
+	const UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetWorld() ? GetWorld()->GetGameInstance() : nullptr);
+	const auto* Employees = GetEmployeeManager();
+	if (!GameInstance || !Employees) return Result;
+	const int32 BuildingId = GameInstance->GetCurrentManagedBuildingIndex();
+	RefreshEquipmentWorkerCache();
+	for (const auto& Employee : Employees->GetActiveEmployeesInBuilding(BuildingId))
+	{
+		FEquipmentParticipant Participant;
+		Participant.EmployeeId = Employee.EmployeeID; Participant.Level = Employee.Level;
+		Participant.PrimarySlot = GetPrimaryDisciplineSlot(Employee);
+		Participant.Loadout = GetEquipmentLoadout(Employee.EmployeeID);
+		const auto* CachedWorker = EquipmentWorkerCache.Find(Employee.EmployeeID);
+		if (const auto* Worker = CachedWorker ? CachedWorker->Get() : nullptr)
+		{
+			if (Worker->BehaviorComponent)
+			{
+				Participant.bSeated = Worker->GetAssignedWorkstation() != nullptr;
+				Participant.bTyping = Participant.bSeated && Worker->BehaviorComponent->GetBehaviorMode() == EEmployeeBehaviorMode::Stage &&
+					Worker->BehaviorComponent->GetState() == EEmployeeState::Typing && !Worker->BehaviorComponent->IsEquipmentResting();
+				Participant.bDown = Worker->BehaviorComponent->IsAwaitingCatch();
+				Participant.Fatigue = Worker->BehaviorComponent->Fatigue;
+			}
+		}
+		if (auto* Attempt = FindEquipmentAttempt())
+			if (auto* Runtime = Attempt->Employees.Find(Employee.EmployeeID))
+				FEmployeeEquipmentEffectEvaluator::SyncLoadout(*Runtime, Participant.Loadout, false);
+		Result.Add(MoveTemp(Participant));
+	}
+	return Result;
+}
+
+void UOfficeStageProgressManager::BeginEquipmentAttempt(bool bNewAttempt, float Duration)
+{
+	UGameInstance* GameInstance = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
+	auto* EquipmentManager = GameInstance ? GameInstance->GetSubsystem<UEmployeeEquipmentManagerSubsystem>() : nullptr;
+	const auto* CompanyInstance = Cast<UCGGameInstance>(GameInstance);
+	if (!EquipmentManager || !CompanyInstance) return;
+	if (bNewAttempt || !FindEquipmentAttempt())
+	{
+		bEquipmentWorkerCacheDirty = true;
+		FinalizeEquipmentAttempt(EEquipmentAttemptOutcome::Aborted);
+		ProgressData.EquipmentAttemptId = FGuid::NewGuid();
+		auto& NewAttempt = EquipmentManager->State.RuntimeData.Attempts.Add(ProgressData.EquipmentAttemptId);
+		NewAttempt.AttemptId = ProgressData.EquipmentAttemptId;
+		NewAttempt.BuildingId = CompanyInstance->GetCurrentManagedBuildingIndex();
+		for (const auto& Participant : GetEquipmentParticipants())
+		{
+			auto& Employee = NewAttempt.Employees.Add(Participant.EmployeeId);
+			Employee.EmployeeId = Participant.EmployeeId; Employee.StartLevel = Participant.Level;
+			Employee.bStartParticipant = Participant.bSeated;
+			FEmployeeEquipmentEffectEvaluator::SyncLoadout(Employee, Participant.Loadout, Participant.bSeated);
+		}
+	}
+	auto* Attempt = FindEquipmentAttempt();
+	if (!Attempt || Attempt->Outcome != EEquipmentAttemptOutcome::Active) return;
+	++Attempt->SegmentId; Attempt->SegmentStartTime = Attempt->ActiveTime; Attempt->SegmentDuration = Duration;
+	for (auto& Pair : Attempt->Employees)
+		for (auto& Effect : Pair.Value.Effects) { Effect.Value.SegmentExposure = 0; Effect.Value.SegmentValueSeconds = 0; }
+}
+
+void UOfficeStageProgressManager::TickEquipmentClock(float DeltaTime)
+{
+	auto* Attempt = FindEquipmentAttempt();
+	if (!Attempt || Attempt->Outcome != EEquipmentAttemptOutcome::Active) return;
+	const auto Participants = GetEquipmentParticipants();
+	for (const auto& Participant : Participants)
+	{
+		if (Attempt->Employees.Contains(Participant.EmployeeId)) continue;
+		auto& Employee = Attempt->Employees.Add(Participant.EmployeeId);
+		Employee.EmployeeId = Participant.EmployeeId; Employee.StartLevel = Participant.Level;
+		FEmployeeEquipmentEffectEvaluator::SyncLoadout(Employee, Participant.Loadout, false);
+	}
+	FEmployeeEquipmentEffectEvaluator::AdvanceTime(*Attempt, DeltaTime, Participants);
+}
+
+void UOfficeStageProgressManager::FinalizeEquipmentAttempt(EEquipmentAttemptOutcome Outcome)
+{
+	auto* Attempt = FindEquipmentAttempt();
+	if (!Attempt || Attempt->Outcome != EEquipmentAttemptOutcome::Active) return;
+	const auto* Tables = GetTableManager();
+	const auto* Rules = Tables ? Tables->FindEmployeeEquipmentEffect(TEXT("EQF_SCORE_GAIN")) : nullptr;
+	const auto Grants = FEmployeeEquipmentEffectEvaluator::FinalizeXP(*Attempt, Outcome, GetEquipmentDisciplines(),
+		Rules ? Rules->ScalarParameters.FindRef(TEXT("SelfXPCapPercent")) : 0.f,
+		Rules ? Rules->ScalarParameters.FindRef(TEXT("MentorXPCapPercent")) : 0.f);
+	if (auto* Employees = GetEmployeeManager())
+		for (const auto& Grant : Grants)
+			if (Employees->CommitResolvedExperience(Grant.EmployeeId, Grant.EquipmentAmount))
+				ProgressData.EarnedExperience += Grant.EquipmentAmount;
+	if (UGameInstance* GameInstance = GetWorld() ? GetWorld()->GetGameInstance() : nullptr)
+		if (auto* Saves = GameInstance->GetSubsystem<USaveLoadManager>()) Saves->RequestDeferredSave();
+}
+
+void UOfficeStageProgressManager::ApplyEquipmentRelief(const TArray<FEquipmentReliefAction>& Actions)
+{
+	const auto* GameInstance = Cast<UCGGameInstance>(GetWorld() ? GetWorld()->GetGameInstance() : nullptr);
+	const auto* Employees = GetEmployeeManager();
+	if (!GameInstance || !Employees || Actions.IsEmpty()) return;
+	RefreshEquipmentWorkerCache();
+	for (const auto& Action : Actions)
+	{
+		const auto* CachedWorker = EquipmentWorkerCache.Find(Action.EmployeeId);
+		auto* Worker = CachedWorker ? CachedWorker->Get() : nullptr;
+		if (Worker && Worker->BehaviorComponent)
+			Worker->BehaviorComponent->Fatigue = FMath::Max(0.f, Worker->BehaviorComponent->Fatigue - Action.Amount);
+	}
+}
+
+bool UOfficeStageProgressManager::RequestEquipmentManualPriority(int32 EmployeeId, int32 DisciplineSlot)
+{
+	if (!IsTimerRunning() || IsEventPaused()) return false;
+	auto* Attempt = FindEquipmentAttempt();
+	if (!Attempt || Attempt->Outcome != EEquipmentAttemptOutcome::Active) return false;
+	const auto Participants = GetEquipmentParticipants();
+	const auto* Participant = Participants.FindByPredicate([EmployeeId](const auto& P) { return P.EmployeeId == EmployeeId && P.bSeated; });
+	if (!Participant || !Attempt->Employees.Contains(EmployeeId)) return false;
+	FEmployeeEquipmentEffectEvaluator::SyncLoadout(Attempt->Employees.FindChecked(EmployeeId), Participant->Loadout, false);
+	return FEmployeeEquipmentEffectEvaluator::RequestManualPriority(*Attempt, EmployeeId, DisciplineSlot, Participant->Loadout, GetEquipmentDisciplines());
+}
+
+bool UOfficeStageProgressManager::TryCommitContributionBatch(const FEquipmentContributionContext& Context,
+	const TArray<FEquipmentContributionPacket>& Packets, TArray<FEquipmentContributionPacket>& OutAppliedPackets)
+{
+	OutAppliedPackets.Reset();
+	if (!IsTimerRunning() || IsEventPaused() || !Context.RootEventId.IsValid()) return false;
+	auto* Attempt = FindEquipmentAttempt();
+	if (!Attempt || Attempt->Outcome != EEquipmentAttemptOutcome::Active || Attempt->AttemptId != Context.AttemptId ||
+		Attempt->CommittedRootEvents.Contains(Context.RootEventId) || !Attempt->Employees.Contains(Context.EmployeeId)) return false;
+	const UGameInstance* GameInstance = GetWorld()->GetGameInstance();
+	const auto* EquipmentManager = GameInstance ? GameInstance->GetSubsystem<UEmployeeEquipmentManagerSubsystem>() : nullptr;
+	if (!EquipmentManager || EquipmentManager->GetState().Revision != Context.LoadoutRevision) return false;
+	const auto CurrentParticipants = GetEquipmentParticipants();
+	if (!CurrentParticipants.ContainsByPredicate([&](const auto& P) { return P.EmployeeId == Context.EmployeeId && P.bTyping; })) return false;
+	float OriginalTotal = 0, BonusTotal = 0;
+	for (const auto& Packet : Packets)
+	{
+		if (Packet.bEquipmentBonus) BonusTotal += Packet.Score;
+		else OriginalTotal += Packet.Score;
+	}
+	const float Tolerance = FMath::Max(UE_KINDA_SMALL_NUMBER, Context.NativeQ * UE_KINDA_SMALL_NUMBER);
+	if (!FMath::IsFinite(Context.NativeQ) || Context.NativeQ <= 0 ||
+		!FMath::IsNearlyEqual(OriginalTotal, Context.NativeQ, Tolerance) ||
+		BonusTotal > Context.NativeQ * GetEquipmentLoadout(Context.EmployeeId).Rule(TEXT("BonusScoreCapPercent")) / 100.f + Tolerance) return false;
+	auto CandidateScores = GetEquipmentDisciplines();
+	const float Yield = GetContributionYieldMultiplier();
+	if (!FMath::IsNearlyEqual(Yield, Context.ProjectYield) || !FEmployeeEquipmentEffectEvaluator::TryApplyPackets(CandidateScores, Packets, Yield)) return false;
+	for (auto& Step : ProgressData.Steps)
+		for (const auto& Score : CandidateScores) if (Step.DisciplineSlot == Score.DisciplineSlot) Step.AcquiredScore = Score.Acquired;
+	TArray<FEquipmentReliefAction> Relief;
+	FEmployeeEquipmentEffectEvaluator::CommitNative(*Attempt, Context, GetEquipmentLoadout(Context.EmployeeId), Relief);
+	OutAppliedPackets = Packets;
+	for (auto& Packet : OutAppliedPackets) Packet.Score *= Yield;
+	ApplyEquipmentRelief(Relief);
+	BroadcastDisciplineScores();
+	return true;
 }
 
 void UOfficeStageProgressManager::AddDisciplineContribution(int32 DisciplineSlot, float Score)
@@ -778,9 +1207,9 @@ void UOfficeStageProgressManager::AddDisciplineContribution(int32 DisciplineSlot
 	BroadcastDisciplineScores();
 }
 
-void UOfficeStageProgressManager::RequestScoreOrb(FVector WorldPos, int32 StepNumber, float Score, bool bIsCritical, int32 OrbCount)
+void UOfficeStageProgressManager::RequestScoreOrb(FVector WorldPos, int32 StepNumber, float Score, bool bIsCritical, int32 OrbCount, bool bPlaySpectacle)
 {
-	OnScoreOrbRequested.Broadcast(WorldPos, StepNumber, Score, bIsCritical, OrbCount);
+	OnScoreOrbRequested.Broadcast(WorldPos, StepNumber, Score, bIsCritical, OrbCount, bPlaySpectacle);
 }
 
 void UOfficeStageProgressManager::AddBonusScore(float BonusScore)
@@ -842,7 +1271,26 @@ void UOfficeStageProgressManager::DistributeStepExperience(int32 CompletedStep)
 	UEmployeeManager* EmployeeMgr = GetEmployeeManager();
 	if (EmployeeMgr)
 	{
-		LastRoundEmployeeExp += EmployeeMgr->DistributeExperienceToBuilding(BuildingIndex, BaseExp, EQualityGrade::B);
+		if (auto* Attempt = FindEquipmentAttempt())
+		{
+			const auto* Rules = GetTableManager() ? GetTableManager()->FindEmployeeEquipmentEffect(TEXT("EQF_SCORE_GAIN")) : nullptr;
+			ProgressData.EarnedExperience += EmployeeMgr->DistributeEquipmentStageExperience(BuildingIndex, BaseExp, EQualityGrade::B,
+				*Attempt, CompletedStep, Rules ? Rules->ScalarParameters.FindRef(TEXT("SelfXPCapPercent")) : 0.f);
+		}
+		else
+		{
+			const float AdjustedAmount = EmployeeMgr->ResolveBuildingExperienceAmount(BuildingIndex, BaseExp, EQualityGrade::B);
+			for (const FEquipmentParticipant& Participant : GetEquipmentParticipants())
+			{
+				if (!Participant.bSeated) continue;
+				const FEmployeeInstance* Employee = EmployeeMgr->GetEmployeeData(Participant.EmployeeId);
+				if (!Employee) continue;
+				const float PotentialMultiplier = UEmployeePotentialHelper::AggregateModifiers(Employee->PotentialAbility).ExpMult;
+				const double Before = EmployeeMgr->GetExperience(Participant.EmployeeId);
+				if (EmployeeMgr->AddExperience(Participant.EmployeeId, AdjustedAmount * PotentialMultiplier))
+					ProgressData.EarnedExperience += static_cast<float>(EmployeeMgr->GetExperience(Participant.EmployeeId) - Before);
+			}
+		}
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[OfficeStageProgressManager] Step %d - Employee EXP %.1f to building %d"),
@@ -882,6 +1330,8 @@ float UOfficeStageProgressManager::CheckCritical() const
 void UOfficeStageProgressManager::SetProgressData(const FStageProgressData& InData)
 {
 	ProgressData = InData;
+	FinalizeEquipmentAttempt(EEquipmentAttemptOutcome::Aborted);
+	ProgressData.EquipmentAttemptId.Invalidate();
 
 	// CurrentStep 범위 보정 (0=idle, 1=진행 중)
 	// 로드 시 진행 중(1)이었으면 idle(0)로 리셋 (타이머는 짧으므로 처음부터)
@@ -919,15 +1369,24 @@ void UOfficeStageProgressManager::SetProgressData(const FStageProgressData& InDa
 	{
 		DesiredState = EProjectLifecycle::ReportPending;
 	}
+	else if (ProgressData.bLaunchLootPrepared && ProgressData.ProjectID > 0
+		&& ProgressData.ActiveMode == EProjectMode::InHouse && !ProgressData.bIsManufacturing
+		&& ProgressData.MeetsMinimumClearScore())
+	{
+		DesiredState = EProjectLifecycle::LaunchPending;
+	}
 	else
 	{
-		// Operation 없고 Pending Report도 없으면 무조건 Idle (Developing/LaunchPending도 세션 간엔 보존 안 함)
+		// 개발 타이머는 재개하지 않는다. 공개한 출시 결과만 확정 대기 상태로 보존한다.
 		DesiredState = EProjectLifecycle::Idle;
 		// stale ProgressData 정리
 		ProgressData.ActiveMode = EProjectMode::None;
 		ProgressData.ProjectID = 0;
 		ProgressData.ProjectNumber = 0;
 		ProgressData.ProjectName.Reset();
+		ProgressData.PendingLaunchLoot.Reset();
+		ProgressData.bLaunchLootPrepared = false;
+		ProgressData.EarnedExperience = 0.0f;
 		ProgressData.bIsTimerRunning = false;
 		bStageInProgress = false;
 	}
@@ -1139,6 +1598,8 @@ void UOfficeStageProgressManager::NotifyEmployeesCheerStandUp()
 
 void UOfficeStageProgressManager::ComputeReviewAndDiscovery()
 {
+	ProgressData.PendingLaunchLoot.Reset();
+	ProgressData.bLaunchLootPrepared = false;
 	// 리뷰/발견은 자체개발 프로젝트형 전용 (수주=계약금, 제조=양산)
 	if (!IsProjectType(ProgressData.CompanyType) || ProgressData.ActiveMode != EProjectMode::InHouse)
 	{
@@ -1195,7 +1656,7 @@ void UOfficeStageProgressManager::ComputeReviewAndDiscovery()
 	}
 	ProgressData.ReviewScore = Total;
 
-	// (장르,소재) 발견 기록 — 등급이 이 순간 공개됨
+	// 첫 발견 여부는 미리 보여주지만 도감 기록은 출시 확정 시에 남긴다.
 	ProgressData.bFirstDiscovery = false;
 	if (ProgressData.Genre != NAME_None)
 	{
@@ -1209,46 +1670,7 @@ void UOfficeStageProgressManager::ComputeReviewAndDiscovery()
 			{
 				if (USaveGame_GameData* SaveData = SaveMgr->GetCurrentSaveData())
 				{
-					if (!SaveData->GameData.DiscoveredCombos.Contains(ComboKey))
-					{
-						ProgressData.bFirstDiscovery = true;
-						SaveData->GameData.DiscoveredCombos.Add(ComboKey);
-					}
-
-					// 출시작 이력 (도감 [출시작] 탭) — 같은 프로젝트를 다시 개발하면 행을 늘리지 않고 갱신.
-					// 평점·등급은 최고 기록 유지, 누적매출은 이어서 쌓는다.
-					const int32 ShippedIndex = ProgressData.ProjectNumber;
-					// EQualityGrade 는 F=0 ... S=5 순이라 uint8 비교가 곧 등급 비교다
-					const EQualityGrade NewGrade = ProgressData.CalculateQualityGrade();
-					FShippedProjectRecord* Existing = SaveData->GameData.ShippedProjects.FindByPredicate(
-						[ShippedIndex, this](const FShippedProjectRecord& R)
-						{
-							return R.ProjectIndex == ShippedIndex && R.Industry == ProgressData.CompanyType;
-						});
-
-					if (Existing)
-					{
-						Existing->ProjectName = ProgressData.ProjectName;
-						Existing->Genre = ProgressData.Genre;
-						Existing->Material = ProgressData.Material;
-						if (static_cast<uint8>(NewGrade) > static_cast<uint8>(Existing->QualityGrade))
-						{
-							Existing->QualityGrade = NewGrade;
-						}
-						Existing->ReviewScore = FMath::Max(Existing->ReviewScore, ProgressData.ReviewScore);
-					}
-					else
-					{
-						FShippedProjectRecord Record;
-						Record.ProjectName = ProgressData.ProjectName;
-						Record.Industry = ProgressData.CompanyType;
-						Record.ProjectIndex = ShippedIndex;
-						Record.Genre = ProgressData.Genre;
-						Record.Material = ProgressData.Material;
-						Record.QualityGrade = NewGrade;
-						Record.ReviewScore = ProgressData.ReviewScore;
-						SaveData->GameData.ShippedProjects.Add(Record);
-					}
+					ProgressData.bFirstDiscovery = !SaveData->GameData.DiscoveredCombos.Contains(ComboKey);
 				}
 			}
 		}
@@ -1259,6 +1681,51 @@ void UOfficeStageProgressManager::ComputeReviewAndDiscovery()
 		ProgressData.CriticScores[0], ProgressData.CriticScores[1], ProgressData.CriticScores[2], ProgressData.CriticScores[3],
 		CriticQ[0], CriticQ[1], CriticQ[2], CriticQ[3], Quality,
 		*QualityGradeToAlphabetString(ProgressData.CalculateQualityGrade()), ProgressData.bFirstDiscovery ? 1 : 0);
+}
+
+void UOfficeStageProgressManager::CommitLaunchDiscovery()
+{
+	if (!IsProjectType(ProgressData.CompanyType) || ProgressData.Genre == NAME_None) { return; }
+	UCGGameInstance* GameInstance = UCGGameInstance::GetInstance();
+	USaveLoadManager* SaveMgr = GameInstance ? GameInstance->GetSubsystem<USaveLoadManager>() : nullptr;
+	USaveGame_GameData* SaveData = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr;
+	if (!SaveData) { return; }
+	const int32 BuildingIndex = GameInstance->GetCurrentManagedBuildingIndex();
+	if (BuildingIndex < 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Review] 출시 건물 인덱스 없음 - 출시 기록 저장 생략"));
+		return;
+	}
+	const FString ComboKey = FString::Printf(TEXT("%d|%s|%s"),
+		static_cast<int32>(ProgressData.CompanyType), *ProgressData.Genre.ToString(), *ProgressData.Material.ToString());
+	SaveData->GameData.DiscoveredCombos.AddUnique(ComboKey);
+	const EQualityGrade NewGrade = ProgressData.CalculateQualityGrade();
+	FShippedProjectRecord* Existing = ShippedProjectRecords::Find(
+		SaveData->GameData.ShippedProjects, BuildingIndex, ProgressData.CompanyType, ProgressData.ProjectNumber);
+	if (Existing)
+	{
+		Existing->ProjectName = ProgressData.ProjectName;
+		Existing->Genre = ProgressData.Genre;
+		Existing->Material = ProgressData.Material;
+		if (static_cast<uint8>(NewGrade) > static_cast<uint8>(Existing->QualityGrade))
+		{
+			Existing->QualityGrade = NewGrade;
+		}
+		Existing->ReviewScore = FMath::Max(Existing->ReviewScore, ProgressData.ReviewScore);
+	}
+	else
+	{
+		FShippedProjectRecord Record;
+		Record.ProjectName = ProgressData.ProjectName;
+		Record.Industry = ProgressData.CompanyType;
+		Record.BuildingIndex = BuildingIndex;
+		Record.ProjectIndex = ProgressData.ProjectNumber;
+		Record.Genre = ProgressData.Genre;
+		Record.Material = ProgressData.Material;
+		Record.QualityGrade = NewGrade;
+		Record.ReviewScore = ProgressData.ReviewScore;
+		SaveData->GameData.ShippedProjects.Add(Record);
+	}
 }
 
 void UOfficeStageProgressManager::Debug_FillScores(float Ratio)
@@ -1309,7 +1776,7 @@ void UOfficeStageProgressManager::BuildTierProjectEntries(ECompanyType Industry,
 	}
 }
 
-void UOfficeStageProgressManager::EstimatePitchEconomy(ECompanyType Industry, float ExpectedQuality, bool bTrend,
+void UOfficeStageProgressManager::EstimatePitchEconomy(ECompanyType Industry, float ExpectedQuality,
 	int64& OutRevenue, int32& OutOpTimeSec, int32 ProjectNumberOverride)
 {
 	OutRevenue = 0;
@@ -1332,14 +1799,16 @@ void UOfficeStageProgressManager::EstimatePitchEconomy(ECompanyType Industry, fl
 		FProjectTierProgress::GetTierProjectRange(CurTier, BandStart, BandEnd);
 		ProjectNumber = BandStart;   // 방어적 폴백 — 티어 시작 슬롯
 	}
-	// ⚠ ProjectOperationManager::CalculateBaseRevenueForProjectNumber 와 거울 — 한쪽만 바꾸면 표기와 실지급이 갈라진다.
-	const float Base = FMath::Max(20.0f, FTierLayout::RevenueScaleIndex(ProjectNumber) * 200.0f);
-
 	bool bProfOK = false;
 	const FIndustryProfileRow Profile = TableMgr->GetIndustryProfile(Industry, bProfOK);
-	const float PeakMult = bProfOK ? Profile.PeakMult : 1.0f;
-	const float Leverage = bProfOK ? Profile.ReviewLeverage : 1.0f;
-	const float TrendMult = bTrend ? UTrendManagerSubsystem::TrendPeakMult : 1.0f;
+	if (!bProfOK)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeStageProgressManager] Missing revenue profile for industry %d"), static_cast<int32>(Industry));
+		return;
+	}
+	const float Base = static_cast<float>(UProjectOperationManager::ComputeBaseRevenuePerSec(ProjectNumber, Profile));
+	const float PeakMult = Profile.PeakMult;
+	const float Leverage = Profile.ReviewLeverage;
 
 	// 착수 경로(StartOperation)와 같은 함수·같은 건물(GetCurrentManagedBuildingIndex)에서 읽는다 —
 	// 카드 표기와 실제 결과가 구조적으로 갈릴 수 없다.
@@ -1363,7 +1832,7 @@ void UOfficeStageProgressManager::EstimatePitchEconomy(ECompanyType Industry, fl
 	// 총 예상수익 — 조립식은 결과 화면(LaunchConfirmWidget)과 같은 함수가 소유한다. 항이 갈릴 수 없다.
 	// RoundToInt(float) 는 int32 를 돌려줘 int64 승격을 무효화한다 — 반드시 RoundToInt64.
 	OutRevenue = FMath::RoundToInt64(static_cast<double>(UProjectOperationManager::ComputeLaunchRevenue(
-		Base, PeakMult, TrendMult, QualityMult, OpSec, bProfOK ? Profile.HalfLifeFrac : 0.5f)));
+		Base, PeakMult, QualityMult, OpSec, Profile.HalfLifeFrac)));
 }
 
 void UOfficeStageProgressManager::BuildContributorRoster(TArray<FEstimateWorkerInput>& OutRoster) const
@@ -1400,13 +1869,50 @@ void UOfficeStageProgressManager::BuildContributorRoster(TArray<FEstimateWorkerI
 		FEstimateWorkerInput Input;
 		Input.Level = Employee->Level;
 		Input.DisciplinePoints = Employee->DisciplinePoints;
+		Input.InitialFatigue = Worker->BehaviorComponent->Fatigue;
+		const int32 EnhanceBonus = UEmployeeTypeHelper::GetEnhanceStatBonus(Employee->EnhancementLevel);
+		Input.EffectiveStamina = Employee->Stats.Stamina + EnhanceBonus;
+		Input.EffectiveComposure = Employee->Stats.Composure + EnhanceBonus;
 		// 초당 산출은 SpeedFactor 에 비례한다(간격이 짧아진 만큼 Overflow 가 상쇄돼 케이던스는 빠진다).
 		// 잠재큐브 ScoreMult 는 기여 1회마다 곱해지는 고정 배수라 같은 축에 함께 실린다.
-		Input.OutputScale = Worker->BehaviorComponent->GetSpeedFactor()
-			* UEmployeePotentialHelper::AggregateModifiers(Employee->PotentialAbility).ScoreMult;
-		// 업무집중도 — 기여 경로(EmitScore)의 강제 지정 확률과 같은 식이어야 예상↔실제가 안 갈린다
-		const int32 EffectiveFocus = Employee->Stats.Focus + UEmployeeTypeHelper::GetEnhanceStatBonus(Employee->EnhancementLevel);
-		Input.FocusChance = FMath::Min(EffectiveFocus * EmployeeStatTuning::FocusPerPoint, EmployeeStatTuning::MaxFocusChance);
+		const auto& Equipment = GetEquipmentLoadout(Employee->EmployeeID);
+		const auto Potential = UEmployeePotentialHelper::AggregateModifiers(Employee->PotentialAbility);
+		const float RandomCeiling = Equipment.Has(TEXT("EQF_STEADY_OUTPUT")) ?
+			Equipment.Param(TEXT("EQF_STEADY_OUTPUT"), TEXT("RandomCeiling")) : 1.2f;
+		const float RandomFloor = Equipment.Has(TEXT("EQF_STEADY_OUTPUT")) ?
+			FMath::Min(Equipment.Param(TEXT("EQF_STEADY_OUTPUT"), TEXT("RandomFloor")), RandomCeiling) : 0.8f;
+		const float EquipmentMean = (RandomFloor + RandomCeiling) * 0.5f;
+		if (EquipmentMean > 0.f)
+		{
+			Input.RandomFactorSecondMoment = (FMath::Square(RandomFloor) + RandomFloor * RandomCeiling +
+				FMath::Square(RandomCeiling)) / (3.f * FMath::Square(EquipmentMean));
+		}
+		Input.WorkSpeedFactor = Worker->BehaviorComponent->GetBaseWorkSpeedFactor()
+			* (1.f + Equipment.Basic(TEXT("EQF_WORK_RATE")) / 100.f);
+		Input.OutputScale = Input.WorkSpeedFactor
+			* Potential.ScoreMult * (1.f + Equipment.Basic(TEXT("EQF_SCORE_GAIN")) / 100.f) * EquipmentMean;
+		const AWorkstationActorBase* EstimateDesk = Worker->GetAssignedWorkstation();
+		Input.OutputScale *= 1.f + EstimateDesk->GetComponentBonus(EWorkstationUpgradeType::Tools);
+		Input.FatigueGainScale = 1.f / (1.f + EstimateDesk->GetComponentBonus(EWorkstationUpgradeType::Environment));
+		Input.CriticalChance = FMath::Clamp(GetCriticalChance() + Potential.CritChanceAdd +
+			(Employee->Stats.CritChance + EnhanceBonus) * EmployeeStatTuning::CritChancePerPoint,
+			0.f, EmployeeStatTuning::MaxCritChance);
+		Input.CriticalMultiplier = EmployeeStatTuning::CriticalMultiplier(
+			Employee->Stats.CritDamage + EnhanceBonus, Potential.CritDamageAdd);
+		Input.BoltChanceScale = FMath::Max(0.f, 1.f - Equipment.Basic(TEXT("EQF_BOLT_RESIST")) / 100.f);
+		Input.BoltDurationScale = FMath::Max(0.f, 1.f - Equipment.Basic(TEXT("EQF_BOLT_RETURN")) / 100.f);
+		Input.FatiguePenaltyScale = FMath::Max(0.f, 1.f - Equipment.Basic(TEXT("EQF_FATIGUE_PENALTY")) / 100.f);
+		// 동적 다운/팀/라우팅/토큰은 확률 시뮬레이션을 필요로 하므로 이 기반 추정에는 포함하지 않는다.
+		for (const auto& Pair : Equipment.BasicValues)
+			if (Pair.Key != TEXT("EQF_WORK_RATE") && Pair.Key != TEXT("EQF_SCORE_GAIN") && Pair.Key != TEXT("EQF_EXP_GAIN") && Pair.Value > 0)
+				Input.bHasUnmodeledEquipmentEffects = true;
+		for (const auto& Pair : Equipment.UniqueEffects)
+		{
+			const FName Id = Pair.Key;
+			if (Id != TEXT("EQF_STEADY_OUTPUT") && Id != TEXT("EQF_ACTIVE_LEARNING") &&
+				Id != TEXT("EQF_CATCH_LEARNING") && Id != TEXT("EQF_CLEAN_RUN_BONUS") && Id != TEXT("EQF_FAILURE_LESSON") &&
+				Id != TEXT("EQF_MENTOR_LINK") && Id != TEXT("EQF_MULTISKILL_LESSON")) Input.bHasUnmodeledEquipmentEffects = true;
+		}
 		OutRoster.Add(Input);
 	}
 }
@@ -1423,23 +1929,40 @@ FProjectOutlookEstimate UOfficeStageProgressManager::EstimateProjectOutlook(
 	// 추정기가 "추정 불가"로 떨어져 카드가 전 항목 최저값을 확신 있게 표시한다.
 	const float DurationSec = (ProjectRow.Duration > 0.0f) ? ProjectRow.Duration : DefaultStepDuration;
 
-	// 전원 공통 배수 = 현재 빌딩의 개발점수 특성 (기여 경로가 매 히트 곱하는 값과 같은 출처)
-	float CommonScale = 1.0f;
+	// 전원 공통 산출 배수 = 실제 기여 커밋의 ProjectYield 강화와 빌딩 개발점수 특성.
+	float CommonScale = GetContributionYieldMultiplier();
 	if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
 	{
 		if (UBuildingTraitManagerSubsystem* TraitMgr = GI->GetSubsystem<UBuildingTraitManagerSubsystem>())
 		{
-			CommonScale = TraitMgr->GetTraitFactor(GI->GetCurrentManagedBuildingIndex(), EBuildingTraitTarget::DevScore);
+			CommonScale *= TraitMgr->GetTraitFactor(GI->GetCurrentManagedBuildingIndex(), EBuildingTraitTarget::DevScore);
 		}
 	}
 
-	return FStageProgressData::EstimateProjectOutlook(
-		Roster, Weights, R1, R2, R3, DurationSec, CommonScale);
+	const UFatigueConfig* FatigueConfig = LoadObject<UFatigueConfig>(nullptr,
+		TEXT("/Game/CompanyGrowth/Data/DA_FatigueConfig.DA_FatigueConfig"));
+	if (!FatigueConfig)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeStageProgressManager] Pitch: DA_FatigueConfig 로드 실패, 기본 설정 사용"));
+		FatigueConfig = GetDefault<UFatigueConfig>();
+	}
+	const UGameInstance* GameInstance = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
+	const UMissionManagerSubsystem* Missions = GameInstance ? GameInstance->GetSubsystem<UMissionManagerSubsystem>() : nullptr;
+	const bool bSuppressEquipmentDown = Missions && Missions->HasActiveMission() && Missions->IsHardGateMission();
+	auto Result = FStageProgressData::EstimateProjectOutlook(
+		Roster, Weights, R1, R2, R3, DurationSec, CommonScale, FatigueConfig, bSuppressEquipmentDown);
+	for (const auto& Employee : Roster) Result.bHasUnmodeledEquipmentEffects |= Employee.bHasUnmodeledEquipmentEffects;
+	return Result;
 }
 
 EDevelopStartResult UOfficeStageProgressManager::StartSelfDevelopFromProject(int32 ProjectIndex, EProjectDirection Direction,
 	const FText& CustomName)
 {
+	if (const UMissionManagerSubsystem* MissionMgr = GetWorld()->GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
+	{
+		const int32 RequiredProject = MissionMgr->GetRequiredProjectIndex();
+		if (RequiredProject > 0 && ProjectIndex != RequiredProject) return EDevelopStartResult::TutorialRestricted;
+	}
 	UTableManagerSubsystem* TableMgr = GetTableManager();
 	if (!TableMgr)
 	{
@@ -1454,6 +1977,7 @@ EDevelopStartResult UOfficeStageProgressManager::StartSelfDevelopFromProject(int
 		Industry = GI->GetCurrentBuildingCompanyType();
 	}
 	if (Industry == ECompanyType::None) { Industry = ProgressData.CompanyType; }
+	if (IsManufacturingType(Industry)) return EDevelopStartResult::NoIndustry;
 	if (Industry == ECompanyType::None)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[OfficeStageProgressManager] StartSelfDevelopFromProject: 산업 미확인 — 중단"));
@@ -1507,15 +2031,6 @@ EDevelopStartResult UOfficeStageProgressManager::LaunchDevelopFromRow(const FPro
 	ProgressData.ActiveMode = EProjectMode::InHouse;
 	ProgressData.Direction = Direction;
 
-	// 트렌드 매칭은 착수 순간 캡처 — 이후 로테이션과 무관하게 이 프로젝트에 고정
-	if (UCGGameInstance* TrendGI = UCGGameInstance::GetInstance())
-	{
-		if (UTrendManagerSubsystem* TrendMgr = TrendGI->GetSubsystem<UTrendManagerSubsystem>())
-		{
-			ProgressData.bTrendMatched = TrendMgr->IsTrendMaterial(Industry, Synth.Material);
-			TrendMgr->NotifyProjectLaunched(Industry);
-		}
-	}
 	// Genre/Material/StepDuration 은 SelectProject 가 Synth 에서 이미 복사함
 
 	// FSM: Idle → Developing + 타이머 점화
@@ -1523,59 +2038,171 @@ EDevelopStartResult UOfficeStageProgressManager::LaunchDevelopFromRow(const FPro
 	NotifyEmployeesBehaviorMode(EEmployeeBehaviorMode::Stage);
 	StartSimultaneousTimer(true);
 
-	UE_LOG(LogTemp, Log, TEXT("[OfficeStageProgressManager] 착수: '%s' [%s x %s] dir=%s slot=%d tier=%d trend=%d"),
+	UE_LOG(LogTemp, Log, TEXT("[OfficeStageProgressManager] 착수: '%s' [%s x %s] dir=%s slot=%d tier=%d"),
 		*ProgressData.ProjectName, *Synth.Genre.ToString(), *Synth.Material.ToString(),
-		*UEnum::GetValueAsString(Direction), ScaleIndex, Tier,
-		ProgressData.bTrendMatched ? 1 : 0);
+		*UEnum::GetValueAsString(Direction), ScaleIndex, Tier);
 
 	return EDevelopStartResult::Success;
 }
 
+void UOfficeStageProgressManager::NotifyTierProgressAdvanced() const
+{
+	const int32 Tier = TierProgress.CurrentTier;
+	const int32 Need = FTierLayout::ClearToUnlock(Tier);
+	if (Need <= 0)
+	{
+		return;   // 최고 단계 - 더 오를 진행이 없다
+	}
+	UGameInstance* GI = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
+	UUIManagerSubsystem* UIMgr = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+	if (!UIMgr)
+	{
+		return;
+	}
+	// 밴드 툴팁이 이미 쓰는 문구를 그대로 재사용한다 - 같은 수치를 두 표현으로 말하지 않는다
+	UIMgr->ShowBottomNotification(FText::Format(
+		NSLOCTEXT("Tier", "BandStageCleared", "프로젝트 클리어 {0} / {1}"),
+		FText::AsNumber(TierProgress.GetTierClearedCount(Tier)), FText::AsNumber(Need)));
+}
+
+void UOfficeStageProgressManager::NotifyManufacturingProductDeveloped(int32 ProjectIndex)
+{
+	CheckAndGrantCodexMilestone(ProjectIndex);
+}
+
 void UOfficeStageProgressManager::CheckAndGrantCodexMilestone(int32 ClearedProjectIndex)
 {
-	bool bChanged = false;
-	auto Toast = [](const FText& Msg)
-	{
-		if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
-		{
-			if (UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>())
-			{
-				UIMgr->ShowNotification(Msg);
-			}
-		}
-	};
-
-	// 티어 10/10 발견 완성 (한 티어의 프로젝트 전부 자체개발) — 다이아 지급 성공 시에만 기록/토스트.
-	// (ResMgr null이면 미지급 상태를 세이브에 박제하지 않고 다음 클리어 때 재시도)
+	// 지급은 서버가 한다 — 기록(MilestoneRewardedTiers)·토스트는 응답 뒤라서, 실패하면 다음 클리어에 다시 시도된다
 	const int32 Tier = FProjectTierProgress::GetTierForProject(ClearedProjectIndex);
 	if (!TierProgress.MilestoneRewardedTiers.Contains(Tier)
 		&& TierProgress.GetTierClearedCount(Tier) >= TierConstants::PROJECTS_PER_TIER)
 	{
-		if (UResourceItemManager* ResMgr = GetResourceItemManager())
-		{
-			ResMgr->StoreResource(EResourceType::Diamond, CodexTierMilestoneDiamond);
-			TierProgress.MilestoneRewardedTiers.Add(Tier);
-			bChanged = true;
-			Toast(FText::Format(NSLOCTEXT("Codex", "TierMilestone", "{0}단계 도감 완성! 다이아 {1}개 획득"),
-				FText::AsNumber(Tier), FText::AsNumber(CodexTierMilestoneDiamond)));
-		}
+		RequestCodexTierMilestone(Tier);
 	}
 
-	// 전체 100개 발견 완성 — 동일하게 지급 성공 시에만 기록/토스트.
+	// 전체 100개 발견 완성 — 티어 마일스톤과 독립(같은 클리어에 둘 다 뜰 수 있다)
 	if (!TierProgress.bAllProjectsMilestoneRewarded
 		&& TierProgress.ClearedProjects.Num() >= TierConstants::MAX_TIER * TierConstants::PROJECTS_PER_TIER)
 	{
-		if (UResourceItemManager* ResMgr = GetResourceItemManager())
-		{
-			ResMgr->StoreResource(EResourceType::Diamond, CodexFullMilestoneDiamond);
-			TierProgress.bAllProjectsMilestoneRewarded = true;
-			bChanged = true;
-			Toast(FText::Format(NSLOCTEXT("Codex", "FullMilestone", "전 프로젝트 도감 완성! 다이아 {0}개 획득"),
-				FText::AsNumber(CodexFullMilestoneDiamond)));
-		}
+		RequestCodexFullMilestone();
+	}
+}
+
+FName UOfficeStageProgressManager::GetCodexTierCreditSource()
+{
+	return CreditSource_CodexTier;
+}
+
+FName UOfficeStageProgressManager::GetCodexFullCreditSource()
+{
+	return CreditSource_CodexFull;
+}
+
+FString UOfficeStageProgressManager::CodexTierClaimKey(int32 Tier)
+{
+	return FString::Printf(TEXT("codex.tier.%d"), Tier);
+}
+
+FString UOfficeStageProgressManager::CodexFullClaimKey()
+{
+	return TEXT("codex.full");
+}
+
+void UOfficeStageProgressManager::RequestCodexTierMilestone(int32 Tier)
+{
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Codex] 티어 마일스톤 지급 실패 - CloudEconomySubsystem 없음. Tier=%d"), Tier);
+		return;
 	}
 
-	if (bChanged) { SyncTierProgressToSave(); }
+	// 마일스톤 체크는 클리어마다 돈다 — 같은 claimKey 를 두 번 보내지 않게 잠근다
+	const FString ClaimKey = CodexTierClaimKey(Tier);
+	const FName ActionKey(*ClaimKey);
+	if (!Cloud->BeginPendingAction(ActionKey))
+	{
+		return;
+	}
+
+	Cloud->RequestCredit(GetCodexTierCreditSource(), ClaimKey, CodexTierMilestoneDiamond,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, Tier, ActionKey](const FCloudOpResult& OpResult)
+	{
+		// ALREADY_CLAIMED 는 오류가 아니다 — 이미 받았다는 사실이므로 기록만 하고 조용히 넘어간다
+		const bool bBenign = UCloudEconomySubsystem::IsClaimBenign(OpResult.Code);
+		if (OpResult.bOk || bBenign)
+		{
+			TierProgress.MilestoneRewardedTiers.Add(Tier);
+			SyncTierProgressToSave();
+		}
+
+		if (OpResult.bOk)
+		{
+			// 표시는 요청 상수가 아니라 서버가 인정한 액수다
+			const int32 Credited = UCloudEconomySubsystem::ReadCreditedAmount(OpResult, CodexTierMilestoneDiamond);
+			ShowCodexMilestoneToast(FText::Format(
+				NSLOCTEXT("Codex", "TierMilestone", "{0}단계 도감 완성! 다이아 {1}개 획득"),
+				FText::AsNumber(Tier), FText::AsNumber(Credited)));
+		}
+		else if (!bBenign)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Codex] codex.tierMilestone 실패 - Tier=%d Code=%s Http=%d"),
+				Tier, *OpResult.Code.ToString(), OpResult.HttpStatus);
+		}
+
+		if (UCloudEconomySubsystem* CloudEnd = GetCloudEconomy())
+		{
+			CloudEnd->EndPendingAction(ActionKey);
+		}
+	}));
+}
+
+void UOfficeStageProgressManager::RequestCodexFullMilestone()
+{
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Codex] 전체 마일스톤 지급 실패 - CloudEconomySubsystem 없음"));
+		return;
+	}
+
+	const FString ClaimKey = CodexFullClaimKey();
+	const FName ActionKey(*ClaimKey);
+	if (!Cloud->BeginPendingAction(ActionKey))
+	{
+		return;
+	}
+
+	Cloud->RequestCredit(GetCodexFullCreditSource(), ClaimKey, CodexFullMilestoneDiamond,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, ActionKey](const FCloudOpResult& OpResult)
+	{
+		const bool bBenign = UCloudEconomySubsystem::IsClaimBenign(OpResult.Code);
+		if (OpResult.bOk || bBenign)
+		{
+			TierProgress.bAllProjectsMilestoneRewarded = true;
+			SyncTierProgressToSave();
+		}
+
+		if (OpResult.bOk)
+		{
+			const int32 Credited = UCloudEconomySubsystem::ReadCreditedAmount(OpResult, CodexFullMilestoneDiamond);
+			ShowCodexMilestoneToast(FText::Format(
+				NSLOCTEXT("Codex", "FullMilestone", "전 프로젝트 도감 완성! 다이아 {0}개 획득"),
+				FText::AsNumber(Credited)));
+		}
+		else if (!bBenign)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Codex] codex.fullMilestone 실패 - Code=%s Http=%d"),
+				*OpResult.Code.ToString(), OpResult.HttpStatus);
+		}
+
+		if (UCloudEconomySubsystem* CloudEnd = GetCloudEconomy())
+		{
+			CloudEnd->EndPendingAction(ActionKey);
+		}
+	}));
 }
 
 void UOfficeStageProgressManager::HandleEventChoice(int32 ChoiceIndex)
@@ -1808,6 +2435,8 @@ void UOfficeStageProgressManager::TransitionTo(EProjectLifecycle NewState)
 
 void UOfficeStageProgressManager::ResetProjectState()
 {
+	FinalizeEquipmentAttempt(EEquipmentAttemptOutcome::Aborted);
+	ProgressData.EquipmentAttemptId.Invalidate();
 	// ProgressData 프로젝트 상태 일괄 초기화
 	ProgressData.ActiveMode = EProjectMode::None;
 	ProgressData.ActiveTraits.Empty();
@@ -1818,6 +2447,9 @@ void UOfficeStageProgressManager::ResetProjectState()
 	ProgressData.ProjectName.Reset();
 	ProgressData.CurrentStep = 0;
 	ProgressData.RetryCount = 0;
+	ProgressData.PendingLaunchLoot.Reset();
+	ProgressData.bLaunchLootPrepared = false;
+	ProgressData.EarnedExperience = 0.0f;
 	ProgressData.Step1AchievementRate = 0.0f;
 	ProgressData.Step2AchievementRate = 0.0f;
 	ProgressData.Step3AchievementRate = 0.0f;
@@ -1839,6 +2471,8 @@ void UOfficeStageProgressManager::ResetProjectState()
 
 void UOfficeStageProgressManager::RequestLaunchConfirm()
 {
+	const UCGGameInstance* LaunchGI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
+	if (LaunchGI && IsManufacturingType(LaunchGI->GetCurrentBuildingCompanyType())) return;
 	if (Lifecycle != EProjectLifecycle::LaunchPending)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[Lifecycle] RequestLaunchConfirm ignored - not in LaunchPending (current=%s)"),
@@ -1855,6 +2489,7 @@ void UOfficeStageProgressManager::RequestLaunchConfirm()
 
 	const EProjectMode Mode = ProgressData.ActiveMode;
 	const bool bMetMinimum = ProgressData.MeetsMinimumClearScore();
+	PrepareLaunchLoot();
 
 	UCGGameInstance* GameInstance = UCGGameInstance::GetInstance();
 	int32 BuildingIndex = GameInstance ? GameInstance->GetCurrentManagedBuildingIndex() : -1;
@@ -1867,52 +2502,26 @@ void UOfficeStageProgressManager::RequestLaunchConfirm()
 		LootMgr->ClearLastLaunchLoot();
 	}
 
-	// 제조업: 양산 분기
-	if (ProgressData.bIsManufacturing)
-	{
-		if (GameInstance && BuildingIndex >= 0)
-		{
-			if (UProductionOrderManager* OrderMgr = GameInstance->GetSubsystem<UProductionOrderManager>())
-			{
-				OrderMgr->CreateOrder(ProgressData, BuildingIndex);
-			}
-		}
-
-		// 제조업의 "프로젝트" 는 제품 설계이고 양산은 그 후속이다 — 설계를 통과시켰으면 클리어.
-		// 전리품은 롤하지 않는다(DECISION_RECORDS §3.9 제조업 제외). 도감은 포트폴리오 표시와 맞추려 지급한다.
-		if (bMetMinimum)
-		{
-			const bool bManufactureTierUnlocked = TierProgress.RecordProjectClear(ProgressData.ProjectID);
-			SyncTierProgressToSave();
-			CheckAndGrantCodexMilestone(ProgressData.ProjectID);
-			if (bManufactureTierUnlocked)
-			{
-				OnTierUnlocked.Broadcast(TierProgress.CurrentTier);
-			}
-		}
-
-		NotifyEmployeesBehaviorMode(EEmployeeBehaviorMode::Idle);
-		ResetProjectState();
-		TransitionTo(EProjectLifecycle::Idle);
-		return;
-	}
-
 	// 자체개발: 운영 시작 → Operating
 	if (Mode == EProjectMode::InHouse)
 	{
 		bool bTierUnlocked = false;
 		if (bMetMinimum)
 		{
+			CommitLaunchDiscovery();
 			// 승급 판정 = 현재 티어 7/10 클리어 단독
 			bTierUnlocked = TierProgress.RecordProjectClear(ProgressData.ProjectID);
 			SyncTierProgressToSave();
 			CheckAndGrantCodexMilestone(ProgressData.ProjectID);   // 도감 마일스톤(티어 10/10, 전체 100%) 보상
+			if (!bTierUnlocked)
+			{
+				NotifyTierProgressAdvanced();
+			}
 
-			// 출시 전리품 — 보상 리빌(OfficeMainWidget::OnLaunchConfirmedHandler)이 GetLastLaunchLoot 로 동기 조회한다
+			// 결과 창에 공개한 전리품만 지급한다. FSM이 Operating으로 전이되면 재확정은 무시된다.
 			if (LootMgr)
 			{
-				const int32 ProjTier = FProjectTierProgress::GetTierForProject(ProgressData.ProjectID);
-				LootMgr->RollLaunchLoot(ProgressData.ReviewScore, ProjTier);
+				LootMgr->GrantLaunchLoot(ProgressData.PendingLaunchLoot);
 			}
 		}
 		else
@@ -1921,7 +2530,10 @@ void UOfficeStageProgressManager::RequestLaunchConfirm()
 				bMetMinimum ? 1 : 0);
 		}
 
-		// 출시 반응 7건 — 시장의 반응이라 최소점수 게이트와 무관하다(전리품·티어 판정과 절연). 리빌이 닫힌 뒤 레일로 드립된다.
+		ProgressData.PendingLaunchLoot.Reset();
+		ProgressData.bLaunchLootPrepared = false;
+
+		// 출시 반응은 결과 창을 닫고 확정한 뒤 오피스 TV로 드립된다.
 		if (ULaunchReactionSubsystem* Reactions = GetWorld() ? GetWorld()->GetSubsystem<ULaunchReactionSubsystem>() : nullptr)
 		{
 			Reactions->PrepareReactions(BuildingIndex, ProgressData);
@@ -1966,6 +2578,7 @@ void UOfficeStageProgressManager::RequestLaunchCancel()
 		UE_LOG(LogTemp, Warning, TEXT("[Lifecycle] RequestLaunchCancel ignored - not in LaunchPending"));
 		return;
 	}
+	FinalizeEquipmentAttempt(IsLaunchBlocked() ? EEquipmentAttemptOutcome::Failed : EEquipmentAttemptOutcome::Aborted);
 	NotifyEmployeesBehaviorMode(EEmployeeBehaviorMode::Idle);
 	ResetProjectState();
 	TransitionTo(EProjectLifecycle::Idle);

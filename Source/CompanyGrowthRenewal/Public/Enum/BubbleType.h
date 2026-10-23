@@ -12,8 +12,8 @@ enum class EBubbleType : uint8
 {
 	None            = 0  UMETA(DisplayName = "없음"),
 
-	// MainMap 버블 (우선순위 순)
-	VaultFull       = 1  UMETA(DisplayName = "금고 가득"),
+	// MainMap 버블 (우선순위 순) — 1 은 폐기된 금고 버블, 3 은 폐기된 벽돌 재고 버블 자리.
+	// 남은 값은 직렬화 보존을 위해 그대로 둔다
 	ReportPending   = 2  UMETA(DisplayName = "결산서 대기"),
 	NoProject       = 4  UMETA(DisplayName = "진행중 프로젝트 없음"),
 

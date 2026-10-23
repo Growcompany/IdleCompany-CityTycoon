@@ -1,4 +1,4 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+// Fill out your copyright notice in the Description page of Project Settings.
 
 #pragma once
 
@@ -6,8 +6,9 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Entity/Officeworker/Officeworker.h"
 #include "Table/ConstructionCost.h"
-#include "Data/CharacterAppearanceTypes.h"
+#include "Data/CloudEconomyData.h"
 #include "Data/EmployeeTypes.h"
+#include "Data/EmployeeTrainingRules.h"
 #include "Enum/QualityGrade.h"
 #include "Enum/GachaTier.h"
 #include "Enum/ItemType.h"
@@ -16,11 +17,14 @@
 #include "EmployeeManager.generated.h"
 
 class UTableManagerSubsystem;
-class AOfficeworkerMale;
-class AOfficeworkerFemale;
-class AStickOfficeworker;
+class AFunnyOfficeworker;
+struct FStreamableHandle;
+class UCloudEconomySubsystem;
 class UNiagaraSystem;
+class UOfficeStageProgressManager;
+struct FEquipmentAttemptRuntime;
 struct FEmployeeHandleData;
+enum class EEmployeeEquipmentSlot : uint8;
 
 // 경험치 획득 이벤트 (UI 알림용)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnExperienceGained, int32, EmployeeID, float, Amount);
@@ -39,13 +43,13 @@ struct FPortraitCaptureRequest
     GENERATED_BODY()
 
     FString EmployeeID;
-    FCharacterAppearance Appearance;
     EEmployeeRank Rank = EEmployeeRank::Intern;
     EEmployeeGender Gender = EEmployeeGender::Male;
-    int32 HairCombinationType = 0;
-    int32 RandomSeed = 0;
     EEmployeeDepartment Department = EEmployeeDepartment::None;
     EGachaTier Tier = EGachaTier::Normal;
+    bool bNotifyHireCompletion = true;
+    FString AppearanceKey;
+    int64 AppearanceRevision = 0;
 };
 
 /**
@@ -58,30 +62,36 @@ class COMPANYGROWTHRENEWAL_API UEmployeeManager : public UGameInstanceSubsystem
 
 // 사진 촬영용
 public:
-    // 사진 촬영용 재사용 액터
+    // 사진 촬영용 재사용 액터 (유니섹스 — 남/녀 분기 없이 1개). 레벨에 bIsPortraitMode 로 배치.
     UPROPERTY()
-    AOfficeworkerMale* MalePortraitWorker;
+    AFunnyOfficeworker* StickPortraitWorker;
 
-    UPROPERTY()
-    AOfficeworkerFemale* FemalePortraitWorker;
-
-    // 스틱맨 캡쳐 워커 (유니섹스 — 남/녀 분기 없이 1개). 레벨에 bIsPortraitMode 로 배치, 1순위로 사용.
-    UPROPERTY()
-    AStickOfficeworker* StickPortraitWorker;
-
-    // Department/Tier 는 스틱 코스메틱 산출에 필요 (구 모듈러 경로는 무시). 캡쳐 호출자가 FEmployeeInstance 에서 채워 전달.
+    // Department/Tier 는 코스메틱 산출에 필요. 캡쳐 호출자가 FEmployeeInstance 에서 채워 전달.
     UFUNCTION()
-    void CaptureEmployeePortrait(const FString& EmployeeID, const FCharacterAppearance& Appearance,
-        EEmployeeRank Rank, EEmployeeGender Gender,
-        int32 HairCombinationType, int32 RandomSeed,
+    void CaptureEmployeePortrait(const FString& EmployeeID, EEmployeeRank Rank, EEmployeeGender Gender,
         EEmployeeDepartment Department, EGachaTier Tier);
 
     // 초상화 파이프라인 busy 여부 — 대기 큐 잔량 포함(배치 뽑기가 전체 완료를 봐야 함)
     UFUNCTION(BlueprintCallable)
     bool IsPortraitCapturing() const { return bPortraitCapturing || PendingPortraitQueue.Num() > 0; }
 
+    DECLARE_MULTICAST_DELEGATE_TwoParams(FOnEmployeePortraitUpdated, int32, int64);
+    FOnEmployeePortraitUpdated OnEmployeePortraitUpdated;
+    bool IsPortraitCurrent(int32 EmployeeID) const;
+    // 촬영이 대기·진행 중이면 디스크의 PNG 는 이전 촬영(세이브만 지운 경우 다른 사람)의 것일 수 있다.
+    bool IsPortraitPending(int32 EmployeeID) const;
+    void RefreshEmployeePortrait(int32 EmployeeID);
+
 private:
+    friend class URecruitmentManagerSubsystem;
+    bool HireEmployeeFromCardInternal(const FEmployeeInstance& CardData, int32 BuildingIndex,
+        bool bShouldSave, bool bBatchHire);
+    friend class UOfficeStageProgressManager;
+    float ResolveBuildingExperienceAmount(int32 BuildingIndex, float BaseAmount, EQualityGrade QualityGrade) const;
+    float DistributeEquipmentStageExperience(int32 BuildingIndex, float BaseAmount, EQualityGrade QualityGrade,
+        FEquipmentAttemptRuntime& Attempt, int32 BucketIndex, float SelfCapPercent);
     bool bPortraitCapturing = false;
+    int32 InFlightPortraitEmployeeID = INDEX_NONE;
 
     // 완료 브로드캐스트 중 재진입한 캡처 요청은 적재만 — 실행 중인 워커 델리게이트 재바인딩 UB 방지
     bool bInPortraitCompletion = false;
@@ -89,8 +99,16 @@ private:
     // FIFO — 촬영 리그 1대를 여러 요청이 공유해 서로 덮는 것을 막는다
     TArray<FPortraitCaptureRequest> PendingPortraitQueue;
 
-    void StartPortraitCapture(const FPortraitCaptureRequest& Request);
+    void StartPortraitCapture(const FPortraitCaptureRequest& Request, bool bAssetsPrepared = false);
+    void FinishPortraitPreparation(FPortraitCaptureRequest Request);
+    TSharedPtr<FStreamableHandle> PortraitLoadHandle;
+    TArray<FSoftObjectPath> PortraitAssetPaths;
+    FTimerHandle PortraitPreparationTimer;
     void DequeueNextPortraitCapture();
+    void HandleEquipmentAppearanceChanged();
+    FString GetPortraitAppearanceKey(int32 EmployeeID, const FPortraitCaptureRequest* Fallback = nullptr) const;
+    TMap<int32, FString> LastRequestedPortraitKeys;
+    int64 NextPortraitRevision = 0;
 
     // 레벨 전환으로 캡처 완료 델리게이트가 영영 안 오는 경우의 해제 — 서브시스템이 월드보다 오래 살아 상태가 남는다
     void HandleWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
@@ -131,6 +149,9 @@ public:
     UFUNCTION(BlueprintPure, Category = "Employee")
     int32 GetBuildingEmployeeCapacityAtFloors(int32 BuildingIndex, int32 AddedFloors, bool bLogIfZero = true) const;
 
+    // OfficeMap에는 도시의 건물 액터가 없으므로 소속 산업은 저장된 건물에서 읽는다.
+    ECompanyType GetCompanyTypeForBuilding(int32 BuildingIndex) const;
+
     // 인원 상한 초과 안내 문구. 고용 시점 게이트와 채용 진입 사전차단이 같은 문구를 써야 원인이 하나로 읽힌다.
     static FText GetCapacityFullMessage();
 
@@ -142,6 +163,9 @@ public:
     UFUNCTION(BlueprintCallable)
     TArray<FEmployeeInstance> GetAllEmployees() const { return EmployeeList; }
 
+    // 복사 없는 순회용 (C++ 전용) — 반환 참조는 로스터를 바꾸는 호출 뒤 무효
+    const TArray<FEmployeeInstance>& GetAllEmployeesRef() const { return EmployeeList; }
+
     // 미배치 직원 목록 조회 (채용 가능한 직원들)
     UFUNCTION(BlueprintCallable)
     TArray<FEmployeeInstance> GetUnassignedEmployees() const;
@@ -149,6 +173,14 @@ public:
     // 특정 건물에 배치된 직원 목록 조회
     UFUNCTION(BlueprintCallable)
     TArray<FEmployeeInstance> GetEmployeesInBuilding(int32 BuildingIndex) const;
+
+    // 소속 직원 존재 여부만 필요할 때 — 명부 값 복사를 피한다.
+    bool HasAnyEmployeeInBuilding(int32 BuildingIndex) const;
+
+    // 지금 자리에 있는 직원만 (출장 중 제외). 기여 계열 전용 —
+    // 「보유 직원 N명」 같은 소속 표시에는 GetEmployeesInBuilding 을 그대로 쓸 것.
+    UFUNCTION(BlueprintCallable)
+    TArray<FEmployeeInstance> GetActiveEmployeesInBuilding(int32 BuildingIndex) const;
 
     // 특정 건물 소속 미배치(벤치) 직원 목록 — 책상 로스터 피커용
     UFUNCTION(BlueprintCallable)
@@ -168,6 +200,9 @@ public:
     // Employee 데이터 조회 (포인터 반환, C++에서만 사용)
     FEmployeeInstance* GetEmployeeData(int32 EmployeeID);
 
+    // 장비가 없어도 기본 파츠가 이 부위를 이미 채우고 있는지. 빈 칸과 "기본 외형을 입은 칸"을 UI 가 구분하는 근거다.
+    bool HasBaseAppearance(int32 EmployeeID, EEmployeeEquipmentSlot EquipmentSlot);
+
     // Employee 특정 빌딩에 배치
     UFUNCTION(BlueprintCallable)
     bool AssignEmployeeToBuilding(int32 EmployeeID, int32 BuildingIndex);
@@ -184,31 +219,16 @@ public:
     int32 AllocateNextInstanceID() { return NextInstanceID++; }
 
     UFUNCTION(BlueprintCallable)
-    const TMap<int32, FEmployeeAppearanceData>& GetEmployeeAppearances() const {
-        return
-            EmployeeAppearances;
-    }
-
-    UFUNCTION(BlueprintCallable)
     void SetEmployeeList(const TArray<FEmployeeInstance>& Data) { EmployeeList = Data; }
 
     UFUNCTION(BlueprintCallable)
     void SetNextInstanceID(int32 NextID) { NextInstanceID = NextID; }
-
-    UFUNCTION(BlueprintCallable)
-    void SetEmployeeAppearances(const TMap<int32, FEmployeeAppearanceData>& Appearances) {
-        EmployeeAppearances = Appearances;
-    }
 
     // ========== 건물별 직원 관리 (저장/로드용) ==========
 
     // 특정 건물의 직원 목록 조회 (저장용)
     UFUNCTION(BlueprintCallable)
     TArray<FEmployeeInstance> GetEmployeesByBuilding(int32 BuildingIndex) const;
-
-    // 특정 건물의 외모 데이터 조회 (저장용)
-    UFUNCTION(BlueprintCallable)
-    TMap<int32, FCharacterAppearance> GetAppearancesByBuilding(int32 BuildingIndex) const;
 
     // 특정 건물의 직원 목록 설정 (로드용)
     UFUNCTION(BlueprintCallable)
@@ -218,10 +238,6 @@ public:
     // 재화 차감을 건너뛰고, 가챠와 같은 규칙으로 스탯/직능을 만든다. RandomSeed 로 매 실행 동일 로스터.
     void SeedEmployeesForBuilding(int32 BuildingIndex, int32 Count, int32 LevelMin, int32 LevelMax,
         int32 EnhanceMin, int32 EnhanceMax, int32 RandomSeed);
-
-    // 특정 건물의 외모 데이터 설정 (로드용)
-    UFUNCTION(BlueprintCallable)
-    void SetAppearancesForBuilding(int32 BuildingIndex, const TMap<int32, FCharacterAppearance>& Appearances);
 
     // 특정 건물의 직원 데이터 삭제 (새 건물 초기화용)
     UFUNCTION(BlueprintCallable)
@@ -265,17 +281,59 @@ public:
     UFUNCTION(BlueprintCallable)
     int32 GetMaxExperienceForLevel(int32 Level) const;
 
+    static constexpr int32 MaxEmployeeLevel = EmployeeTrainingRules::MaxLevel;
+    static constexpr int32 WorkPowerPerLevel = EmployeeTrainingRules::WorkPowerPerLevel;
+    static constexpr int32 StatPointsPerLevel = EmployeeTrainingRules::StatPointsPerLevel;
+
+    UFUNCTION(BlueprintPure, Category = "Employee Training")
+    double GetExperience(int32 EmployeeID) const;
+
+    UFUNCTION(BlueprintPure, Category = "Employee Training")
+    int32 GetLevelUpCost(int32 EmployeeID) const;
+
+    UFUNCTION(BlueprintPure, Category = "Employee Training")
+    bool CanLevelUpEmployee(int32 EmployeeID) const;
+
+    UFUNCTION(BlueprintCallable, Category = "Employee Training")
+    bool LevelUpEmployee(int32 EmployeeID);
+
+    UFUNCTION(BlueprintPure, Category = "Employee Training")
+    int32 GetAvailableStatPoints(int32 EmployeeID) const;
+
+    UFUNCTION(BlueprintPure, Category = "Employee Training")
+    bool CanAllocateStatPoint(int32 EmployeeID, EEmployeeStatIndex Stat) const;
+
+    UFUNCTION(BlueprintCallable, Category = "Employee Training")
+    bool AllocateStatPoint(int32 EmployeeID, EEmployeeStatIndex Stat);
+
+    // 그 능력치에 SP 를 넣은 횟수 (표시 Lv)
+    UFUNCTION(BlueprintPure, Category = "Employee Training")
+    int32 GetStatLevel(int32 EmployeeID, EEmployeeStatIndex Stat) const;
+
+    // 그 능력치에 다음 1회 투자할 때 드는 SP. 없는 직원이면 0
+    UFUNCTION(BlueprintPure, Category = "Employee Training")
+    int32 GetStatPointCost(int32 EmployeeID, EEmployeeStatIndex Stat) const;
+
+    UFUNCTION(BlueprintPure, Category = "Employee Training")
+    bool CanAllocateAnyStatPoint(int32 EmployeeID) const;
+
     // ========== 경험치 시스템 ==========
+
+    // 호출자가 획득 배율을 이미 계산한 경험치를 해당 직원에게 한 번만 적립한다.
+    bool CommitResolvedExperience(int32 EmployeeID, double FinalAmount);
+
+    DECLARE_MULTICAST_DELEGATE_OneParam(FOnEmployeeExperienceChanged, int32 /*EmployeeID*/);
+    FOnEmployeeExperienceChanged OnEmployeeExperienceChanged;
 
     // 직원별 경험치 획득 배율 (유효 ExpGain 스탯 기반, 큐브 배율은 별도) — AddExperience 와 표기 계산이 같은 식을 쓰게 하는 단일 정의
     UFUNCTION(BlueprintPure, Category = "Employee Experience")
     float GetExpGainMultiplier(const FEmployeeInstance& Employee) const;
 
-    // 경험치 추가 (레벨업 없이 단순 추가)
+    // 직원 획득 배율을 적용해 개인 경험치 적립
     UFUNCTION(BlueprintCallable, Category = "Employee Experience")
     bool AddExperience(int32 EmployeeID, float Amount);
 
-    // 빌딩 내 모든 직원에게 경험치 분배. 반환 = 직원 1인당 지급 기준량(큐브 배율 전), 직원 0 이면 0 — 실패 화면 "경험치 +N" 표기용
+    // 빌딩 직원들의 획득 배율을 반영해 개인 경험치 적립. 반환 = 실제 총 적립량
     UFUNCTION(BlueprintCallable, Category = "Employee Experience")
     float DistributeExperienceToBuilding(int32 BuildingIndex, float BaseAmount, EQualityGrade QualityGrade);
 
@@ -301,40 +359,68 @@ public:
     // 업무 복귀 — 떠 있던 알림 조기 해제
     void NotifyEmployeeRecovered(int32 EmployeeID);
 
-    // ========== 레벨업 / 스탯 투자 ==========
+    // ========== 수동 레벨업 / 능력치 갱신 ==========
 
     // 레벨업 이벤트 (EmployeeID, NewLevel)
     DECLARE_MULTICAST_DELEGATE_TwoParams(FOnEmployeeLevelUp, int32 /*EmployeeID*/, int32 /*NewLevel*/);
     FOnEmployeeLevelUp OnEmployeeLevelUp;
 
-    // 스탯 변경 이벤트 (EmployeeID) — 투자/자동배분/리셋 후 UI 갱신용
+    // 스탯 변경 이벤트 (EmployeeID) — 레벨업/강화 후 UI 갱신용
     DECLARE_MULTICAST_DELEGATE_OneParam(FOnEmployeeStatsChanged, int32 /*EmployeeID*/);
     FOnEmployeeStatsChanged OnEmployeeStatsChanged;
 
-    // 직능 포인트 변경 이벤트 (EmployeeID) — 투자/리셋 후 카드·부서배지 갱신용
+    // SP 지출이 저장까지 성공한 행동만 전달한다. 일반 능력치 갱신과 구분한다.
+    DECLARE_MULTICAST_DELEGATE_OneParam(FOnEmployeeStatPointAllocated, int32 /*EmployeeID*/);
+    FOnEmployeeStatPointAllocated OnEmployeeStatPointAllocated;
+
+    // 직능 포인트 변경 이벤트 (EmployeeID) — 레벨업 후 카드·부서배지 갱신용
     DECLARE_MULTICAST_DELEGATE_OneParam(FOnEmployeeDisciplineChanged, int32 /*EmployeeID*/);
     FOnEmployeeDisciplineChanged OnEmployeeDisciplineChanged;
-
-    // 레벨업당 지급 스킬포인트(직능 투자용). 초기 롤을 낮춘 대가로 성장분을 키운 값(2026-08-13)
-    static constexpr int32 SkillPointsPerLevel = 3;
-
-    // 스킬포인트 1점을 지정 직능에 투자 → 부서 재파생 → 저장 → Broadcast. SP 없으면 false·무변경.
-    UFUNCTION(BlueprintCallable, Category = "Employee Discipline")
-    bool InvestDisciplinePoint(int32 EmployeeID, EProductionDiscipline Discipline);
-
-    // 다이아 차감 후 투자분을 이너트로 되돌리고 SP 전액 반환 → 부서 재파생 → 저장 → Broadcast.
-    // 다이아 부족/투자분 0/직원 없음 = false(차감 없음).
-    UFUNCTION(BlueprintCallable, Category = "Employee Discipline")
-    bool ResetDisciplinePoints(int32 EmployeeID);
-
-    static constexpr int32 DisciplineResetDiamondCost = 50;
 
     // 잠재 큐브 리롤 — 큐브 아이템 소모(CubeType 1개) + 등급상한 클램프(GetCubeCeiling) + ResetPotentialAbility + 저장 + OnEmployeeStatsChanged.
     // CubeType이 큐브 3종이 아니거나/재고 부족/직원 없음 = false (소모 없음)
     UFUNCTION(BlueprintCallable, Category = "Employee Potential")
     bool RerollEmployeePotential(int32 EmployeeID, EItemType CubeType);
 
+    // ========== 서버 권위 경제 (다이아 차감 / 명함 소모) ==========
+
+    /** 요청 1건 완료. 성공·실패 어느 쪽이든 정확히 1회 호출된다 */
+    DECLARE_DELEGATE_OneParam(FOnEmployeeEconomyDone, bool /*bOk*/);
+
+    /**
+     * `/item/consume`(employee.potentialReroll, maxPerOp 1) -> 성공 응답 뒤에만 리롤.
+     * 결과가 RNG 라 bReplayed 면 로컬 효과를 주지 않는다 ― 다시 굴리면 플레이어가 본 잠재능력이 바뀐다.
+     */
+    void RequestPotentialReroll(int32 EmployeeID, EItemType CubeType, FOnEmployeeEconomyDone Done);
+
+    /**
+     * 잠재 재설정 요청에 **실패 코드까지** 준다(1-B-4c).
+     * 코드가 없으면 호출부가 "부족합니다" 한 문구로 서버·네트워크 실패까지 덮는다.
+     * bool 버전은 이 함수로 위임한다 ― 기존 호출부는 그대로 컴파일된다.
+     */
+    void RequestPotentialReroll(int32 EmployeeID, EItemType CubeType, FOnCloudEconomyOpDone Done);
+
+    /** reason 문자열 ― spendRules.json / consumeRules.json 과 바이트 단위로 같아야 한다(다르면 400) */
+    static FName GetPotentialRerollConsumeReason();
+
+    /** 중복 클릭 차단 키 ― 직원별로 따로 잠근다(옆 직원 카드가 같이 막히면 안 된다) */
+    static FName PotentialRerollActionKey(int32 EmployeeID);
+
+    /** true = 서버가 영수증을 재생했다. RNG 를 다시 돌리면 결과가 갈린다 */
+    static bool ShouldSkipLocalEffect(bool bReplayed);
+
+    /** 명함 3종만 리롤 재료다 ― 서버 `items` 허용목록과 같은 게이트 */
+    static bool IsRerollCard(EItemType CubeType);
+
 private:
+    // 서버 응답 뒤 로컬 효과 ― FEmployeeInstance* 를 콜백까지 들고 가지 않는다(배열 재할당에 무효가 된다).
+    // EmployeeID 로 다시 찾고 조건을 재검사한 뒤 적용한다.
+    bool ApplyPotentialRerollEffect(int32 EmployeeID, EItemType CubeType);
+
+    bool bTrainingTransactionInProgress = false;
+
+    UCloudEconomySubsystem* GetCloudEconomy() const;
+
     // 레벨업 시각/UI 효과 (워커 위치 Niagara + 알림 문구)
     void PlayLevelUpEffects(int32 EmployeeID, int32 NewLevel);
 
@@ -409,21 +495,6 @@ private:
 
     UDataTable* LastNameDataTable = nullptr;
     UDataTable* FirstNameDataTable = nullptr;
-
-public:
-    // 외모 생성 함수들
-    UFUNCTION(BlueprintCallable)
-    FCharacterAppearance GenerateRandomAppearance(EEmployeeRank Rank, EEmployeeGender Gender);
-
-    FCharacterAppearance GetEmployeeAppearance(int32 EmployeeID);
-
-private:
-    // 얼굴 표정 랜덤 생성
-    FMorphTargetSet GenerateRandomFacialExpression();
-
-    // 외모 데이터 저장
-    UPROPERTY()
-    TMap<int32, FEmployeeAppearanceData> EmployeeAppearances;
 
     // TableManager mutable로 const성을 유지하면서 물리적으로는 변경 가능
     UPROPERTY()

@@ -1,31 +1,35 @@
 #include "UI/Element/Common/LaunchLootOddsWidget.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Table/ResourceInfo.h"
+#include "Enum/WidgetType.h"
+#include "UI/Element/Common/ModalFrameWidget.h"
+#include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "Blueprint/WidgetTree.h"
-#include "Blueprint/WidgetLayoutLibrary.h"
 #include "Components/Border.h"
-#include "Components/BorderSlot.h"
+#include "Components/Button.h"
+#include "Components/Overlay.h"
+#include "Components/OverlaySlot.h"
+#include "Components/ScaleBox.h"
+#include "Components/ScaleBoxSlot.h"
+#include "Components/ScrollBox.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Components/SizeBox.h"
 #include "Components/Image.h"
+#include "UI/Element/Common/IconBrushUtils.h"
 #include "Components/TextBlock.h"
 #include "Engine/Font.h"
 #include "Engine/Texture2D.h"
-#include "TimerManager.h"
 
 namespace
 {
-	// 목업 v2 팔레트 (sRGB -> linear 는 FromSRGBColor 로)
-	const FColor PopupFill(0x23, 0x2A, 0x35);
-	const FColor PopupLine(0xFF, 0xFF, 0xFF);
 	const FColor RowFill(0xFF, 0xFF, 0xFF);
 	const FColor InkColor(0xEC, 0xEE, 0xF0);
 	const FColor SubColor(0xB9, 0xC2, 0xCF);
 	const FColor MutedColor(0x97, 0xA3, 0xB6);
-	constexpr float PopupWidth = 760.0f;
+	constexpr float PopupWidth = 1064.0f;
 
 	FSlateBrush MakeRoundedBrush(const FColor& Fill, float FillAlpha, float Radius, const FColor& Line, float LineAlpha, float LineWidth)
 	{
@@ -86,34 +90,82 @@ void ULaunchLootOddsWidget::EnsureTree()
 	RegularFont = TSoftObjectPtr<UFont>(FSoftObjectPath(
 		TEXT("/Game/CompanyGrowth/Font/NEXONLv1GothicRegular_Font.NEXONLv1GothicRegular_Font"))).LoadSynchronous();
 
-	USizeBox* WidthBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("OddsWidthBox"));
-	WidthBox->SetWidthOverride(PopupWidth);   // 팝업 폭 규격 — 행 텍스트는 이 안에서 감긴다
-	WidgetTree->RootWidget = WidthBox;
-
-	UBorder* Plate = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("OddsPlate"));
-	Plate->SetBrush(MakeRoundedBrush(PopupFill, 1.0f, 20.0f, PopupLine, 0.13f, 1.5f));
-	// UBorder 패딩 이중 함정 — 위젯 Padding 이 슬롯을 되덮으므로 위젯 쪽에 지정
-	Plate->SetPadding(FMargin(30.0f, 26.0f, 30.0f, 22.0f));
-	WidthBox->AddChild(Plate);
-
-	UVerticalBox* Stack = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("OddsStack"));
-	Plate->SetContent(Stack);
-
-	UTextBlock* Title = MakeText(WidgetTree, BoldFont, 28, InkColor, NSLOCTEXT("LaunchLoot", "OddsTitle", "출시 보상"));
-	if (UVerticalBoxSlot* TitleSlot = Stack->AddChildToVerticalBox(Title))
+	UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const TSubclassOf<UUserWidget> FrameClass = TableMgr ? TableMgr->GetWidgetClass(EWidgetType::ModalFrame) : nullptr;
+	ModalFrame = FrameClass ? CreateWidget<UModalFrameWidget>(this, FrameClass) : nullptr;
+	if (!ModalFrame)
 	{
-		TitleSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 4.0f));
+		UE_LOG(LogTemp, Warning, TEXT("[LaunchLootOdds] DT_WidgetClass ModalFrame is missing or has the wrong type."));
+		return;
 	}
 
-	UTextBlock* Caption = MakeText(WidgetTree, RegularFont, 20, MutedColor,
+	UOverlay* RootOverlay = WidgetTree->ConstructWidget<UOverlay>(UOverlay::StaticClass(), TEXT("OddsOverlay"));
+	RootOverlay->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	WidgetTree->RootWidget = RootOverlay;
+	BackdropButton = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass(), TEXT("OddsBackdrop"));
+	if (UOverlaySlot* BackdropSlot = RootOverlay->AddChildToOverlay(BackdropButton))
+	{
+		BackdropSlot->SetHorizontalAlignment(HAlign_Fill);
+		BackdropSlot->SetVerticalAlignment(VAlign_Fill);
+	}
+
+	UScaleBox* FitBox = WidgetTree->ConstructWidget<UScaleBox>(UScaleBox::StaticClass(), TEXT("OddsFit"));
+	FitBox->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	FitBox->SetStretch(EStretch::ScaleToFit);
+	FitBox->SetStretchDirection(EStretchDirection::DownOnly);
+	if (UOverlaySlot* FitSlot = RootOverlay->AddChildToOverlay(FitBox))
+	{
+		FitSlot->SetPadding(FMargin(72.f));
+		FitSlot->SetHorizontalAlignment(HAlign_Fill);
+		FitSlot->SetVerticalAlignment(VAlign_Fill);
+	}
+	USizeBox* WidthBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("OddsWidthBox"));
+	WidthBox->SetWidthOverride(PopupWidth);
+	if (UScaleBoxSlot* CenterSlot = Cast<UScaleBoxSlot>(FitBox->AddChild(WidthBox)))
+	{
+		CenterSlot->SetHorizontalAlignment(HAlign_Center);
+		CenterSlot->SetVerticalAlignment(VAlign_Center);
+	}
+	WidthBox->AddChild(ModalFrame);
+	ModalFrame->SetTitle(NSLOCTEXT("LaunchLoot", "OddsWindowTitle", "출시 보상 확률"));
+	ModalFrame->SetHelpKey(NAME_None);
+	ModalFrame->SetAppearance(TEXT("PitchBoard"), NAME_None, NAME_None);
+
+	UBorder* BodyPadding = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("OddsBodyPadding"));
+	FSlateBrush EmptyBrush;
+	EmptyBrush.DrawAs = ESlateBrushDrawType::NoDrawType;
+	BodyPadding->SetBrush(EmptyBrush);
+	BodyPadding->SetPadding(FMargin(32.f));
+	ModalFrame->SetContentForSlot(TEXT("Body"), BodyPadding);
+
+	UVerticalBox* Stack = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("OddsStack"));
+	BodyPadding->SetContent(Stack);
+
+	UTextBlock* Caption = MakeText(WidgetTree, RegularFont, 24, MutedColor,
 		NSLOCTEXT("LaunchLoot", "OddsCaption", "출시 평점이 높을수록 좋은 보상이 나옵니다. 확률은 보상 1칸 기준입니다."));
+	Caption->SetAutoWrapText(true);
 	if (UVerticalBoxSlot* CaptionSlot = Stack->AddChildToVerticalBox(Caption))
 	{
 		CaptionSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 16.0f));
 	}
 
 	RowsBox = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("OddsRows"));
-	Stack->AddChildToVerticalBox(RowsBox);
+	USizeBox* RowsExtent = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("OddsRowsExtent"));
+	RowsExtent->SetMaxDesiredHeight(760.f);
+	UScrollBox* RowsScroll = WidgetTree->ConstructWidget<UScrollBox>(UScrollBox::StaticClass(), TEXT("OddsRowsScroll"));
+	RowsScroll->AddChild(RowsBox);
+	RowsExtent->AddChild(RowsScroll);
+	Stack->AddChildToVerticalBox(RowsExtent);
+}
+
+void ULaunchLootOddsWidget::NativeConstruct()
+{
+	Super::NativeConstruct();
+	if (BackdropButton) { BackdropButton->OnClicked.AddUniqueDynamic(this, &ULaunchLootOddsWidget::HandleCloseClicked); }
+	if (UCloseButtonWidget* WindowClose = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
+	{
+		WindowClose->OnCloseClicked.AddUniqueDynamic(this, &ULaunchLootOddsWidget::HandleCloseClicked);
+	}
 }
 
 void ULaunchLootOddsWidget::BuildRows(const TArray<FLaunchLootPreviewEntry>& Entries)
@@ -133,7 +185,7 @@ void ULaunchLootOddsWidget::BuildRows(const TArray<FLaunchLootPreviewEntry>& Ent
 	int32 RowIndex = 0;
 	for (const FLaunchLootPreviewEntry& Entry : Entries)
 	{
-		UTexture2D* Icon = nullptr;
+		UObject* Icon = nullptr;
 		FText Name;
 		if (Entry.ResourceType != EResourceType::None)
 		{
@@ -145,7 +197,7 @@ void ULaunchLootOddsWidget::BuildRows(const TArray<FLaunchLootPreviewEntry>& Ent
 		else if (Entry.ItemType != EItemType::None)
 		{
 			bool bFound = false;
-			Icon = TableMgr->GetItemIcon(Entry.ItemType, bFound);
+			Icon = TableMgr->GetItemIconResource(Entry.ItemType, bFound);
 			FShopItemTable ItemRow;
 			if (TableMgr->GetShopItemByItemType(Entry.ItemType, ItemRow)) { Name = ItemRow.DisplayName; }
 		}
@@ -178,7 +230,7 @@ void ULaunchLootOddsWidget::BuildRows(const TArray<FLaunchLootPreviewEntry>& Ent
 		}
 		if (Entry.MaxTier > 0)
 		{
-			Cond += FString::Printf(TEXT(" · 티어 %d까지"), Entry.MaxTier);
+			Cond += FString::Printf(TEXT(" · %d단계까지"), Entry.MaxTier);
 		}
 
 		UBorder* Row = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass());
@@ -190,10 +242,10 @@ void ULaunchLootOddsWidget::BuildRows(const TArray<FLaunchLootPreviewEntry>& Ent
 		Row->SetContent(RowBox);
 
 		USizeBox* IconBox = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass());
-		IconBox->SetWidthOverride(48.0f);
-		IconBox->SetHeightOverride(48.0f);
+		IconBox->SetWidthOverride(64.0f);
+		IconBox->SetHeightOverride(64.0f);
 		UImage* IconImage = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass());
-		if (Icon) { IconImage->SetBrushFromTexture(Icon); }
+		CGIconBrush::ApplyResource(IconImage, Icon);
 		IconBox->AddChild(IconImage);
 		if (UHorizontalBoxSlot* IconSlot = RowBox->AddChildToHorizontalBox(IconBox))
 		{
@@ -201,7 +253,7 @@ void ULaunchLootOddsWidget::BuildRows(const TArray<FLaunchLootPreviewEntry>& Ent
 			IconSlot->SetVerticalAlignment(VAlign_Center);
 		}
 
-		UTextBlock* NameBlock = MakeText(WidgetTree, BoldFont, 23, InkColor, Name);
+		UTextBlock* NameBlock = MakeText(WidgetTree, BoldFont, 26, InkColor, Name);
 		if (UHorizontalBoxSlot* NameSlot = RowBox->AddChildToHorizontalBox(NameBlock))
 		{
 			NameSlot->SetPadding(FMargin(0.0f, 0.0f, 14.0f, 0.0f));
@@ -209,7 +261,7 @@ void ULaunchLootOddsWidget::BuildRows(const TArray<FLaunchLootPreviewEntry>& Ent
 			NameBlock->SetMinDesiredWidth(200.0f);   // 이름 열 정렬 기준선
 		}
 
-		UTextBlock* CondBlock = MakeText(WidgetTree, RegularFont, 20, SubColor, FText::FromString(Cond));
+		UTextBlock* CondBlock = MakeText(WidgetTree, RegularFont, 24, SubColor, FText::FromString(Cond));
 		CondBlock->SetAutoWrapText(true);
 		if (UHorizontalBoxSlot* CondSlot = RowBox->AddChildToHorizontalBox(CondBlock))
 		{
@@ -224,66 +276,42 @@ void ULaunchLootOddsWidget::BuildRows(const TArray<FLaunchLootPreviewEntry>& Ent
 	}
 }
 
-void ULaunchLootOddsWidget::ShowAt(FVector2D AbsoluteScreenPos, const TArray<FLaunchLootPreviewEntry>& Entries, float DurationSec, int32 ZOrder)
+void ULaunchLootOddsWidget::Show(const TArray<FLaunchLootPreviewEntry>& Entries, const FButtonStyle& DimButtonStyle, int32 ZOrder)
 {
 	EnsureTree();
+	if (!RowsBox || !BackdropButton) { return; }
 	BuildRows(Entries);
+	BackdropButton->SetStyle(DimButtonStyle);
 
 	if (!IsInViewport())
 	{
 		AddToViewport(ZOrder);
 	}
 
-	// ItemTooltipWidget::ShowAt 의 BelowAnchor 배치 복제 — AbsoluteToLocal 로 SafeZone/DPI 자동 보정
-	const FGeometry ViewportGeo = UWidgetLayoutLibrary::GetViewportWidgetGeometry(this);
-	const FVector2D Anchor = ViewportGeo.AbsoluteToLocal(AbsoluteScreenPos);
-
-	ForceLayoutPrepass();
-	const FVector2D PopupSize = GetDesiredSize();
-	const FVector2D ViewportSize = ViewportGeo.GetLocalSize();
-
-	const float EdgeMargin = 12.0f;
-	const float Gap = 14.0f;
-	FVector2D Pos;
-	Pos.X = Anchor.X;
-	const float SpaceBelow = (ViewportSize.Y - EdgeMargin) - (Anchor.Y + Gap);
-	const float SpaceAbove = (Anchor.Y - Gap) - EdgeMargin;
-	const bool bFlipUp = (PopupSize.Y > SpaceBelow) && (SpaceAbove > SpaceBelow);
-	Pos.Y = bFlipUp ? (Anchor.Y - Gap - PopupSize.Y) : (Anchor.Y + Gap);
-	Pos.X = FMath::Clamp(Pos.X, EdgeMargin, FMath::Max(EdgeMargin, ViewportSize.X - PopupSize.X - EdgeMargin));
-	Pos.Y = FMath::Clamp(Pos.Y, EdgeMargin, FMath::Max(EdgeMargin, ViewportSize.Y - PopupSize.Y - EdgeMargin));
-
-	SetPositionInViewport(Pos, /*bRemoveDPIScale=*/false);
-	SetVisibility(ESlateVisibility::HitTestInvisible);
-
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(DismissTimerHandle);
-		if (DurationSec > 0.0f)
-		{
-			TWeakObjectPtr<ULaunchLootOddsWidget> WeakThis(this);
-			World->GetTimerManager().SetTimer(DismissTimerHandle, FTimerDelegate::CreateLambda([WeakThis]()
-			{
-				if (ULaunchLootOddsWidget* Strong = WeakThis.Get()) { Strong->Hide(); }
-			}), DurationSec, false);
-		}
-	}
+	SetAlignmentInViewport(FVector2D::ZeroVector);
+	SetPositionInViewport(FVector2D::ZeroVector, false);
+	SetDesiredSizeInViewport(FVector2D::ZeroVector);
+	// UE5.4의 위치·크기 setter는 앵커를 좌상단으로 바꾸므로 전체 화면 앵커를 마지막에 적용한다.
+	SetAnchorsInViewport(FAnchors(0.f, 0.f, 1.f, 1.f));
+	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
 }
 
 void ULaunchLootOddsWidget::Hide()
 {
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().ClearTimer(DismissTimerHandle);
-	}
 	SetVisibility(ESlateVisibility::Collapsed);
+}
+
+void ULaunchLootOddsWidget::HandleCloseClicked()
+{
+	Hide();
 }
 
 void ULaunchLootOddsWidget::NativeDestruct()
 {
-	if (UWorld* World = GetWorld())
+	if (BackdropButton) { BackdropButton->OnClicked.RemoveDynamic(this, &ULaunchLootOddsWidget::HandleCloseClicked); }
+	if (UCloseButtonWidget* WindowClose = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
 	{
-		World->GetTimerManager().ClearTimer(DismissTimerHandle);
+		WindowClose->OnCloseClicked.RemoveDynamic(this, &ULaunchLootOddsWidget::HandleCloseClicked);
 	}
 	Super::NativeDestruct();
 }

@@ -53,6 +53,10 @@ struct FCityCompanyData : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Company|Dressing")
 	int32 LightID = 100;
 
+	// 회사별 창문 발광 RGB 배율. 알파는 점등 마스크에 쓰이므로 유지한다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Company|Dressing", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float WindowLightIntensityScale = 1.0f;
+
 	// 도박 인수 경제 (2026-06-26)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Company|Acq")
 	int32 YieldMinPct = 50;   // 총수익 하한(인수가 %)

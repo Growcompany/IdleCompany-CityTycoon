@@ -8,7 +8,7 @@
 #include "Enum/ItemType.h"
 #include "EmployeePotentialData.generated.h"
 
-// 확률표 UI 1행 — 래칫·상한을 반영한 실효 확률 (등급 내림차순)
+// 등급별 확률 1행 — 기본 추첨과 래칫·상한 반영 실효 확률에 공용 (등급 내림차순)
 USTRUCT(BlueprintType)
 struct FPotentialRarityOdds
 {
@@ -97,7 +97,7 @@ public:
 	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 	/**
-	 * 잠재능력 등급 추첨 (하락 방지 적용)
+	 * 잠재능력 등급 계산 (하락 방지·상승 시 다음 등급까지만 적용)
 	 * @param MaxAchievedRarity 달성한 최고 등급
 	 * @return 새로운 등급
 	 */
@@ -112,15 +112,14 @@ public:
 	static ELootBoxRarity RollAdditionalRarity();
 
 	/**
-	 * 확률표 UI용 실효 등급 확률 — 기본 추첨에 래칫(달성 등급 아래 → 달성 등급)과
-	 * 상한 클램프(EffectiveCeiling 위 → 상한)를 적용해 실제로 나올 등급별 확률을 낸다.
-	 * 기본 확률만 그대로 보여주면 래칫이 아래쪽을 한 칸에 뭉치므로 대부분의 직원에게 틀린 표가 된다.
+	 * 재설정 실효 등급 확률 — 기초 분포에 하락 방지, 한 단계 상승 제한,
+	 * 명함 상한을 적용해 실제 결과의 등급별 확률을 낸다.
 	 * @return 확률 0 인 등급은 제외, 등급 내림차순
 	 */
 	UFUNCTION(BlueprintPure, Category = "Employee Potential")
 	static TArray<FPotentialRarityOdds> GetEffectiveRarityOdds(ELootBoxRarity MaxAchievedRarity, ELootBoxRarity CardCeiling);
 
-	/** 기본 추첨 확률 (래칫·상한 적용 전) — 각주 표기용 */
+	/** 등급별 기본 확률 (래칫·상한 적용 전) — 공통 상승 확률표의 등급 열거용 */
 	UFUNCTION(BlueprintPure, Category = "Employee Potential")
 	static TArray<FPotentialRarityOdds> GetBaseRarityOdds();
 
@@ -156,6 +155,17 @@ public:
 	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 	// 유틸리티
 	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+	// 값 칸 전용 문자열 — 홈/드로어 값 칸의 단일 진실. 크리 2종은 적용 단위(%p/배)로 환산해 표기한다
+	UFUNCTION(BlueprintPure, Category = "Employee Potential")
+	static FText GetPotentialOptionValueText(const FPotentialOptionLine& Option);
+
+	// 등급이 오를 확률(%) = 100 - 현재 등급 이하로 접히는 확률. 래칫·상한은 GetEffectiveRarityOdds 가 접는다
+	UFUNCTION(BlueprintPure, Category = "Employee Potential")
+	static float GetRarityUpgradeChancePercent(ELootBoxRarity CurrentRarity, ELootBoxRarity MaxAchievedRarity, ELootBoxRarity CardCeiling);
+
+	// 잠긴 줄 해금 문구 — 슬롯 매핑(별0~2:1줄 / 별3~5:2줄 / 별6+:3줄)의 경계 별 수
+	static FString GetLockedLineUnlockText(int32 LineIndex);
 
 	/**
 	 * 잠재능력 옵션 설명 생성 (예: "게임 프로젝트 +15%")

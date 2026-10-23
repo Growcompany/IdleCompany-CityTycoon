@@ -1,4 +1,4 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+// Fill out your copyright notice in the Description page of Project Settings.
 
 #pragma once
 
@@ -55,8 +55,9 @@ struct FOfflineGainsResult
 };
 
 // 6-2 정산 모달용 상세 델리게이트 (기존 OnOfflineGainsApplied 는 그대로 — CityAcquisition/A6 호환).
-// (TotalGained, OfflineSeconds, 빌딩별 내역, 12h 캡 도달 여부)
-DECLARE_MULTICAST_DELEGATE_FourParams(FOnOfflineGainsDetailed, float, float, const TArray<FOfflineGainEntry>&, bool);
+// (TotalGained, OfflineSeconds, 빌딩별 내역, 12h 캡 도달 여부, 벽돌 지급량)
+// 벽돌은 건물이 아니라 자원이라 Entries(FOfflineGainEntry=건물별 금고)에 끼울 수 없다 → 별도 파라미터.
+DECLARE_MULTICAST_DELEGATE_FiveParams(FOnOfflineGainsDetailed, float, float, const TArray<FOfflineGainEntry>&, bool, int64);
 
 UCLASS()
 class COMPANYGROWTHRENEWAL_API USaveLoadManager : public UGameInstanceSubsystem
@@ -81,12 +82,42 @@ public:
     bool HasPendingOfflineReport() const { return bHasPendingOfflineReport; }
     void ConsumePendingOfflineReport();  // MainMap UI 준비 완료 시 호출 → OnOfflineGainsDetailed 발화 후 소비
 
+    // 공장이 OnOfflineGainsApplied 수신 중에 호출 — 자기가 지급한 벽돌을 정산 보고에 싣는다.
+    // 생산율 계산이 액터 문 간격에 묶여 있어(세이브에 없음) 여기서 계산할 수 없다. 결과만 받는다.
+    void AddPendingOfflineBrickGain(int64 Bricks);
+
+    // 이 시간 미만의 부재는 재접속 오차로 보고 정산하지 않는다. 돈·벽돌이 같은 값을 봐야
+    // "벽돌만 있고 돈은 없는 정산 모달" 이 생기지 않는다.
+    static constexpr float MinOfflineSettleSeconds = 60.0f;
+
+    // 오프라인 정산 상한(초). 권위는 백엔드 서브시스템이지만, UI 가 그걸 직접 참조하면
+    // 백엔드 교체 때 UI 까지 따라 바뀐다 — 정산 도메인을 쥔 이쪽에서 중계한다.
+    static float GetOfflineCapSeconds();
+
     // [디버그/치트] 테스트용 정산 보고 주입 — 실제 표시 경로(TryShowOfflineReport→Consume→모달)를 그대로 태운다.
-    // 금고 잔액은 건드리지 않음(모달 표시 검증 전용). ShowOfflineReport 치트에서만 사용.
-    void DebugSetPendingOfflineReport(float InTotal, float InSeconds, const TArray<FOfflineGainEntry>& InEntries, bool bInCapReached);
+    // 이 함수는 금고 잔액을 건드리지 않는다 — 금고 충전은 호출처(ShowOfflineReport 치트)가 직접 한다. 이 치트에서만 사용.
+    void DebugSetPendingOfflineReport(float InTotal, float InSeconds, const TArray<FOfflineGainEntry>& InEntries, bool bInCapReached, int64 InBricks = 0);
 
     UFUNCTION(BlueprintCallable)
     bool SaveGameData();
+
+    // [치트 DevMode] 이 세션의 디스크 쓰기를 봉인한다. 인메모리 커밋은 그대로 성공하고 파일만 안 바뀐다 —
+    // 치트로 부풀린 상태가 세이브에 남지 않게 하는 게 목적이라 해제 수단을 두지 않는다(앱 재시작이 해제).
+    void LockSavesForDevMode();
+    bool IsSaveLockedForDevMode() const { return bDevModeSaveLocked; }
+
+    FString GetActiveSaveSlotName() const;
+
+    // 개발 로컬 모드에서는 마지막 저장 UTC를 기준으로 기존 오프라인 수익 계산을 실행한다.
+    void SettleLocalOfflineGains();
+
+    // 후보 경제 상태는 디스크 저장 성공 전 캐시/매니저에 적용하지 않는다.
+    bool CanCommitEquipmentTransaction() const;
+    bool BuildCurrentSnapshot(FGameSaveData& OutSnapshot);
+    // 이미 수집한 상태를 생산 재정산 없이 저장한다. 호출자가 live 상태 적용/실패 복원과 알림을 소유한다.
+    bool CommitPreparedSnapshot(const FGameSaveData& Snapshot);
+    bool CommitEquipmentSnapshot(const FGameSaveData& Candidate);
+    bool CommitEquipmentSnapshot(const FGameSaveData& Candidate, TFunctionRef<void()> ApplyEmployeeState, TFunctionRef<void()> PublishEmployeeChanges);
 
     // 고빈도 변경(강화 클릭/홀드 등)용 지연 저장 — 스로틀: 첫 요청 후 3초 뒤 1회 저장, 대기 중 재요청은 무시.
     // SaveGameData 는 동기 전체 직렬화+디스크 쓰기라 클릭마다 부르면 프레임 히칭 (레벨 전환/종료는 기존 즉시 저장이 커버)
@@ -127,7 +158,7 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Save|Tier")
     int32 CountBuildingsAtTier(int32 MinTier);
 
-    // 이 빌딩의 산업. 티어 로드맵의 강화 노출 필터에 쓴다 (FindBuildingSaveData 는 private).
+    // 이 빌딩의 산업. 건물별 패널 구성에 사용한다 (FindBuildingSaveData 는 private).
     UFUNCTION(BlueprintCallable, Category = "Save")
     ECompanyType GetBuildingCompanyType(int32 BuildingIndex);
 
@@ -156,6 +187,11 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "HQ Level")
     int32 GetIndustryRequiredHQLevel(ECompanyType CompanyType);
+
+    // 이번 빌드에 포함된 업종인가 (DT_CompanyInfo.bAvailableAtLaunch). 해금(IsIndustryUnlocked)과 다른 축 —
+    // 잠김은 갈망 티저로 보여주지만 미가용은 UI 에서 접는다.
+    UFUNCTION(BlueprintCallable, Category = "HQ Level")
+    bool IsIndustryAvailable(ECompanyType CompanyType);
 
     // ========== 회사 등급 시스템 ==========
 
@@ -186,6 +222,7 @@ public:
     // [dev 프리셋] 시드 중 PlayFab 리더보드 오염 차단.
     // 업로드만 막고 while(TryPromoteTitle()) 승격 루프는 유지한다 — 프리셋이 그 루프로 등급을 올린다.
     void SetLeaderboardUploadSuppressed(bool bSuppressed) { bLeaderboardUploadSuppressed = bSuppressed; }
+    bool IsLeaderboardUploadSuppressed() const { return bLeaderboardUploadSuppressed; }
 
     UPROPERTY(BlueprintAssignable, Category = "Company Title")
     FOnCompanyTitleChanged OnCompanyTitleChanged;
@@ -193,10 +230,10 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Debug")
     void DebugPrintSaveData()
     {
-        if (UGameplayStatics::DoesSaveGameExist(SaveSlotName, 0))
+        if (UGameplayStatics::DoesSaveGameExist(GetActiveSaveSlotName(), 0))
         {
             USaveGame_GameData* LoadedData = Cast<USaveGame_GameData>(
-                UGameplayStatics::LoadGameFromSlot(SaveSlotName, 0));
+                UGameplayStatics::LoadGameFromSlot(GetActiveSaveSlotName(), 0));
 
             if (LoadedData)
             {
@@ -224,7 +261,13 @@ public:
         }
     }
 private:
-    const FString SaveSlotName = TEXT("GameSlot");
+    bool bLocalOfflineGainsSettledAfterLoad = false;
+    FDateTime PendingLocalOfflineLastSaveUtc;
+
+    // 디스크 쓰기는 공유 커밋 범위 안에서만 호출한다. 외부 공개는 모든 live 상태 적용 후 수행한다.
+    bool PersistSnapshot(const FGameSaveData& Candidate);
+    void PublishPersistedSnapshot();
+    bool bSnapshotCommitInProgress = false;
 
     // 캐시된 세이브 데이터 (매번 로드하지 않기 위함)
     UPROPERTY()
@@ -237,6 +280,9 @@ private:
     // 데이터 초기화 중 세이브 억제 플래그 (DeleteGameInSlot 직후 캐시 부활 차단)
     bool bSaveSuppressed = false;
 
+    // DevMode 치트 세션 잠금 — PersistSnapshot 에서만 본다 (디스크 쓰기 유일 통로)
+    bool bDevModeSaveLocked = false;
+
     // 지연 저장 타이머 (RequestDeferredSave) — SaveGameData 성공 시 해제해 중복 저장 방지
     FTimerHandle DeferredSaveTimerHandle;
     static constexpr float DeferredSaveDelaySeconds = 3.0f;
@@ -247,6 +293,10 @@ private:
     float PendingOfflineSeconds = 0.0f;
     bool bPendingOfflineCapReached = false;
     TArray<FOfflineGainEntry> PendingOfflineEntries;
+
+    // 공장이 broadcast 중에 올린 벽돌 지급량. CalculateOfflineGains 진입부에서 리셋되고
+    // 보류 필드 대입(Total/Seconds/Entries)에는 섞이지 않으므로 broadcast 이후에도 살아남는다.
+    int64 PendingOfflineBricks = 0;
 
     // 타이머 콜백 (SaveGameData 는 bool 반환이라 직접 바인딩 불가)
     void OnDeferredSaveTimer();

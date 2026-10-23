@@ -3,8 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "CommonActivatableWidget.h"
-#include "Entity/Country/CountryActor.h"
+#include "UI/AnimatedActivatableWidget.h"
+#include "Enum/CountryType.h"
 #include "Enum/CompanyType.h"
 #include "Enum/ProductSortMode.h"
 #include "Data/WorldMapTypes.h"
@@ -19,8 +19,9 @@ class UCommonTextBlock;
 class UCommonButtonBase;
 class UCommonButtonGroupBase;
 class UButtonWidget;
-class UCloseButtonWidget;
+class UModalFrameWidget;
 class UItemCardSlotWidget;
+class UEmptyStateWidget;
 class UCountrySellRowWidget;
 class UStatRowWidget;
 class UWidgetSwitcher;
@@ -42,7 +43,7 @@ class UCountryMarketManager;
  *  - BackgroundBtn 클릭 → 모달 닫기
  */
 UCLASS()
-class COMPANYGROWTHRENEWAL_API UProductSellModalWidget : public UCommonActivatableWidget
+class COMPANYGROWTHRENEWAL_API UProductSellModalWidget : public UAnimatedActivatableWidget
 {
 	GENERATED_BODY()
 
@@ -58,8 +59,8 @@ protected:
 	virtual void NativeOnDeactivated() override;
 
 	// ── 헤더 ──
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UCloseButtonWidget> CloseButton;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UModalFrameWidget> ModalFrame;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UButton> BackgroundBtn;
@@ -102,7 +103,7 @@ protected:
 	TObjectPtr<UPanelWidget> InventoryContainer;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UCommonTextBlock> InventoryEmptyText;
+	TObjectPtr<UEmptyStateWidget> InventoryEmptyState;
 
 	// ── 좌측 하단: 선택된 물품 요약 (B안 — 카드 그리드 아래) ──
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))

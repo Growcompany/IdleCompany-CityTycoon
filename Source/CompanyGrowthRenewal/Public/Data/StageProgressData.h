@@ -7,21 +7,14 @@
 #include "Enum/ProjectTrait.h"
 #include "Enum/ProjectDirection.h"
 #include "Enum/ProductionDiscipline.h"
+#include "Table/MissionTable.h"
 #include "StageProgressData.generated.h"
 
+class UFatigueConfig;
+
 /**
- * 스트립 셀의 "목표 달성" 판정 ― 바 그린 전환과 달성 배지가 같은 문턱을 쓰게 하는 단일 출처.
- * 애니메이션 중인 표시값(Shown Pct)을 받으므로 FStepRoundData 멤버가 아니라 비율을 받는 자유 함수다.
- *
- * 0.999 인 이유 = 카운트업의 **조기 이탈**이다. OfficeMainWidget.cpp:299-301 의 NativeTick 이
- * IsNearlyEqual(Shown, Target, PctEps) 로 램프를 멈추고 PctEps 상한이 0.001 이라, Shown 은 Target 보다
- * 최대 0.001 뒤처진 채 정지할 수 있다. (FInterpConstantTo 자체는 Clamp(Dist,-Step,Step) 이라 남은 거리가
- * 한 스텝 이내면 Target 에 정확히 도달한다 ― 수렴 실패가 이유가 아니다.)
- * ⚠ 그 PctEps 상한 0.001 과 커플링돼 있다 ― 상한을 올리면 이 문턱도 같이 내려야 배지가 안 깨진다.
- *
- * 정합 보장 범위: 도장(권위 Pct)과 배지(표시 Pct)가 함께 서는 것은 **Pct >= 1.0** 에서다.
- * 최종 Pct 가 [0.999, 1.0) 에 안착하면 도장은 뜨는데 바/배지는 블루로 남을 수 있다(확률 극히 낮음).
- * 다만 배지와 바는 같은 bFull 을 공유하므로 둘 사이는 절대 갈라지지 않는다 ― 이 함수가 보장하는 것이 정확히 그것이다.
+ * 마일스톤 연출의 비율 판정. 보간 중인 표시값에도 반응하도록 0.001 오차를 허용한다.
+ * HUD의 목표 상태 색은 화면에 표시하는 정수 점수로 별도 판정해 점수와 색을 일치시킨다.
  */
 FORCEINLINE bool IsStageGoalMet(float Pct)
 {
@@ -117,17 +110,29 @@ struct FEstimateWorkerInput
 	// 이 직원만의 산출 배수 — 판이 시작되기 전에 이미 확정돼 판 내내 변하지 않는 항만 담는다(속도 배수·잠재큐브).
 	// 피로/슬랙처럼 판이 도는 동안 변하는 항은 시간 적분 모델이 필요해 여기 넣지 않는다.
 	float OutputScale = 1.0f;
+	float WorkSpeedFactor = 1.0f;
 
-	// 업무집중도 — 주 직능(DisciplinePoints argmax)이 강제 지정될 확률. 0 이면 순수 어피니티 가중 랜덤.
-	// 기여 경로가 이 확률만큼 배분을 주 직능으로 몰아주므로, 추정기도 같이 반영하지 않으면 예상↔실제가 갈린다.
-	float FocusChance = 0.0f;
+	// 개발 시작 시점의 직원 상태와 런타임 기여식에 들어가는 개인별 값.
+	float InitialFatigue = 0.0f;
+	int32 EffectiveStamina = 0;
+	int32 EffectiveComposure = 0;
+	float CriticalChance = 0.0f;
+	float CriticalMultiplier = 2.0f;
+	float RandomFactorSecondMoment = 1.f + (0.2f * 0.2f) / 3.f;
+	float BoltChanceScale = 1.0f;
+	float BoltDurationScale = 1.0f;
+	float FatiguePenaltyScale = 1.0f;
+	float FatigueGainScale = 1.0f;
+	bool bHasUnmodeledEquipmentEffects = false;
 };
 
 struct FProjectOutlookEstimate
 {
 	bool bIsValid = false;
+	bool bHasUnmodeledEquipmentEffects = false;
 	float ExpectedQuality = 0.5f;
 	bool bGateRisk = true;
+	// 표시·게이트에 함께 쓰는 보수적 점수: 평균에서 선택/히트 변동 한 표준편차를 뺀 값.
 	TArray<float> ExpectedDisciplineScores;
 };
 
@@ -144,6 +149,9 @@ USTRUCT(BlueprintType)
 struct FStageProgressData
 {
 	GENERATED_BODY()
+
+	UPROPERTY(SaveGame)
+	FGuid EquipmentAttemptId;
 
 	// 프로젝트 번호 (몇 번째 프로젝트인지, 1부터 시작)
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Stage")
@@ -224,10 +232,6 @@ struct FStageProgressData
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "GDS")
 	float StepDuration = 0.0f;
 
-	// 착수 순간 트렌드 소재 매칭 여부 — 운영 피크 x1.5 (착수 후 트렌드가 바뀌어도 유지)
-	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "GDS")
-	bool bTrendMatched = false;
-
 	// 리뷰 총점 /40 (개발 종료 시 계산, InHouse 프로젝트형만. 0=미계산) — 운영 피크에 ReviewLeverage 가중 주입
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "GDS")
 	int32 ReviewScore = 0;
@@ -235,6 +239,17 @@ struct FStageProgressData
 	// 비평가 4명 개별 점수 (각 1~10)
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "GDS")
 	TArray<int32> CriticScores;
+
+	// 결과 창에 공개한 전리품. 출시를 확정할 때 이 배열을 그대로 지급한다.
+	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Launch")
+	TArray<FMissionReward> PendingLaunchLoot;
+
+	// 이 프로젝트 개발 중 참여 직원들에게 실제 적립된 개인 경험치 합계. 추가 개발도 합산한다.
+	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Launch")
+	float EarnedExperience = 0.0f;
+
+	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Launch")
+	bool bLaunchLootPrepared = false;
 
 	// 이 (장르,소재) 조합의 첫 발견 여부 — 리뷰 발표에서 "첫 발견!" 배지
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "GDS")
@@ -364,12 +379,15 @@ struct FStageProgressData
 
 	/**
 	 * 현재 로스터로 이 프로젝트를 했을 때의 직능별 예상 점수, 품질, 출시 게이트 전망.
-	 * 산식 출처 = EmployeeBehaviorComponent 기여 경로. 몬테카를로가 아니라 기댓값 닫힌형이다.
-	 * @param PerWorkerOutputScale 전원에게 똑같이 걸리는 산출 배수(건물 특성 등). 직원마다 다른 항은 FEstimateWorkerInput::OutputScale.
+	 * 산식 출처 = EmployeeBehaviorComponent 기여 경로. 피로 설정을 전달하면 직원별 가동 시간과
+	 * 선택/히트 변동을 반영한 보수적 단일 전망치를 반환한다. 설정이 없으면 순수 산식 검산 모드다.
+	 * @param PerWorkerOutputScale 전원에게 똑같이 걸리는 산출 배수(건물 특성·ProjectYield 등). 직원마다 다른 항은 FEstimateWorkerInput::OutputScale.
+	 * @param bSuppressEquipmentDown 하드 게이트 미션에서는 실제 직원이 졸음·이탈을 시작하지 않는다.
 	 */
 	static FProjectOutlookEstimate EstimateProjectOutlook(
 		const TArray<FEstimateWorkerInput>& Workers, const TArray<int32>& Weights,
-		int32 R1, int32 R2, int32 R3, float DurationSec, float PerWorkerOutputScale);
+		int32 R1, int32 R2, int32 R3, float DurationSec, float PerWorkerOutputScale,
+		const UFatigueConfig* FatigueConfig = nullptr, bool bSuppressEquipmentDown = false);
 
 	/**
 	 * 현재 Step 데이터 가져오기

@@ -7,10 +7,13 @@
 #include "Office/DecorationTypes.h"
 #include "Table/DecorationCardTable.h"
 #include "Data/BuildingSaveData.h"
+#include "Data/CloudEconomyData.h"
 #include "Data/EmployeeTypes.h"
+#include "Enum/OfficeExpansionType.h"
 #include "OfficeManager.generated.h"
 
 class ADecorationActor;
+class UCloudEconomySubsystem;
 class AWorkstationActorBase;
 class UWallSelectionWidget;
 class AOfficeCameraPawn;
@@ -113,7 +116,7 @@ public:
 
 	/** 좌석 해제 + 벤치 복귀(bIsAssigned만 클리어) + 카운터 감소 + 워커 액터 제거 + 저장 */
 	UFUNCTION(BlueprintCallable, Category = "Office|Workstation")
-	bool UnseatEmployee(AWorkstationActorBase* Workstation, int32 EmployeeID);
+	bool UnseatEmployee(AWorkstationActorBase* Workstation, int32 EmployeeID, bool bShouldSave = true, bool bShouldBroadcast = true);
 
 	/** 벤치 후보 정렬 정책 — 종합(★ 반영) 내림차순, 동률은 입력 순서 유지. 순수 함수라 테스트 대상. */
 	static void SortBenchByOverallDesc(TArray<FEmployeeInstance>& InOutBench);
@@ -202,6 +205,25 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Office|Decoration")
 	const TArray<ADecorationActor*>& GetPlacedDecorations() const { return PlacedDecorations; }
 
+	// ========== 서버 권위 확장 (office.expand) ==========
+
+	/**
+	 * `/wallet/spend`(office.expand) -> **성공 응답 뒤에만** 확장 + 저장.
+	 * 확장은 타일·내비를 재구성해 되돌릴 수 없으므로 서버 실패 시 크기가 그대로여야 한다.
+	 * 차감은 서버가 하고 응답 지갑이 콜백 **전에** 로컬에 적용된다 ― 로컬에서 또 깎으면 이중 차감이다.
+	 * 저장 시점도 응답 뒤다(구 경로는 `SpendResource(bShouldSave=true)` 가 겸했다).
+	 */
+	void RequestExpand(EOfficeExpandDirection Direction, FOnCloudEconomyOpDone Done);
+
+	/** `/wallet/spend` reason ― spendRules.json 과 바이트 단위로 같아야 한다(구 이름 office.upgrade 는 폐기) */
+	static FName GetExpandSpendReason();
+
+	/** 중복 클릭 차단 키 ― 방향별로 따로 잠근다(좌 확장 대기가 우 확장을 막으면 안 된다) */
+	static FName ExpandActionKey(EOfficeExpandDirection Direction);
+
+	/** 현재 확장 비용(AOfficeInterior 가 단일 진실). 인테리어가 없으면 0 */
+	int64 GetExpandCost(EOfficeExpandDirection Direction) const;
+
 private:
 	// ========== 내부 상태 ==========
 
@@ -252,4 +274,13 @@ private:
 
 	// Building 데이터 접근 헬퍼
 	FOfficeSaveData* GetCurrentOfficeSaveData() const;
+
+	// 캐시가 비어 있으면(오피스 진입 직후) 액터를 다시 찾는다
+	AOfficeInterior* ResolveOfficeInterior() const;
+
+	UCloudEconomySubsystem* GetCloudEconomy() const;
+
+	// 확장의 유일한 종료 지점 — 확장·저장·pending 해제·Done 호출을 한곳에서 한다
+	void FinishExpand(EOfficeExpandDirection Direction, bool bOk, FName FailureCode, FName ActionKey,
+		FOnCloudEconomyOpDone Done);
 };

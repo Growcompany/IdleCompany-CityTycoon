@@ -83,6 +83,9 @@ private:
 	bool bIsPolling = false;
 	FTimerHandle PollingTimerHandle;
 	FString CurrentPollingChannel = TEXT("global");
+	bool bCaptureIsolationEvaluated = false;
+	bool bSuppressHttpRequestsForCapture = false;
+	bool bCaptureIsolationMarkerLogged = false;
 
 	// 최대 캐시 메시지 수
 	int32 MaxCachedMessages = 100;
@@ -95,14 +98,34 @@ private:
 	bool bConnectionHealthy = true;
 	static constexpr int32 FetchFailureThreshold = 3;
 
+	// Firebase idToken 대기 로그를 폴링마다 찍지 않게 하는 1회 래치
+	bool bUnauthenticatedLogged = false;
+
+	// 401 재시도용 직전 전송 바디. 재시도의 재시도는 막는다
+
 	// Config에서 Firebase URL 로드
 	void LoadFirebaseConfig();
 
+	// 인증 준비 상태면 idToken, 아니면 빈 문자열(경고 1회)
+	FString AcquireIdTokenOrLogOnce();
+
+	// 전송 요청 발사. 반환값은 사용한 URL
+	FString DispatchSendRequest(const FString& RequestBody, bool bAllowRetry);
+
+	// 서버 401 → 토큰 갱신/재교환 위임, 필요하면 1회 재전송 예약
+	void HandleAuthRejection(const FString& ResponseBody, const FString& RetryBody, bool bAllowResend);
+
+	// /chat/send 응답의 서버 createdAt 으로 폴링 커서를 전진. 로컬 시계는 커서에 쓰지 않는다
+	void AdvanceCursorFromSendResponse(const FString& ResponseBody);
+
 	// 폴링 타이머 콜백
 	void PollMessages();
+	bool ShouldSuppressHttpRequests();
+	void ProcessChatHttpRequest(const TSharedRef<IHttpRequest, ESPMode::ThreadSafe>& HttpRequest);
 
 	// HTTP 응답 핸들러
-	void OnSendMessageResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
+	void OnSendMessageResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful,
+		const FString& SentBody, bool bAllowResend);
 	void OnFetchMessagesResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful);
 
 	// 폴링 성공/실패 집계

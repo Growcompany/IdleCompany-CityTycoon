@@ -5,6 +5,8 @@
 #include "Components/TextBlock.h"
 #include "Components/Image.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/Texture2D.h"
+#include "Manager/SettingsManagerSubsystem.h"
 
 // 파일 고유 네임스페이스 — 익명 ns 는 유니티 빌드에서 타 cpp 상수와 충돌 (2026-07-11 실측)
 namespace MiniCardFx
@@ -17,6 +19,7 @@ namespace MiniCardFx
 	constexpr float ShineTravel = 700.f; // 카드 대각 스윕 거리 (560 폭 + 여유)
 	constexpr int32 GlintTierMin = 2;    // 레어+
 	constexpr int32 HaloTierMin = 3;     // 에픽+
+
 }
 
 // 티어 = enum 서수 (센터 TierOf 와 동일 매핑) — 재정렬하면 여기서 걸린다
@@ -30,7 +33,6 @@ void UEmployeeIdCardMiniWidget::SetCardData(const FGachaResultData& Result, int3
 	RarityTier = static_cast<int32>(Result.PotentialRarity);
 	// 동시 생성 카드들의 광택 동기 스윕(와이퍼 룩) 방지 — 사번 기반 위상 분산 (리셋 겸용)
 	FxTime = IdOrdinal * 0.27f;
-
 	if (BandLabel)
 	{
 		BandLabel->SetText(FText::FromString(FString::Printf(TEXT("ID NO.%03d"), IdOrdinal)));
@@ -41,8 +43,10 @@ void UEmployeeIdCardMiniWidget::SetCardData(const FGachaResultData& Result, int3
 	}
 	if (DeptText)
 	{
-		DeptText->SetText(FText::FromString(FString::Printf(TEXT("%s · %s"),
-			*DeptDisplayName.ToString(), *RankDisplayName)));
+		// 직급이 비면 구분점만 남아 "개발 · " 이 된다 — 부서만 찍는다.
+		DeptText->SetText(FText::FromString(RankDisplayName.IsEmpty()
+			? DeptDisplayName.ToString()
+			: FString::Printf(TEXT("%s · %s"), *DeptDisplayName.ToString(), *RankDisplayName)));
 	}
 	if (RarityText)
 	{
@@ -76,10 +80,21 @@ void UEmployeeIdCardMiniWidget::SetPhotoMaterial(UMaterialInstanceDynamic* MID)
 	}
 }
 
+bool UEmployeeIdCardMiniWidget::SetPhotoTexture(UTexture2D* Texture)
+{
+	if (PhotoImage && Texture)
+	{
+		PhotoImage->SetBrushFromTexture(Texture, true);
+		PhotoImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+		return true;
+	}
+	return false;
+}
+
 void UEmployeeIdCardMiniWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
-
+	if (USettingsManagerSubsystem::IsReduceMotion(this)) { return; }
 	FxTime += InDeltaTime;
 
 	if (CardShine && RarityTier >= MiniCardFx::GlintTierMin)

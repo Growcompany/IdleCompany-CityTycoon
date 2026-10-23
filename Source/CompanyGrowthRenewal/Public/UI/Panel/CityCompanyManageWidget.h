@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "CommonActivatableWidget.h"
+#include "Engine/TimerHandle.h"
 #include "Utils/FWidgetAnimationUtils.h"
 #include "CityCompanyManageWidget.generated.h"
 
@@ -13,7 +14,7 @@ class UCanvasPanel;
 class URadialProgressWidget;
 class UButton;
 class UButtonWidget;
-class UCloseButtonWidget;
+class UPanelHeaderWidget;
 class UCityAcquisitionManager;
 class UCoinFlyoutContainerWidget;
 class UTexture2D;
@@ -30,17 +31,34 @@ class COMPANYGROWTHRENEWAL_API UCityCompanyManageWidget : public UCommonActivata
 	GENERATED_BODY()
 
 public:
+	UWidget* GetCloseButtonWidget() const;
 	// Push 직후 호출 — 회사 키 세팅 + UI 채우기
 	void ConfigureForCompany(int32 InKey);
 
 	// M20 미션 가이드 — [철거] 버튼 하이라이트 타겟
 	UWidget* GetDemolishButtonWidget() const;
 
+	// 튜토리얼 M26 — [보석] 즉시 완료 버튼 (고갈이면 Collapsed 라 가이드가 알아서 비켜 간다)
+	UWidget* GetSkipRecoveryButtonWidget() const;
+
+	// 이 패널이 띄운 확인 모달(PromptStack 최상단 UConfirmCancelWidget)의 [확인] — 풀 재사용 위젯이라 아직 이 패널 소유일 때만 반환
+	UWidget* GetSkipConfirmButtonWidget() const;
+	UWidget* GetDemolishConfirmButtonWidget() const;
+
+	// 가이드가 "지목한 회사의 패널인가" 를 판정 — 다른 회사 패널이면 [닫기]부터 안내한다
+	int32 GetCompanyKey() const { return CompanyKey; }
+
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 	virtual void NativeOnActivated() override;
 	virtual void NativeOnDeactivated() override;
+
+	// 최초 진입 코치마크 (DT_PanelIntro PanelKey="CityCompanyManage")
+	void TryPlayPanelIntro();
+	void HandlePanelIntroFinished();
+	FTimerHandle PanelIntroTimer;
+	TWeakObjectPtr<class UPanelIntroOverlayWidget> PanelIntroOverlay;
 	// 회수율 부드러운 채움 — TargetPct 로 DisplayedPct 를 매 프레임 lerp + 누적 칩 펀치 스케일
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
@@ -48,7 +66,7 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UImage* Image_CompanyIcon;
 
-	// 헤더 회사명 타이틀 (plain UTextBlock — WBP에서 폰트 직접 지정)
+	// 본문 회사명 (plain UTextBlock — WBP에서 폰트 직접 지정)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UTextBlock* Text_CompanyName;
 
@@ -109,9 +127,9 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	class UCostActionButtonWidget* Button_SkipRecovery;
 
-	// 닫기 X 버튼
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UCloseButtonWidget* UIE_CloseButton;
+	// 공통 제목·도움말·닫기 영역
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UPanelHeaderWidget> PanelHeader;
 
 	// 배경 딤 버튼 — 패널 밖(딤) 클릭 시 닫기. plain UButton (ProductSellModal/BuildModal 딤 패턴과 동일).
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -127,6 +145,13 @@ private:
 	// [보석] 즉시 완료 — 재화를 쓰는 행동이라 한 번 확인받는다
 	void HandleSkipRecovery();
 	void HandleSkipConfirmed();
+
+	UWidget* GetPendingConfirmButton(bool bWantSkip) const;
+	TWeakObjectPtr<class UConfirmCancelWidget> PendingConfirm;
+	bool bPendingConfirmIsSkip = false;
+
+	// 경제 잠금/해제 — 해제 시 서버값으로 정정된 보석 잔액으로 비용 배지 재계산
+	void HandleEconomyReady(bool bReady);
 
 	UFUNCTION()
 	void HandleCloseClicked();

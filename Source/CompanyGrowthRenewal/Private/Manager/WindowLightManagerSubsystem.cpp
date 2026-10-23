@@ -1,8 +1,10 @@
 #include "Manager/WindowLightManagerSubsystem.h"
-#include "Kismet/KismetMaterialLibrary.h"
+#include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
 #include "Materials/MaterialParameterCollection.h"
+#include "Materials/MaterialParameterCollectionInstance.h"
 #include "TimeCycle/TimeCycleManager.h"
+#include "UObject/SoftObjectPtr.h"
 
 UWindowLightManagerSubsystem::UWindowLightManagerSubsystem()
 {
@@ -25,8 +27,9 @@ void UWindowLightManagerSubsystem::Initialize(FSubsystemCollectionBase& Collecti
 		CachedTimeCycleManager = Cast<ATimeCycleManager>(
 			UGameplayStatics::GetActorOfClass(World, ATimeCycleManager::StaticClass())
 		);
+		BindVisualTimeManager();
 
-		if (!CachedTimeCycleManager)
+		if (!CachedTimeCycleManager.IsValid())
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[WindowLightManager] TimeCycleManager not found at Initialize!"));
 		}
@@ -44,9 +47,7 @@ void UWindowLightManagerSubsystem::LoadMPC()
 	// 런타임에 MPC 로드 (ConstructorHelpers 대신)
 	const FString MPCPath = TEXT("/Game/CompanyGrowth/Resources/Materials/MainMap/MPC_WindowLight.MPC_WindowLight");
 	
-	WindowLightMPC = Cast<UMaterialParameterCollection>(
-		StaticLoadObject(UMaterialParameterCollection::StaticClass(), nullptr, *MPCPath)
-	);
+	WindowLightMPC = TSoftObjectPtr<UMaterialParameterCollection>(FSoftObjectPath(MPCPath)).LoadSynchronous();
 
 	if (!WindowLightMPC)
 	{
@@ -60,7 +61,15 @@ void UWindowLightManagerSubsystem::LoadMPC()
 
 void UWindowLightManagerSubsystem::Deinitialize()
 {
+	if (ATimeCycleManager* BoundManager = BoundVisualTimeManager.Get())
+	{
+		BoundManager->OnVisualTimeChanged.RemoveDynamic(this, &UWindowLightManagerSubsystem::HandleVisualTimeChanged);
+	}
+	BoundVisualTimeManager.Reset();
 	bIsInitialized = false;
+	bHasAppliedMPCParameter = false;
+	CachedTimeCycleManager.Reset();
+	WindowLightMPC = nullptr;
 	
 	Super::Deinitialize();
 	UE_LOG(LogTemp, Log, TEXT("[WindowLightManager] Deinitialized"));
@@ -84,16 +93,16 @@ TStatId UWindowLightManagerSubsystem::GetStatId() const
 
 void UWindowLightManagerSubsystem::Tick(float DeltaTime)
 {
-	// Tick 간격 제어
+	// 첫 시계 동기화는 즉시 처리하고, 시계 재탐색과 이후 변경 감지는 10Hz로 제한한다.
 	TickAccumulator += DeltaTime;
-	if (TickAccumulator < TickInterval)
+	if (TickAccumulator < TickInterval && (bHasAppliedMPCParameter || !CachedTimeCycleManager.IsValid()))
 	{
 		return;
 	}
 	TickAccumulator = 0.0f;
 
 	// TimeCycleManager 캐싱 안 되어 있으면 다시 찾기
-	if (!CachedTimeCycleManager)
+	if (!CachedTimeCycleManager.IsValid())
 	{
 		UWorld* World = GetWorld();
 		if (World)
@@ -103,26 +112,58 @@ void UWindowLightManagerSubsystem::Tick(float DeltaTime)
 			);
 		}
 
-		if (!CachedTimeCycleManager)
+		if (!CachedTimeCycleManager.IsValid())
 		{
 			return;
 		}
 		
+		bHasAppliedMPCParameter = false;
 		UE_LOG(LogTemp, Log, TEXT("[WindowLightManager] TimeCycleManager found in Tick"));
+	}
+	BindVisualTimeManager();
+	RefreshNightIntensity();
+}
+
+void UWindowLightManagerSubsystem::BindVisualTimeManager()
+{
+	ATimeCycleManager* Manager = CachedTimeCycleManager.Get();
+	if (BoundVisualTimeManager.Get() == Manager) { return; }
+	if (ATimeCycleManager* PreviousManager = BoundVisualTimeManager.Get())
+	{
+		PreviousManager->OnVisualTimeChanged.RemoveDynamic(this, &UWindowLightManagerSubsystem::HandleVisualTimeChanged);
+	}
+	BoundVisualTimeManager = Manager;
+	if (Manager)
+	{
+		Manager->OnVisualTimeChanged.AddUniqueDynamic(this, &UWindowLightManagerSubsystem::HandleVisualTimeChanged);
+	}
+}
+
+void UWindowLightManagerSubsystem::HandleVisualTimeChanged()
+{
+	RefreshNightIntensity();
+}
+
+void UWindowLightManagerSubsystem::RefreshNightIntensity()
+{
+	// Subsystems initialize before actors; wait until the clock has applied its start time.
+	if (!CachedTimeCycleManager.IsValid() || !CachedTimeCycleManager->HasActorBegunPlay())
+	{
+		return;
 	}
 
 	// 캐싱된 TimeCycleManager에서 시간 가져오기
-	FTimeCycleCode CurrentTime = CachedTimeCycleManager->GetCurrentTime();
+	FTimeCycleCode CurrentTime = CachedTimeCycleManager->GetVisualTime();
 	float CurrentHour = CurrentTime.Hours + (CurrentTime.Minutes / 60.0f);
 
 	// Night Intensity 계산
 	float NewIntensity = CalculateNightIntensity(CurrentHour);
 
 	// 값이 변경되었을 때만 MPC 업데이트
-	if (!FMath::IsNearlyEqual(CurrentNightIntensity, NewIntensity, 0.01f))
+	if (!bHasAppliedMPCParameter || !FMath::IsNearlyEqual(CurrentNightIntensity, NewIntensity, 0.01f))
 	{
 		CurrentNightIntensity = NewIntensity;
-		UpdateMPCParameter();
+		bHasAppliedMPCParameter = UpdateMPCParameter();
 	}
 }
 
@@ -140,7 +181,7 @@ float UWindowLightManagerSubsystem::CalculateNightIntensity(float CurrentHour) c
 	// 밤 경계는 시계(단일 소스)에서 파생. 매니저 없으면 안전 폴백.
 	float SunRiseHour = 7.0f;
 	float SunSetHour = 20.0f;
-	if (CachedTimeCycleManager)
+	if (CachedTimeCycleManager.IsValid())
 	{
 		const FTimeCycleCode RiseCode = CachedTimeCycleManager->GetSunRiseTime();
 		const FTimeCycleCode SetCode = CachedTimeCycleManager->GetSunSetTime();
@@ -182,19 +223,15 @@ float UWindowLightManagerSubsystem::CalculateNightIntensity(float CurrentHour) c
 	}
 }
 
-void UWindowLightManagerSubsystem::UpdateMPCParameter()
+bool UWindowLightManagerSubsystem::UpdateMPCParameter()
 {
 	UWorld* World = GetWorld();
 	if (!World || !WindowLightMPC)
 	{
-		return;
+		return false;
 	}
 
 	// MPC에 Night_Intensity 설정 (한 번 호출로 모든 머티리얼에 적용)
-	UKismetMaterialLibrary::SetScalarParameterValue(
-		World,
-		WindowLightMPC,
-		TEXT("Night_Intensity"),
-		CurrentNightIntensity
-	);
+	UMaterialParameterCollectionInstance* CollectionInstance = World->GetParameterCollectionInstance(WindowLightMPC);
+	return CollectionInstance && CollectionInstance->SetScalarParameterValue(TEXT("Night_Intensity"), CurrentNightIntensity);
 }

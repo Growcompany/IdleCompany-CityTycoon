@@ -13,6 +13,8 @@ enum class EShopTab : uint8
 	Diamond     UMETA(DisplayName = "다이아 상점"),
 	Mileage     UMETA(DisplayName = "마일리지 상점"),
 	Event       UMETA(DisplayName = "이벤트 상점"),
+	// 다이아 번들. 새 값은 항상 Count 바로 앞에 — 중간 삽입은 DT 저장값을 밀어버린다
+	Package     UMETA(DisplayName = "패키지 상점"),
 	Count UMETA(Hidden)
 };
 

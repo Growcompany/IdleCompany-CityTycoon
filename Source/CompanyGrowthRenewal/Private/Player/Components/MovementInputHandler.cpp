@@ -14,6 +14,54 @@
 #include "Player/Components/PlacementHandler.h"
 #include "Util/CoordinateUtils.h"
 #include "Input/InputPriorities.h"
+#include "Office/OfficeRecruitmentFlowSubsystem.h"
+#include "Player/CameraViewBounds.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Engine/LocalPlayer.h"
+
+namespace
+{
+    void GetBoundaryProjectionContext(const APlayerCamera* CameraPawn, FIntRect& OutRect,
+        EAspectRatioAxisConstraint& OutAxisConstraint)
+    {
+        int32 Width = 1920;
+        int32 Height = 1080;
+        const APlayerController* ViewController = CameraPawn ? Cast<APlayerController>(CameraPawn->GetController()) : nullptr;
+        const ULocalPlayer* LocalPlayer = ViewController ? ViewController->GetLocalPlayer() : nullptr;
+        if (ViewController)
+        {
+            int32 ViewWidth = 0;
+            int32 ViewHeight = 0;
+            ViewController->GetViewportSize(ViewWidth, ViewHeight);
+            if (ViewWidth > 0 && ViewHeight > 0)
+            {
+                Width = ViewWidth;
+                Height = ViewHeight;
+            }
+        }
+        OutRect = FIntRect(0, 0, Width, Height);
+        OutAxisConstraint = LocalPlayer ? LocalPlayer->AspectRatioAxisConstraint.GetValue()
+            : GetDefault<ULocalPlayer>()->AspectRatioAxisConstraint.GetValue();
+    }
+
+    FVector ClampLocationInBounds(const FVector& WorldLocation, const FBox2D& Bounds, const FTransform& Transform)
+    {
+        FVector LocalLocation = Transform.InverseTransformPosition(WorldLocation);
+        LocalLocation.X = FMath::Clamp(LocalLocation.X, Bounds.Min.X, Bounds.Max.X);
+        LocalLocation.Y = FMath::Clamp(LocalLocation.Y, Bounds.Min.Y, Bounds.Max.Y);
+        FVector BoundedLocation = Transform.TransformPosition(LocalLocation);
+        BoundedLocation.Z = WorldLocation.Z;
+        return BoundedLocation;
+    }
+
+    bool IsRecruitmentInputBlocked(const UObject* Context)
+    {
+        const UWorld* InputWorld = Context ? Context->GetWorld() : nullptr;
+        const UOfficeRecruitmentFlowSubsystem* RecruitmentFlow = InputWorld
+            ? InputWorld->GetSubsystem<UOfficeRecruitmentFlowSubsystem>() : nullptr;
+        return RecruitmentFlow && RecruitmentFlow->IsBusy();
+    }
+}
 
 // Sets default values for this component's properties
 UMovementInputHandler::UMovementInputHandler()
@@ -52,6 +100,212 @@ void UMovementInputHandler::Initialize(UFloatingPawnMovement* InMovement)
 
     Owner = Cast<APlayerCamera>(GetOwner());
     UE_LOG(LogTemp, Log, TEXT("[UMovementInputHandler] Initialize"));
+}
+
+void UMovementInputHandler::SetBoundaryCenterWorld(const FVector& InBoundaryCenterWorld)
+{
+    BoundaryCenterWorld = InBoundaryCenterWorld;
+}
+
+FVector UMovementInputHandler::CalculatePlanarBoundaryOffset(const FVector& WorldLocation) const
+{
+    FVector BoundaryOffset = WorldLocation - BoundaryCenterWorld;
+    BoundaryOffset.Z = 0.f;
+    return BoundaryOffset;
+}
+
+bool UMovementInputHandler::SetPlanarMovementBounds(const FBox2D& InLocalBounds, const FTransform& InBoundsTransform,
+    bool bInConstrainCameraView)
+{
+    const FVector BoundsScale = InBoundsTransform.GetScale3D();
+    if (!InLocalBounds.bIsValid
+        || !FMath::IsFinite(InLocalBounds.Min.X) || !FMath::IsFinite(InLocalBounds.Min.Y)
+        || !FMath::IsFinite(InLocalBounds.Max.X) || !FMath::IsFinite(InLocalBounds.Max.Y)
+        || InLocalBounds.Min.X > InLocalBounds.Max.X || InLocalBounds.Min.Y > InLocalBounds.Max.Y
+        || InBoundsTransform.ContainsNaN()
+        || FMath::IsNearlyZero(BoundsScale.X) || FMath::IsNearlyZero(BoundsScale.Y)
+        || FMath::IsNearlyZero(BoundsScale.Z)
+        || (bInConstrainCameraView && (BoundsScale.Z < 0.f
+            || !InBoundsTransform.GetRotation().GetUpVector().Equals(FVector::UpVector, 0.0001f))))
+    {
+        return false;
+    }
+    PlanarMovementBounds = InLocalBounds;
+    MovementBoundsTransform = InBoundsTransform;
+    bConstrainCameraView = bInConstrainCameraView;
+    bReportedViewBoundsFailure = false;
+    return true;
+}
+
+FMinimalViewInfo UMovementInputHandler::BuildBoundaryView(const FVector& PawnLocation, float Zoom, float ProjectionOffset) const
+{
+    FMinimalViewInfo View;
+    Owner->CameraComponent->GetCameraView(0.f, View);
+    const FZoomRigSample Rig = EvaluateZoomRig(Zoom);
+    const FQuat PawnRotation = Owner->GetActorQuat();
+    const FQuat RigRotation = PawnRotation * FRotator(Rig.PitchDeg, 0.f, 0.f).Quaternion();
+    const FVector ArmOrigin = PawnLocation + PawnRotation.RotateVector(Owner->SpringArm->GetRelativeLocation());
+    const FVector SocketLocation = ArmOrigin + Owner->SpringArm->TargetOffset
+        + RigRotation.RotateVector(Owner->SpringArm->SocketOffset - FVector(Rig.ArmLength, 0.f, 0.f));
+    const FTransform CameraTransform = Owner->CameraComponent->GetRelativeTransform() * FTransform(RigRotation, SocketLocation);
+    View.Location = CameraTransform.GetLocation();
+    View.Rotation = CameraTransform.Rotator();
+    View.FOV = Rig.HorizontalFOVDeg;
+    View.OffCenterProjectionOffset.X = ProjectionOffset;
+    return View;
+}
+
+bool UMovementInputHandler::GetCameraMovementBounds(const FVector& PawnLocation, float Zoom,
+    float ProjectionOffset, FBox2D& OutBounds) const
+{
+    if (!PlanarMovementBounds.bIsValid) return false;
+    OutBounds = PlanarMovementBounds;
+    if (!bConstrainCameraView) return true;
+    if (!Owner || !Owner->CameraComponent || !Owner->SpringArm) return false;
+
+    FIntRect ViewRect;
+    EAspectRatioAxisConstraint AxisConstraint;
+    GetBoundaryProjectionContext(Owner, ViewRect, AxisConstraint);
+    FBox2D Footprint;
+    FBox2D Translation;
+    if (!CameraViewBounds::GetGroundFootprint(BuildBoundaryView(PawnLocation, Zoom, ProjectionOffset),
+        ViewRect, AxisConstraint, MovementBoundsTransform, Footprint)
+        || !CameraViewBounds::GetTranslationBounds(PlanarMovementBounds, Footprint, Translation)) return false;
+
+    const FVector2D LocalPivot(MovementBoundsTransform.InverseTransformPosition(PawnLocation));
+    const FVector2D Minimum = FVector2D::Max(PlanarMovementBounds.Min, LocalPivot + Translation.Min);
+    const FVector2D Maximum = FVector2D::Min(PlanarMovementBounds.Max, LocalPivot + Translation.Max);
+    if (Minimum.X > Maximum.X || Minimum.Y > Maximum.Y) return false;
+    OutBounds = FBox2D(Minimum, Maximum);
+    return true;
+}
+
+bool UMovementInputHandler::TryConstrainCameraPose(FVector& InOutLocation, float& InOutZoom, float ProjectionOffset) const
+{
+    if (!bConstrainCameraView)
+    {
+        InOutLocation = ClampToMovementBoundary(InOutLocation);
+        return true;
+    }
+    const float RequestedZoom = FMath::Clamp(InOutZoom, 0.f, MaximumZoomValue);
+    FBox2D AllowedBounds;
+    float AllowedZoom = RequestedZoom;
+    if (!GetCameraMovementBounds(InOutLocation, AllowedZoom, ProjectionOffset, AllowedBounds))
+    {
+        // Curves can change pitch and FOV non-monotonically; refine only the first fitting interval.
+        bool bFound = false;
+        for (int32 Step = 1; Step <= 32; ++Step)
+        {
+            const float Candidate = RequestedZoom * (1.f - Step / 32.f);
+            if (!GetCameraMovementBounds(InOutLocation, Candidate, ProjectionOffset, AllowedBounds)) continue;
+            float Fit = Candidate;
+            float Outside = RequestedZoom * (1.f - (Step - 1) / 32.f);
+            for (int32 Refine = 0; Refine < 8; ++Refine)
+            {
+                const float Midpoint = (Fit + Outside) * 0.5f;
+                FBox2D TrialBounds;
+                if (GetCameraMovementBounds(InOutLocation, Midpoint, ProjectionOffset, TrialBounds))
+                {
+                    Fit = Midpoint;
+                    AllowedBounds = TrialBounds;
+                }
+                else Outside = Midpoint;
+            }
+            AllowedZoom = Fit;
+            bFound = true;
+            break;
+        }
+        if (!bFound) return false;
+    }
+    InOutZoom = AllowedZoom;
+    InOutLocation = ClampLocationInBounds(InOutLocation, AllowedBounds, MovementBoundsTransform);
+    return true;
+}
+
+void UMovementInputHandler::ConstrainCameraView(FMinimalViewInfo& InOutView) const
+{
+    if (!bConstrainCameraView || !Owner) return;
+    FIntRect ViewRect;
+    EAspectRatioAxisConstraint AxisConstraint;
+    GetBoundaryProjectionContext(Owner, ViewRect, AxisConstraint);
+    const auto TryCorrectView = [&](FMinimalViewInfo& View)
+    {
+        FBox2D Footprint;
+        FBox2D Translation;
+        if (!CameraViewBounds::GetGroundFootprint(View, ViewRect, AxisConstraint, MovementBoundsTransform, Footprint)
+            || !CameraViewBounds::GetTranslationBounds(PlanarMovementBounds, Footprint, Translation)) return false;
+        const FVector LocalDelta(FMath::Clamp(0.0, Translation.Min.X, Translation.Max.X),
+            FMath::Clamp(0.0, Translation.Min.Y, Translation.Max.Y), 0.0);
+        View.Location += MovementBoundsTransform.TransformVector(LocalDelta);
+        return true;
+    };
+
+    if (TryCorrectView(InOutView))
+    {
+        bReportedViewBoundsFailure = false;
+        return;
+    }
+
+    // Rotation lag can momentarily need more room than either endpoint. Use the safe target rig in that frame.
+    FVector SafeLocation = Owner->GetActorLocation();
+    float SafeZoom = ZoomValue;
+    if (TryConstrainCameraPose(SafeLocation, SafeZoom, Owner->HorizontalProjectionOffset))
+    {
+        FMinimalViewInfo SafeView = BuildBoundaryView(SafeLocation, SafeZoom, Owner->HorizontalProjectionOffset);
+        if (TryCorrectView(SafeView))
+        {
+            InOutView.Location = SafeView.Location;
+            InOutView.Rotation = SafeView.Rotation;
+            InOutView.FOV = SafeView.FOV;
+            bReportedViewBoundsFailure = false;
+            return;
+        }
+    }
+    if (!bReportedViewBoundsFailure)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[CityCamera] Authored bounds cannot contain the minimum camera rig."));
+        bReportedViewBoundsFailure = true;
+    }
+}
+
+FVector UMovementInputHandler::ClampToMovementBoundary(const FVector& WorldLocation) const
+{
+    if (!PlanarMovementBounds.bIsValid || WorldLocation.ContainsNaN()) { return WorldLocation; }
+    FBox2D AllowedBounds = PlanarMovementBounds;
+    if (bConstrainCameraView && Owner)
+        GetCameraMovementBounds(WorldLocation, ZoomValue, Owner->HorizontalProjectionOffset, AllowedBounds);
+    return ClampLocationInBounds(WorldLocation, AllowedBounds, MovementBoundsTransform);
+}
+
+void UMovementInputHandler::ApplyMovementBoundary()
+{
+    if (!Owner || !PlanarMovementBounds.bIsValid) { return; }
+    const FVector CurrentLocation = Owner->GetActorLocation();
+    FBox2D AllowedBounds = PlanarMovementBounds;
+    if (bConstrainCameraView)
+        GetCameraMovementBounds(CurrentLocation, ZoomValue, Owner->HorizontalProjectionOffset, AllowedBounds);
+    const FVector BoundedLocation = ClampLocationInBounds(CurrentLocation, AllowedBounds, MovementBoundsTransform);
+    if (!CurrentLocation.Equals(BoundedLocation, 0.001f))
+    {
+        Owner->SetActorLocation(BoundedLocation);
+        StoredMove = FVector::ZeroVector;
+    }
+    if (Movement)
+    {
+        const FVector LocalLocation = MovementBoundsTransform.InverseTransformPosition(BoundedLocation);
+        FVector LocalVelocity = MovementBoundsTransform.InverseTransformVectorNoScale(Movement->Velocity);
+        if ((LocalLocation.X >= AllowedBounds.Max.X - 0.01 && LocalVelocity.X > 0.f)
+            || (LocalLocation.X <= AllowedBounds.Min.X + 0.01 && LocalVelocity.X < 0.f))
+        {
+            LocalVelocity.X = 0.f;
+        }
+        if ((LocalLocation.Y >= AllowedBounds.Max.Y - 0.01 && LocalVelocity.Y > 0.f)
+            || (LocalLocation.Y <= AllowedBounds.Min.Y + 0.01 && LocalVelocity.Y < 0.f))
+        {
+            LocalVelocity.Y = 0.f;
+        }
+        Movement->Velocity = MovementBoundsTransform.TransformVectorNoScale(LocalVelocity);
+    }
 }
 
 void UMovementInputHandler::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -105,22 +359,36 @@ void UMovementInputHandler::BeginPlay()
 
 void UMovementInputHandler::MoveTracking()
 {
-    auto actorLocation = Owner->GetActorLocation();
-    float locationLength = actorLocation.Length();
-    auto normalizedVec = actorLocation.Normalize();
+    if (!Owner) { return; }
+    if (IsRecruitmentInputBlocked(this))
+    {
+        StoredMove = FVector::ZeroVector;
+        bWasSingleTouch = false;
+        Owner->ConsumeMovementInputVector();
+        if (Movement) Movement->StopMovementImmediately();
+        return;
+    }
+    if (PlanarMovementBounds.bIsValid)
+    {
+        ApplyMovementBoundary();
+    }
+    else
+    {
+        const FVector BoundaryOffset = CalculatePlanarBoundaryOffset(Owner->GetActorLocation());
+        float BoundaryDistance = BoundaryOffset.Size();
+        const FVector DirectionToCenter = -BoundaryOffset.GetSafeNormal();
 
-    actorLocation.Z = 0.f;
-    actorLocation = -actorLocation;
+        // 범위 시각화 - BoundaryRadius 반지름 원 그리기 (디버그용)
+        //DrawDebugCircle(GetWorld(), FVector::ZeroVector, BoundaryRadius, 128, FColor::Red, false, 0.1f, 0, 200.f,
+        //    FVector(0, 0, 1), FVector(1, 0, 0));
 
-    // 범위 시각화 - BoundaryRadius 반지름 원 그리기 (디버그용)
-    //DrawDebugCircle(GetWorld(), FVector::ZeroVector, BoundaryRadius, 128, FColor::Red, false, 0.1f, 0, 200.f,
-    //    FVector(0, 0, 1), FVector(1, 0, 0));
-
-    // 범위 밖이면 강제로 중앙쪽으로 당기기
-    locationLength = FMath::Max(0.f, (locationLength - BoundaryRadius) / 2.f);
-    Owner->AddMovementInput(actorLocation, locationLength);
+        // 범위 밖이면 강제로 중앙쪽으로 당기기
+        BoundaryDistance = FMath::Max(0.f, (BoundaryDistance - BoundaryRadius) / 2.f);
+        Owner->AddMovementInput(DirectionToCenter, BoundaryDistance);
+    }
 
     // 입력 타입 검사
+    if (!Owner->GetPlayerController()) { return; }
     EInputType inputType = Owner->GetPlayerController()->GetCurrentInputType();
     if (inputType == EInputType::KeyMouse)
     {
@@ -145,6 +413,12 @@ void UMovementInputHandler::TrackMove()
         FVector socketOffset = Owner->SpringArm->SocketOffset;
         FVector springArmWorldLoc = Owner->SpringArm->GetComponentLocation();
         FVector cameraWorldLoc = Owner->CameraComponent->GetComponentLocation();
+        if (bConstrainCameraView)
+        {
+            const APlayerController* ViewController = Cast<APlayerController>(Owner->GetController());
+            if (ViewController && ViewController->PlayerCameraManager)
+                cameraWorldLoc = ViewController->PlayerCameraManager->GetCameraLocation();
+        }
 
         FVector offsetApplyForwardVec = -(forwardVec * (Owner->SpringArm->TargetArmLength - socketOffset.X));
         offsetApplyForwardVec = offsetApplyForwardVec + (upVec * socketOffset.Z) + springArmWorldLoc;
@@ -163,16 +437,15 @@ void UMovementInputHandler::TrackMove()
         StoredMove = FMath::Lerp(StoredMove, newMove, 0.8f);
 
         // 범위제한 및 점진적 저항 적용
-        FVector currentLocation = Owner->GetActorLocation();
-        float currentDistance = currentLocation.Length();
+        const FVector BoundaryOffset = CalculatePlanarBoundaryOffset(Owner->GetActorLocation());
+        const float currentDistance = BoundaryOffset.Size();
 
         float resistanceFactor = 1.0f;
-        if (currentDistance > BoundaryRadius)
+        if (!PlanarMovementBounds.bIsValid && currentDistance > BoundaryRadius)
         {
             // 현재 위치와 이동 방향 확인
-            FVector currentPos = currentLocation;
             FVector moveDirection = FVector(StoredMove.X, StoredMove.Y, 0.f).GetSafeNormal();
-            FVector centerDirection = -currentPos.GetSafeNormal();
+            FVector centerDirection = -BoundaryOffset.GetSafeNormal();
 
             // 중앙으로 향하는지 확인 (내적으로 방향 비교)
             float dotProduct = FVector::DotProduct(moveDirection, centerDirection);
@@ -191,7 +464,16 @@ void UMovementInputHandler::TrackMove()
             }
         }
         FVector adjustedMove = FVector(StoredMove.X, StoredMove.Y, 0.f) * resistanceFactor;
-        Owner->AddActorWorldOffset(adjustedMove);
+        const FVector CurrentLocation = Owner->GetActorLocation();
+        const FVector BoundedLocation = ClampToMovementBoundary(CurrentLocation + adjustedMove);
+        const FVector ActualMove = BoundedLocation - CurrentLocation;
+        Owner->AddActorWorldOffset(ActualMove);
+        if (!ActualMove.Equals(adjustedMove, 0.001f))
+        {
+            // 손가락 기준점도 실제 이동량을 따라가야 경계에서 반대로 드래그할 때 즉시 반응한다.
+            TargetHandle += ActualMove - FVector(newMove.X, newMove.Y, 0.f);
+            StoredMove = FVector::ZeroVector;
+        }
     }
 }
 
@@ -246,10 +528,15 @@ void UMovementInputHandler::CursorDistFromViewportCenter(FVector2D mousePosFromV
 
 void UMovementInputHandler::UpdateZoom()
 {
-    ZoomValue += ZoomDirection * 0.01f;
-    ZoomValue = FMath::Clamp(ZoomValue, 0.0f, 1.f);
+    SetZoomValue(ZoomValue + ZoomDirection * 0.01f);
 
     ApplyZoomSettings();
+}
+
+void UMovementInputHandler::SetMaximumZoomValue(float InMaximumZoomValue)
+{
+    MaximumZoomValue = FMath::IsFinite(InMaximumZoomValue) ? FMath::Clamp(InMaximumZoomValue, 0.f, 1.f) : 1.f;
+    SetZoomValue(ZoomValue);
 }
 
 FZoomRigParams UMovementInputHandler::GetZoomRigParams() const
@@ -264,6 +551,11 @@ FZoomRigParams UMovementInputHandler::GetZoomRigParams() const
     if (Owner && Owner->CameraComponent)
     {
         Params.CameraAspectRatio = Owner->CameraComponent->AspectRatio;
+    }
+    if (Owner && Owner->SpringArm)
+    {
+        // SocketOffset.X 는 음수(뒤로)라 부호를 뒤집어 "후퇴량"으로 넘긴다
+        Params.CameraPullBackCm = -Owner->SpringArm->SocketOffset.X;
     }
     return Params;
 }
@@ -281,6 +573,16 @@ FZoomRigSample UMovementInputHandler::EvaluateZoomRig(float InZoomValue) const
 
 void UMovementInputHandler::ApplyZoomSettings()
 {
+    if (!Owner || !Owner->SpringArm || !Owner->CameraComponent || !Owner->MovementComponent) return;
+    if (bConstrainCameraView)
+    {
+        FVector SafeLocation = Owner->GetActorLocation();
+        float SafeZoom = ZoomValue;
+        if (TryConstrainCameraPose(SafeLocation, SafeZoom, Owner->HorizontalProjectionOffset))
+        {
+            ZoomValue = SafeZoom;
+        }
+    }
     const float lerpKey = EvaluateZoomKey(ZoomValue);
     const FZoomRigSample Rig = CameraFramingMath::EvaluateRig(GetZoomRigParams(), lerpKey);
 
@@ -294,13 +596,7 @@ void UMovementInputHandler::ApplyZoomSettings()
     Owner->MovementComponent->Deceleration = NewMaxSpeed * 6.f;
 
     Owner->CameraComponent->FieldOfView = Rig.HorizontalFOVDeg;
-}
-
-void UMovementInputHandler::UpdateDof() const
-{
-    Owner->CameraComponent->PostProcessSettings.bOverride_DepthOfFieldFstop = 3.f;
-    Owner->CameraComponent->PostProcessSettings.bOverride_DepthOfFieldSensorWidth = 150.f;
-    Owner->CameraComponent->PostProcessSettings.bOverride_DepthOfFieldFocalDistance = Owner->SpringArm->TargetArmLength;
+    if (bConstrainCameraView) ApplyMovementBoundary();
 }
 
 void UMovementInputHandler::PositionCheck()
@@ -322,20 +618,21 @@ void UMovementInputHandler::PositionCheck()
 
 void UMovementInputHandler::Move(const FInputActionValue& Value)
 {
+    if (IsRecruitmentInputBlocked(this)) return;
     Owner->StopCameraTransition();
 
-    FVector currentLocation = Owner->GetActorLocation();
-    float currentDistance = currentLocation.Length();
+    const FVector BoundaryOffset = CalculatePlanarBoundaryOffset(Owner->GetActorLocation());
+    const float currentDistance = BoundaryOffset.Size();
 
     // 현재 범위 내에 있을 때만 이동 허용
     // 점진적 저항 계산
     float resistanceFactor = 1.0f;
     float softZoneStart = BoundaryRadius * 0.9f;
-    if (currentDistance > softZoneStart)
+    if (!PlanarMovementBounds.bIsValid && currentDistance > softZoneStart)
     {
         FVector moveDirection = (Owner->GetActorForwardVector() * Value[1] + Owner->GetActorRightVector()
             * Value[0]).GetSafeNormal();
-        FVector centerDirection = -currentLocation.GetSafeNormal();
+        FVector centerDirection = -BoundaryOffset.GetSafeNormal();
         float dotProduct = FVector::DotProduct(moveDirection, centerDirection);
 
         if (dotProduct > 0.3f)  // 중앙 방향으로 이동하면 저항 없음
@@ -359,21 +656,21 @@ void UMovementInputHandler::Move(const FInputActionValue& Value)
 
 void UMovementInputHandler::Zoom(const FInputActionValue& Value)
 {
+    if (IsRecruitmentInputBlocked(this)) return;
     Owner->StopCameraTransition();
 
     ZoomDirection = Value[0];
     UpdateZoom();
-    UpdateDof();
-    UE_LOG(LogTemp, Log, TEXT("Zoom value = %f"), Value[0]);
 }
 
 void UMovementInputHandler::Spin(const FInputActionValue& Value)
 {
+    if (IsRecruitmentInputBlocked(this)) return;
     Owner->StopCameraTransition();
 
     // 리그를 돌리면 화면(월드)은 반대로 보여 제스처와 어긋남 → yaw 부호 반전
     Owner->AddActorLocalRotation(FRotator(0, -Value[0], 0));
-    UE_LOG(LogTemp, Log, TEXT("Spin value = %f"), Value[0]);
+    if (bConstrainCameraView) ApplyZoomSettings();
 }
 
 bool UMovementInputHandler::GetTouchIntersection(FVector& OutIntersection) const
@@ -384,6 +681,7 @@ bool UMovementInputHandler::GetTouchIntersection(FVector& OutIntersection) const
 
 void UMovementInputHandler::OnDragStarted(const FInputActionValue& Value)
 {
+    if (IsRecruitmentInputBlocked(this)) return;
     Owner->StopCameraTransition();
 
     UE_LOG(LogTemp, Log, TEXT("OnDragStarted"));
@@ -392,6 +690,7 @@ void UMovementInputHandler::OnDragStarted(const FInputActionValue& Value)
 
 void UMovementInputHandler::OnDragMove(const FInputActionValue& Value)
 {
+    if (IsRecruitmentInputBlocked(this)) return;
     bool bSingle = CoordinateUtils::SingleTouchCheck();
 
     // 멀티터치(Zoom/Rotate) 상태에서 → 싱글터치로 바뀌면
@@ -432,5 +731,3 @@ void UMovementInputHandler::ReleaseDragMoveIMC() const
         InputSubsystem->RemoveMappingContext(IMC_DragMoveContext, options);
     }
 }
-
-

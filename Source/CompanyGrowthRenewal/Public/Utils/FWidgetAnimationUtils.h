@@ -5,6 +5,29 @@
 #include "CoreMinimal.h"
 
 /**
+ * 연출 감소(Reduce Motion) 판정 캐시.
+ * 아래 애니 헬퍼들은 월드 컨텍스트가 없는 값 구조체라 설정 서브시스템을 직접 조회할 수 없다.
+ */
+struct COMPANYGROWTHRENEWAL_API FMotionGate
+{
+	static bool IsReduced() { return bReduced; }
+
+	/** USettingsManagerSubsystem 전용 — 설정 로드/변경 시 갱신한다. */
+	static void SetReduced(bool bInReduced) { bReduced = bInReduced; }
+
+private:
+	static bool bReduced;
+};
+
+/** 떨어져 붙는 도장의 한 순간 — 호출자가 RenderTranslation · RenderTransformAngle · RenderOpacity 에 그대로 넣는다. 크기는 1.0 고정. */
+struct FStampDropPose
+{
+	FVector2D Offset = FVector2D::ZeroVector;
+	float AngleDeg = 0.f;
+	float Opacity = 1.f;
+};
+
+/**
  * 위젯 애니메이션 유틸리티 (정적 함수)
  * UI 애니메이션에 사용되는 Easing 함수들을 제공
  */
@@ -24,8 +47,13 @@ struct COMPANYGROWTHRENEWAL_API FWidgetAnimationUtils
 	static float StampInScale(float T01);
 	// 도장 불투명도 — 초반 3배속으로 올라와 MaxOpacity 에서 멈춘다(잉크는 완전 불투명이 아님)
 	static float StampInOpacity(float T01, float MaxOpacity = 0.94f);
+	// 결재 도장 떨어짐 — 출석 칸. T=0 은 위 DropPx · 더 기운 ExtraTiltDeg · 투명, T=1 은 제자리 · 0° · 불투명.
+	// 이동·각도 = EaseOutBack(살짝 넘쳤다 돌아옴), 불투명도 = T/0.7. bReduced = 이동·각도 없이 불투명도 = T
+	static FStampDropPose StampDrop(float T01, float DropPx, float ExtraTiltDeg, bool bReduced);
 	// 감쇠 셰이크 오프셋(px). [0,Duration) 밖이면 0. 호출자가 RenderTranslation 에 그대로 넣는다.
 	static FVector2D ShakeOffset(float Elapsed, float Duration, float Amp);
+	// 시차 스파클 팝 — T01 = 0~1 정규화 위상. 범위 밖이면 투명. 가챠/축하/출석이 공유한다
+	static void DriveSparklePop(class UImage* Sparkle, float T01);
 };
 
 /**

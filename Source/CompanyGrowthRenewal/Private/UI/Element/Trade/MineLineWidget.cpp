@@ -5,11 +5,39 @@
 #include "Manager/TableManagerSubsystem.h"
 #include "Global/GlobalUtilFunctions.h"
 #include "Table/ResourceInfo.h"
+#include "UI/Panel/CountryDrawerModel.h"
 #include "Components/Image.h"
 #include "Components/ProgressBar.h"
 #include "Components/WidgetSwitcher.h"
 #include "CommonTextBlock.h"
 #include "Engine/Texture2D.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/TextBlock.h"
+
+void UMineLineWidget::NativePreConstruct()
+{
+	Super::NativePreConstruct();
+	// 자식 버튼의 PreConstruct 가 라벨을 저작 잉크로 되돌린 뒤라 잠김 상태를 다시 입힌다
+	ApplyButtonLabelInks();
+}
+
+void UMineLineWidget::ApplyButtonLabelInks()
+{
+	PaintButtonLabel(InstantFinishButton, InstantFinishLabel, bInstantFinishLocked);
+	PaintButtonLabel(RecieveButton, ReceiveLabel, bReceiveLocked);
+}
+
+void UMineLineWidget::PaintButtonLabel(UCostActionButtonWidget* Button, TObjectPtr<UTextBlock>& LabelCache, bool bLocked)
+{
+	if (!LabelCache && Button && Button->WidgetTree)
+	{
+		LabelCache = Cast<UTextBlock>(Button->WidgetTree->FindWidget(TEXT("BtnText")));
+	}
+	if (LabelCache && Button->bOverrideTextStyle)
+	{
+		LabelCache->SetColorAndOpacity(bLocked ? DisabledLabelInk : Button->BtnTextColor);
+	}
+}
 
 void UMineLineWidget::NativeConstruct()
 {
@@ -25,7 +53,8 @@ void UMineLineWidget::NativeConstruct()
 	}
 
 	ApplyState();
-	ApplyVisualState();
+	RefreshRecieveButtonCount(FMath::Max<int64>(0, LastSeenManagerQty));
+	RefreshInstantFinishCost();
 }
 
 void UMineLineWidget::NativeDestruct()
@@ -44,9 +73,17 @@ void UMineLineWidget::NativeDestruct()
 void UMineLineWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+	InstantFinishRefreshElapsed += InDeltaTime;
+	if (InstantFinishRefreshElapsed >= 1.f)
+	{
+		InstantFinishRefreshElapsed = 0.f;
+		RefreshInstantFinishCost();
+	}
 
-	// 매 frame 매니저 절대 위치 polling sync — hidden 동안 매니저 진행분 자동 흡수.
-	// 매니저가 위젯보다 앞서면 catch-up, 위젯이 앞서면 그대로 유지 (frame 단위 부드러움).
+	// 매니저의 wall-clock 결과를 표시 기준으로 사용한다. 강화 후에는 로컬 시계가 앞설 수도 있다.
+	bool bSyncedToManager = false;
+	int64 ManagerQty = 0;
+	double ManagerFraction = 0.0;
 	if (CachedCountry != ECountryType::None && CachedResource != EResourceType::None)
 	{
 		const UGameInstance* GI = GetGameInstance();
@@ -56,29 +93,32 @@ void UMineLineWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 			FMineLineState State;
 			if (MineMgr->GetLineState(CachedCountry, CachedResource, State))
 			{
+				bSyncedToManager = true;
+				ManagerQty = State.CurrentQty;
+				ManagerFraction = State.PendingFraction;
 				if (CachedRatePerSecond > 0.0f)
 				{
 					const double MgrElapsed = (static_cast<double>(State.CurrentQty)
 						+ static_cast<double>(State.PendingFraction)) / static_cast<double>(CachedRatePerSecond);
-					if (MgrElapsed > CachedLineElapsedSec)
-					{
-						CachedLineElapsedSec = MgrElapsed;
-						LastDisplayedWholeCount = -1;
-						LastDisplayedRemainingSec = -1;
-					}
+					CachedLineElapsedSec = MgrElapsed;
 				}
 
-				if (State.bSaturated != bCachedSaturated)
+				const bool bQuantityChanged = State.CurrentQty != LastSeenManagerQty;
+				const bool bSaturationChanged = State.bSaturated != bCachedSaturated;
+				LastSeenManagerQty = State.CurrentQty;
+				bCachedSaturated = State.bSaturated;
+				if (bQuantityChanged || bSaturationChanged)
 				{
-					bCachedSaturated = State.bSaturated;
 					LastDisplayedWholeCount = -1;
 					LastDisplayedRemainingSec = -1;
 					bLastShownAsCompleted = false;
 					ApplyState();
-					ApplyVisualState();
 					RefreshRecieveButtonCount(State.CurrentQty);
 				}
-				LastSeenManagerQty = State.CurrentQty;
+				if (bQuantityChanged)
+				{
+					OnQuantityChanged.Broadcast(this);
+				}
 			}
 		}
 	}
@@ -94,6 +134,7 @@ void UMineLineWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 			{
 				RemainingTimeText->SetText(FText::FromString(TEXT("[정지] 한도 도달")));
 			}
+			ApplyStatus(CountryDrawer::FullStatus(), true);
 			LastDisplayedWholeCount = CachedTargetQty;
 			LastDisplayedRemainingSec = -1;
 			bLastShownAsCompleted = true;
@@ -102,12 +143,21 @@ void UMineLineWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	}
 	bLastShownAsCompleted = false;
 
-	// 자체 누적 — frame 단위 부드러운 progress
-	CachedLineElapsedSec += static_cast<double>(InDeltaTime);
+	// 매니저가 아직 없는 경우에만 로컬 시계로 진행한다.
+	if (!bSyncedToManager)
+	{
+		CachedLineElapsedSec += static_cast<double>(InDeltaTime);
+	}
 
-	const double ExpectedTotal = CachedLineElapsedSec * static_cast<double>(CachedRatePerSecond);
-	const int64 WholeCount = FMath::Min<int64>(static_cast<int64>(FMath::FloorToDouble(ExpectedTotal)), CachedTargetQty);
-	const double Frac = ExpectedTotal - FMath::FloorToDouble(ExpectedTotal);
+	const double ExpectedTotal = bSyncedToManager
+		? static_cast<double>(ManagerQty) + ManagerFraction
+		: CachedLineElapsedSec * static_cast<double>(CachedRatePerSecond);
+	const int64 WholeCount = bSyncedToManager
+		? ManagerQty
+		: FMath::Min<int64>(static_cast<int64>(FMath::FloorToDouble(ExpectedTotal)), CachedTargetQty);
+	const double Frac = bSyncedToManager
+		? ManagerFraction
+		: ExpectedTotal - FMath::FloorToDouble(ExpectedTotal);
 
 	if (WholeCount >= CachedTargetQty)
 	{
@@ -119,13 +169,14 @@ void UMineLineWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 		{
 			RemainingTimeText->SetText(FText::FromString(TEXT("[정지] 한도 도달")));
 		}
+		ApplyStatus(CountryDrawer::FullStatus(), true);
 		LastDisplayedWholeCount = CachedTargetQty;
 		bLastShownAsCompleted = true;
 		return;
 	}
 
 	// ProgressBar 는 매 frame (Slate dirty marker 가 dedup)
-	SetProgressBarPercent(static_cast<float>(Frac));
+	SetLineProgress(WholeCount, Frac);
 
 	// 카운트 텍스트는 정수 변경 시에만 — 1개 만들어질 때 0->1, 1->2, ... 갱신
 	if (WholeCount != LastDisplayedWholeCount)
@@ -140,6 +191,7 @@ void UMineLineWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	if (RemainingSecInt != LastDisplayedRemainingSec)
 	{
 		SetRemainingTimeText(static_cast<double>(RemainingSecInt));
+		ApplyStatus(CountryDrawer::MineFullEtaLabel(FTimespan::FromSeconds(RemainingSecInt)), false);
 		LastDisplayedRemainingSec = RemainingSecInt;
 	}
 }
@@ -160,28 +212,38 @@ void UMineLineWidget::SetLineState(ECountryType Country, const FMineLineState& S
 	LastDisplayedRemainingSec = -1;
 	bLastShownAsCompleted = false;
 
-	SyncElapsedToQuantity(State.CurrentQty);
+	CachedLineElapsedSec = CachedRatePerSecond > 0.0f
+		? (static_cast<double>(State.CurrentQty) + static_cast<double>(State.PendingFraction))
+			/ static_cast<double>(CachedRatePerSecond)
+		: 0.0;
 
 	ApplyResourceMeta(State.Resource);
 	ApplyLevelText();
 	ApplyRateText();
 
 	// 첫 표시: NativeTick 첫 frame 까지 빈 화면 방지
-	const double ExpectedTotal = CachedLineElapsedSec * static_cast<double>(CachedRatePerSecond);
-	const int64 WholeCount = FMath::Min<int64>(static_cast<int64>(FMath::FloorToDouble(ExpectedTotal)), CachedTargetQty);
-	const double Frac = ExpectedTotal - FMath::FloorToDouble(ExpectedTotal);
-	SetQuantityTexts(WholeCount, CachedTargetQty);
-	SetProgressBarPercent(bCachedSaturated ? 1.0f : static_cast<float>(Frac));
-	LastDisplayedWholeCount = WholeCount;
+	SetQuantityTexts(State.CurrentQty, CachedTargetQty);
+	if (bCachedSaturated)
+	{
+		SetProgressBarPercent(1.0f);
+		ApplyStatus(CountryDrawer::FullStatus(), true);
+	}
+	else
+	{
+		SetLineProgress(State.CurrentQty, State.PendingFraction);
+		ApplyProducingStatus(static_cast<double>(State.CurrentQty) + static_cast<double>(State.PendingFraction));
+	}
+	LastDisplayedWholeCount = State.CurrentQty;
 	RefreshRecieveButtonCount(State.CurrentQty);
 
 	ApplyState();
-	ApplyVisualState();
+	RefreshInstantFinishCost();
 }
 
 void UMineLineWidget::UpdateStorage(int64 CurrentQty, int64 TargetQty, bool bSaturated)
 {
 	const bool bWasSaturated = bCachedSaturated;
+	const bool bQuantityChanged = CurrentQty != LastSeenManagerQty;
 	CachedTargetQty = TargetQty;
 	bCachedSaturated = bSaturated;
 	LastSeenManagerQty = CurrentQty;
@@ -191,12 +253,11 @@ void UMineLineWidget::UpdateStorage(int64 CurrentQty, int64 TargetQty, bool bSat
 
 	LastDisplayedWholeCount = -1;
 	LastDisplayedRemainingSec = -1;
-	if (bWasSaturated != bSaturated)
+	if (bWasSaturated != bSaturated || bQuantityChanged)
 	{
 		bLastShownAsCompleted = false;
 		ApplyState();
 	}
-	ApplyVisualState();
 
 	// Saturated/Receive 상태 — visible 안 할 때도 즉시 표시 갱신 (NativeTick 미호출 케이스 안전망).
 	if (bSaturated)
@@ -207,15 +268,19 @@ void UMineLineWidget::UpdateStorage(int64 CurrentQty, int64 TargetQty, bool bSat
 		{
 			RemainingTimeText->SetText(FText::FromString(TEXT("[정지] 한도 도달")));
 		}
+		ApplyStatus(CountryDrawer::FullStatus(), true);
 		bLastShownAsCompleted = true;
 		LastDisplayedWholeCount = CurrentQty;
 	}
 	else
 	{
 		SetQuantityTexts(CurrentQty, TargetQty);
+		SetLineProgress(CurrentQty, 0.0);
+		ApplyProducingStatus(static_cast<double>(CurrentQty));
 	}
 
 	RefreshRecieveButtonCount(CurrentQty);
+	RefreshInstantFinishCost();
 }
 
 void UMineLineWidget::UpdateRate(int32 RateLevel, float EffectiveRatePerMinute)
@@ -227,6 +292,32 @@ void UMineLineWidget::UpdateRate(int32 RateLevel, float EffectiveRatePerMinute)
 
 	// rate 변경 후에는 LastDisplayed 캐시 무효 — 다음 frame 에 새 rate 로 SetText.
 	LastDisplayedRemainingSec = -1;
+	RefreshInstantFinishCost();
+}
+
+void UMineLineWidget::RefreshInstantFinishCost()
+{
+	if (!InstantFinishButton && !RecieveButton) return;
+	const UGameInstance* GI = GetGameInstance();
+	const UMineManager* MineMgr = GI ? GI->GetSubsystem<UMineManager>() : nullptr;
+	const int64 Cost = MineMgr && CachedCountry != ECountryType::None && CachedResource != EResourceType::None
+		? MineMgr->GetInstantFinishCost(CachedCountry, CachedResource) : 0;
+	const bool bPending = MineMgr && MineMgr->IsInstantFinishPending(CachedCountry, CachedResource);
+	const bool bAvailable = Cost > 0 && !bPending;
+	if (RecieveButton) RecieveButton->SetLockedState(bPending);
+	if (InstantFinishButton)
+	{
+		InstantFinishButton->SetCostVisible(bAvailable);
+		InstantFinishButton->SetLockedState(!bAvailable);
+		if (bAvailable)
+		{
+			InstantFinishButton->SetCost(Cost, EResourceType::Diamond);
+			CountryDrawer::StyleChipCount(InstantFinishButton, /*bIncoming=*/false);
+		}
+	}
+	bInstantFinishLocked = !bAvailable;
+	bReceiveLocked = bPending;
+	ApplyButtonLabelInks();
 }
 
 void UMineLineWidget::SyncElapsedToQuantity(int64 CurrentQty)
@@ -294,12 +385,43 @@ void UMineLineWidget::SetQuantityTexts(int64 Current, int64 Target)
 		StatValueText->SetText(FText::FromString(FString::Printf(TEXT("/%s"),
 			*UGlobalUtilFunctions::AbbreviateNumber(Target, ENumberAbbrevStyle::Auto, ENumberRoundMode::Floor).ToString())));
 	}
+	if (BarText)
+	{
+		BarText->SetText(CountryDrawer::BarCountLabel(Current, Target));
+	}
 }
 
 void UMineLineWidget::SetProgressBarPercent(float Percent01)
 {
 	if (!ProgressBar) return;
 	ProgressBar->SetPercent(FMath::Clamp(Percent01, 0.0f, 1.0f));
+}
+
+void UMineLineWidget::SetLineProgress(int64 WholeCount, double UnitFraction01)
+{
+	// 1개 단위가 아니라 한도 대비 전체 비율 — 한 개가 캐질 때마다 0 으로 되돌아가지 않게
+	SetProgressBarPercent(CountryDrawer::LineProgress01(WholeCount, CachedTargetQty, UnitFraction01));
+}
+
+void UMineLineWidget::ApplyStatus(const FText& Status, bool bFull)
+{
+	if (StatusText)
+	{
+		StatusText->SetText(Status);
+		StatusText->SetColorAndOpacity(bFull ? StatusDoneInk : StatusInk);
+	}
+	if (ProgressBar)
+	{
+		ProgressBar->SetFillColorAndOpacity(bFull ? GaugeColorSaturated : GaugeColorNormal);
+	}
+}
+
+void UMineLineWidget::ApplyProducingStatus(double ExpectedTotal)
+{
+	const double RemainingSec = CachedRatePerSecond > 0.0f
+		? (static_cast<double>(CachedTargetQty) - ExpectedTotal) / static_cast<double>(CachedRatePerSecond)
+		: 0.0;
+	ApplyStatus(CountryDrawer::MineFullEtaLabel(FTimespan::FromSeconds(FMath::Max(FMath::FloorToDouble(RemainingSec), 0.0))), false);
 }
 
 void UMineLineWidget::SetRemainingTimeText(double RemainingSec)
@@ -336,15 +458,17 @@ void UMineLineWidget::ApplyState()
 void UMineLineWidget::RefreshRecieveButtonCount(int64 CurrentQty)
 {
 	if (!RecieveButton) return;
-	// "박스 + 수량" 모드 (Box) — UpgradeBtnWidget::SetCost 가 Box 분기에서 자동으로 검은 텍스트 + 박스 아이콘 적용.
-	RecieveButton->SetCost(CurrentQty, EResourceType::Box, /*bCheckAfford=*/false);
+	// 받을 것 = 이 라인의 자원 ― 칩 아이콘도 그 자원(spec §2.3 받기 칩 = 받을 물건 아이콘)
+	RecieveButton->SetCost(CurrentQty, CachedResource != EResourceType::None ? CachedResource : EResourceType::Box, /*bCheckAfford=*/false);
+	CountryDrawer::StyleChipCount(RecieveButton, /*bIncoming=*/true);
 }
 
-void UMineLineWidget::ApplyVisualState()
+void UMineLineWidget::SetLineNumber(int32 InNumber)
 {
-	// ProgressBar fill 색은 WBP 디자이너 default 그대로 사용 (Factory 와 일관).
-	// saturated 시각 구분은 BtnSwitcher (RecieveButton 노출) + "[정지]" 텍스트로 충분.
-	// 회색 fill 로 덮어쓰면 100% 차 있어도 비어 보이는 역효과 발생해서 제거.
+	if (LineNumberText)
+	{
+		LineNumberText->SetText(FText::AsNumber(InNumber));
+	}
 }
 
 void UMineLineWidget::HandleClaimClicked()

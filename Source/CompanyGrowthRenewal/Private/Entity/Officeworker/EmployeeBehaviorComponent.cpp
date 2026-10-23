@@ -1,7 +1,10 @@
-#include "Entity/Officeworker/EmployeeBehaviorComponent.h"
+﻿#include "Entity/Officeworker/EmployeeBehaviorComponent.h"
 #include "Entity/Officeworker/Officeworker.h"
 #include "Manager/OfficeStageProgressManager.h"
+#include "Manager/ManufacturingDevelopmentManager.h"
 #include "Manager/EmployeeManager.h"
+#include "Manager/EmployeeEquipmentManagerSubsystem.h"
+#include "Manager/MissionManagerSubsystem.h"
 #include "Office/WorkstationActorBase.h"
 #include "Office/OfficeInterior.h"
 #include "GameMode/OfficeGameMode.h"
@@ -41,6 +44,16 @@ UEmployeeBehaviorComponent::UEmployeeBehaviorComponent()
 	}
 }
 
+bool UEmployeeBehaviorComponent::IsContinuousManufacturingWorker() const
+{
+	const UCGGameInstance* GameInst = Cast<UCGGameInstance>(GetWorld() ? GetWorld()->GetGameInstance() : nullptr);
+	const AOfficeworker* Worker = Cast<AOfficeworker>(GetOwner());
+	return GameInst && GameInst->GetCurrentMapType() == ECurrentMapType::OfficeMap
+		&& GameInst->GetOfficeMode() == EOfficeMode::Normal
+		&& IsManufacturingType(GameInst->GetCurrentBuildingCompanyType())
+		&& Worker && Worker->GetAssignedWorkstation();
+}
+
 void UEmployeeBehaviorComponent::BeginPlay()
 {
 	Super::BeginPlay();
@@ -55,7 +68,13 @@ void UEmployeeBehaviorComponent::BeginPlay()
 			InitTimerHandle,
 			[this]()
 			{
+				if (bSkipAutoInit || bRecruitmentArrivalActive) return;
 				ApplyMoveSpeed();
+				if (IsContinuousManufacturingWorker())
+				{
+					SetBehaviorMode(EEmployeeBehaviorMode::Manufacturing);
+					return;
+				}
 
 				// 현재 BehaviorMode에 맞게 초기 상태 설정
 				switch (CurrentBehaviorMode)
@@ -97,6 +116,27 @@ void UEmployeeBehaviorComponent::BeginPlay()
 void UEmployeeBehaviorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	if (bRecruitmentArrivalActive) return;
+
+	if (CurrentBehaviorMode == EEmployeeBehaviorMode::Manufacturing)
+	{
+		const auto* Worker = Cast<AOfficeworker>(GetOwner());
+		const auto* Game = GetWorld() ? Cast<UCGGameInstance>(GetWorld()->GetGameInstance()) : nullptr;
+		const auto* Development = Game ? Game->GetSubsystem<UManufacturingDevelopmentManager>() : nullptr;
+		float SavedFatigue = 0;
+		bool bResting = false;
+		if (Development && Worker && Development->GetEmployeeWorkState(Game->GetCurrentManagedBuildingIndex(),
+			Worker->GetEmployeeID(), SavedFatigue, bResting))
+		{
+			Fatigue = SavedFatigue;
+			if (EmployeeState == EEmployeeState::Typing || EmployeeState == EEmployeeState::Sitting)
+			{
+				const EEmployeeState DisplayState = bResting ? EEmployeeState::Sitting : EEmployeeState::Typing;
+				if (EmployeeState != DisplayState) SetState(DisplayState);
+			}
+		}
+		return;
+	}
 
 	// 일시 버프 시간 감소 + 만료 처리
 	TickBuffs(DeltaTime);
@@ -106,6 +146,8 @@ void UEmployeeBehaviorComponent::TickComponent(float DeltaTime, ELevelTick TickT
 
 	// 폭주 굴림 — 피로 사슬과 독립(체력=조는 것 / 침착성=뛰쳐나감). 슬랙 진입 판정 전에 굴려야 같은 프레임에 반영된다.
 	TickBoltRoll(DeltaTime);
+
+	if (TickEquipmentActivities()) return;
 
 	// 피로 슬랙 루프가 워커를 점유 중이면(텔레그래프/배회) 일반 사이클 스킵
 	if (TickFatigueSlack(DeltaTime))
@@ -122,9 +164,6 @@ void UEmployeeBehaviorComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		{
 		case EEmployeeState::Typing:
 			TickWorking(DeltaTime);
-			break;
-		case EEmployeeState::Sitting:
-			TickRest(DeltaTime);
 			break;
 		case EEmployeeState::Wander:
 			TickWander(DeltaTime);
@@ -148,14 +187,11 @@ void UEmployeeBehaviorComponent::TickComponent(float DeltaTime, ELevelTick TickT
 		break;
 
 	case EEmployeeBehaviorMode::Operation:
-		// Operation 모드: 상태에 따른 처리 (배회와 업무 반복)
+		// Operation 모드: 자리 착석 Typing 유지 (자리이탈은 피로 슬랙 루프 전담)
 		switch (EmployeeState)
 		{
 		case EEmployeeState::Typing:
 			TickWorking(DeltaTime);
-			break;
-		case EEmployeeState::Sitting:
-			TickRest(DeltaTime);
 			break;
 		case EEmployeeState::Wander:
 			TickWander(DeltaTime);
@@ -198,6 +234,9 @@ void UEmployeeBehaviorComponent::TickFatigue(float DeltaTime)
 
 	// 결과 모달(LaunchPending/ReportPending) 중엔 동결 — 플레이어가 못 만지는 구간.
 	if (bFatigueFrozenByLifecycle) return;
+	UOfficeStageProgressManager* EquipmentStage = GetEquipmentStage();
+	if (CurrentBehaviorMode == EEmployeeBehaviorMode::Stage && !EquipmentStage) return;
+	const float BeforeFatigue = Fatigue;
 
 	// 복지 특성 — 회복 속도만 올린다. 누적(GainPerSec)은 건드리지 않는다: 피로 자체가 게임 압력이라
 	// 누적을 깎으면 크런치 긴장이 사라진다.
@@ -226,7 +265,10 @@ void UEmployeeBehaviorComponent::TickFatigue(float DeltaTime)
 		// 체력이 낮을수록 급격히 쌓임 → 약골은 한 판 안에서도 초반부터 꾸벅(체력 강화가 해답).
 		const float Stamina = static_cast<float>(GetOwnerStamina());
 		const float GainScale = 1.0f / (1.0f + Stamina * FatigueConfig->StaminaGainScale);
-		Fatigue += FatigueConfig->GainPerSec * GainScale * DeltaTime;
+		const AOfficeworker* FatigueWorker = Cast<AOfficeworker>(OwnerActor);
+		const AWorkstationActorBase* FatigueDesk = FatigueWorker ? FatigueWorker->GetAssignedWorkstation() : nullptr;
+		const float EnvironmentBonus = FatigueDesk ? FatigueDesk->GetComponentBonus(EWorkstationUpgradeType::Environment) : 0.f;
+		Fatigue += FatigueConfig->GainPerSec * GainScale * DeltaTime / (1.f + EnvironmentBonus);
 		break;
 	}
 	case EEmployeeState::Sitting:
@@ -246,7 +288,176 @@ void UEmployeeBehaviorComponent::TickFatigue(float DeltaTime)
 	default:
 		break;  // 전이/연출 상태는 변화 없음
 	}
+	if (EquipmentStage)
+	{
+		AOfficeworker* Worker = Cast<AOfficeworker>(GetOwner());
+		if (auto* Attempt = EquipmentStage->FindEquipmentAttempt())
+			Fatigue = BeforeFatigue + FEmployeeEquipmentEffectEvaluator::ResolveFatigueDelta(*Attempt, Worker->GetEmployeeID(),
+				Fatigue - BeforeFatigue, BeforeFatigue, FatigueConfig->TiredThreshold, EquipmentStage->GetEquipmentLoadout(Worker->GetEmployeeID()));
+	}
 	Fatigue = FMath::Clamp(Fatigue, 0.0f, 100.0f);
+}
+
+UOfficeStageProgressManager* UEmployeeBehaviorComponent::GetEquipmentStage() const
+{
+	const auto* Worker = Cast<AOfficeworker>(GetOwner());
+	if (CurrentBehaviorMode != EEmployeeBehaviorMode::Stage || !Worker || Worker->bIsPortraitMode || !Worker->GetAssignedWorkstation()) return nullptr;
+	auto* Stage = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	if (!Stage || !Stage->IsTimerRunning() || Stage->IsEventPaused()) return nullptr;
+	const auto* Attempt = Stage->FindEquipmentAttempt();
+	return Attempt && Attempt->Outcome == EEquipmentAttemptOutcome::Active && Attempt->Employees.Contains(Worker->GetEmployeeID()) ? Stage : nullptr;
+}
+
+bool UEmployeeBehaviorComponent::IsEquipmentResting() const
+{
+	const auto* Worker = Cast<AOfficeworker>(GetOwner());
+	const auto* Stage = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	const auto* Attempt = Stage ? Stage->FindEquipmentAttempt() : nullptr;
+	const auto* Runtime = Attempt && Worker ? Attempt->Employees.Find(Worker->GetEmployeeID()) : nullptr;
+	return CurrentBehaviorMode == EEmployeeBehaviorMode::Stage && Runtime && Runtime->RestUntil > 0;
+}
+
+void UEmployeeBehaviorComponent::RecordEquipmentRecovery(EEquipmentRecoverySource Source)
+{
+	auto* Worker = Cast<AOfficeworker>(GetOwner());
+	auto* Stage = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	auto* Attempt = Stage ? Stage->FindEquipmentAttempt() : nullptr;
+	if (Attempt && Worker) FEmployeeEquipmentEffectEvaluator::RecordRecovery(*Attempt, Worker->GetEmployeeID(), Source,
+		Stage->GetEquipmentLoadout(Worker->GetEmployeeID()));
+	CurrentEquipmentDownId.Invalidate();
+}
+
+bool UEmployeeBehaviorComponent::TryBeginEquipmentDown(bool bBolted)
+{
+	// 필수 튜토리얼 중엔 졸음·이탈을 시작하지 않는다 ― 안내하지 않은 캐치 조작(「탭해서 불러오기」)이 개발 대기 장면에 끼어든다
+	if (const UGameInstance* DownGI = GetWorld() ? GetWorld()->GetGameInstance() : nullptr)
+	{
+		const UMissionManagerSubsystem* Missions = DownGI->GetSubsystem<UMissionManagerSubsystem>();
+		if (Missions && Missions->HasActiveMission() && Missions->IsHardGateMission())
+		{
+			return false;
+		}
+	}
+	auto* Stage = GetEquipmentStage();
+	auto* Worker = Cast<AOfficeworker>(GetOwner());
+	if (!Stage || !Worker) return false;
+	auto* Attempt = Stage->FindEquipmentAttempt();
+	auto& Runtime = Attempt->Employees.FindChecked(Worker->GetEmployeeID());
+	if (!bBolted)
+	{
+		if (!Runtime.bDrowsyArmed)
+		{
+			const auto& CurrentLoadout = Stage->GetEquipmentLoadout(Worker->GetEmployeeID());
+			const auto* Shield = Runtime.Effects.Find(TEXT("EQF_RECOVERY_SHIELD"));
+			if (CurrentLoadout.Has(TEXT("EQF_DROWSY_IMMUNE")) ||
+				(CurrentLoadout.Has(TEXT("EQF_RECOVERY_SHIELD")) && Shield && Shield->ExpiresAt > Attempt->ActiveTime)) return false;
+		}
+		Runtime.bDrowsyArmed = false;
+	}
+	const auto Loadout = Stage->GetEquipmentLoadout(Worker->GetEmployeeID());
+	FEmployeeEquipmentEffectEvaluator::SyncLoadout(Runtime, Loadout, false);
+	const auto Participants = Stage->GetEquipmentParticipants();
+	float Relief = 0;
+	if (FEmployeeEquipmentEffectEvaluator::TryVetoDown(*Attempt, Worker->GetEmployeeID(), bBolted, Loadout, Participants, Relief))
+	{
+		Fatigue = FMath::Max(0.f, Fatigue - Relief);
+		return false;
+	}
+	CurrentEquipmentDownId = FGuid::NewGuid();
+	const auto* Participant = Participants.FindByPredicate([&](const auto& P) { return P.EmployeeId == Worker->GetEmployeeID(); });
+	const auto Disciplines = Stage->GetEquipmentDisciplines();
+	int32 Primary = Participant ? Participant->PrimarySlot : INDEX_NONE;
+	if (!Disciplines.ContainsByPredicate([Primary](const auto& D) { return D.DisciplineSlot == Primary; })) Primary = INDEX_NONE;
+	FEmployeeEquipmentEffectEvaluator::RecordDown(*Attempt, Worker->GetEmployeeID(), Primary, CurrentEquipmentDownId, Participants);
+	return true;
+}
+
+bool UEmployeeBehaviorComponent::TickEquipmentActivities()
+{
+	auto* Stage = GetEquipmentStage();
+	auto* Worker = Cast<AOfficeworker>(GetOwner());
+	if (!Stage || !Worker) return false;
+	auto* Attempt = Stage->FindEquipmentAttempt();
+	auto& Runtime = Attempt->Employees.FindChecked(Worker->GetEmployeeID());
+	const auto Loadout = Stage->GetEquipmentLoadout(Worker->GetEmployeeID());
+	FEmployeeEquipmentEffectEvaluator::SyncLoadout(Runtime, Loadout, false);
+	if (!Worker->WasRecentlyRendered(0.5f) && FatigueSlackPhase == EFatigueSlackPhase::None && Runtime.RestUntil <= 0) return false;
+	if (EmployeeState == EEmployeeState::Typing)
+	{
+		for (FName Id : {FName(TEXT("EQF_FRESH_START")), FName(TEXT("EQF_OPENING_SPRINT"))})
+		{
+			auto* State = Runtime.Effects.Find(Id);
+			if (!Loadout.Has(Id) || !State || !State->bStartedWithEffect || State->bStartConsumed) continue;
+			State->bStartConsumed = true;
+			if (Id == TEXT("EQF_FRESH_START")) Fatigue = FMath::Max(0.f, Fatigue - FEmployeeEquipmentEffectEvaluator::ClampInstantRelief(
+				*Attempt, Worker->GetEmployeeID(), Loadout.Param(Id, TEXT("Relief")), Loadout.Rule(TEXT("InstantReliefCap"))));
+			else State->ExpiresAt = Attempt->ActiveTime + Loadout.Param(Id, TEXT("Duration"));
+		}
+	}
+	const FName Auto(TEXT("EQF_AUTO_CATCH"));
+	if (FatigueSlackPhase == EFatigueSlackPhase::Telegraph && Loadout.Has(Auto))
+	{
+		auto& State = Runtime.Effects.FindChecked(Auto);
+		if (State.bStartedWithEffect && State.Charges > 0 && Runtime.DownId == CurrentEquipmentDownId &&
+			Attempt->ActiveTime - Runtime.DownStartedAt >= Loadout.Param(Auto, TEXT("Delay")))
+		{
+			--State.Charges;
+			Fatigue = FMath::Max(0.f, Fatigue - (FatigueConfig ? FatigueConfig->TapRelief : 40.f));
+			ExitSlackToWork(EEquipmentRecoverySource::EquipmentAuto);
+			return true;
+		}
+	}
+	const FName Rest(TEXT("EQF_BREATHING_BREAK"));
+	if (Runtime.RestUntil > 0)
+	{
+		if (!Loadout.Has(Rest) || FatigueSlackPhase != EFatigueSlackPhase::None || Attempt->Outcome != EEquipmentAttemptOutcome::Active)
+		{
+			Runtime.RestUntil = 0;
+			if (FatigueSlackPhase == EFatigueSlackPhase::None) { SetState(EEmployeeState::Typing); StartFloatingTextTimer(); }
+		}
+		else if (Attempt->ActiveTime >= Runtime.RestUntil)
+		{
+			Runtime.RestUntil = 0;
+			Fatigue = FMath::Max(0.f, Fatigue - FEmployeeEquipmentEffectEvaluator::ClampInstantRelief(*Attempt, Worker->GetEmployeeID(),
+				Loadout.Param(Rest, TEXT("Relief")), Loadout.Rule(TEXT("InstantReliefCap"))));
+			SetState(EEmployeeState::Typing); StartFloatingTextTimer();
+		}
+		return true;
+	}
+	if (Loadout.Has(Rest))
+	{
+		if (Fatigue < Loadout.Param(Rest, TEXT("RearmBelow"))) Runtime.bRestArmed = true;
+		auto& State = Runtime.Effects.FindChecked(Rest);
+		if (Runtime.bRestArmed && EmployeeState == EEmployeeState::Typing && FatigueSlackPhase == EFatigueSlackPhase::None &&
+			Fatigue >= Loadout.Param(Rest, TEXT("Threshold")) && Attempt->ActiveTime >= State.CooldownUntil)
+		{
+			Runtime.bRestArmed = false;
+			Runtime.RestUntil = Attempt->ActiveTime + Loadout.Param(Rest, TEXT("Duration"));
+			State.CooldownUntil = Attempt->ActiveTime + Loadout.Param(Rest, TEXT("ICD"));
+			if (auto* Rhythm = Runtime.Effects.Find(TEXT("EQF_UNBROKEN_RHYTHM"))) Rhythm->Counter = 0;
+			StopFloatingTextTimer(); SetState(EEmployeeState::Sitting);
+			return true;
+		}
+	}
+	return false;
+}
+
+bool UEmployeeBehaviorComponent::TryManualCatch()
+{
+	if (FatigueSlackPhase == EFatigueSlackPhase::None) return false;
+	auto* Stage = GetEquipmentStage();
+	auto* Worker = Cast<AOfficeworker>(GetOwner());
+	if (!Stage || !Worker) return false;
+	auto* Attempt = Stage->FindEquipmentAttempt();
+	const auto Loadout = Stage->GetEquipmentLoadout(Worker->GetEmployeeID());
+	FEmployeeEquipmentEffectEvaluator::SyncLoadout(Attempt->Employees.FindChecked(Worker->GetEmployeeID()), Loadout, false);
+	float SelfRelief = 0; TArray<FEquipmentReliefAction> TeamRelief;
+	if (!FEmployeeEquipmentEffectEvaluator::RecordManualCatch(*Attempt, Worker->GetEmployeeID(), CurrentEquipmentDownId,
+		FatigueConfig ? FatigueConfig->TapRelief : 40.f, Fatigue, Loadout, Stage->GetEquipmentParticipants(), SelfRelief, TeamRelief)) return false;
+	Fatigue = FMath::Max(0.f, Fatigue - SelfRelief);
+	Stage->ApplyEquipmentRelief(TeamRelief);
+	ExitSlackToWork(EEquipmentRecoverySource::ManualTap);
+	return true;
 }
 
 void UEmployeeBehaviorComponent::ApplyTapRelief()
@@ -258,7 +469,7 @@ void UEmployeeBehaviorComponent::ApplyTapRelief()
 	// 늘어짐 중엔 피로가 계속 빠지고 있어 임계값 비교로는 탭 여부를 구분할 수 없으므로 여기서 명시적으로 끝낸다.
 	if (FatigueSlackPhase != EFatigueSlackPhase::None)
 	{
-		ExitSlackToWork();
+		ExitSlackToWork(EEquipmentRecoverySource::EquipmentAuto);
 	}
 }
 
@@ -267,7 +478,11 @@ float UEmployeeBehaviorComponent::GetFatigueOutputFactor() const
 	if (!FatigueConfig) return 1.0f;
 	const float Tired = FatigueConfig->TiredThreshold;
 	const float T = FMath::Clamp((Fatigue - Tired) / FMath::Max(1.0f, 100.0f - Tired), 0.0f, 1.0f);
-	return 1.0f - FatigueConfig->MaxFatiguePenalty * T;
+	float Loss = FatigueConfig->MaxFatiguePenalty * T;
+	if (const auto* Stage = GetEquipmentStage())
+		if (const auto* Worker = Cast<AOfficeworker>(GetOwner()))
+			Loss *= 1.f - Stage->GetEquipmentLoadout(Worker->GetEmployeeID()).Basic(TEXT("EQF_FATIGUE_PENALTY")) / 100.f;
+	return 1.0f - Loss;
 }
 
 //========================================
@@ -284,6 +499,7 @@ bool UEmployeeBehaviorComponent::TickFatigueSlack(float DeltaTime)
 	{
 		if (FatigueSlackPhase != EFatigueSlackPhase::None)
 		{
+			const EFatigueSlackPhase ResetFromPhase = FatigueSlackPhase;
 			FatigueSlackPhase = EFatigueSlackPhase::None;
 			SlackTelegraphTimer = 0.0f;
 			SlackSlumpTimer = 0.0f;
@@ -293,6 +509,7 @@ bool UEmployeeBehaviorComponent::TickFatigueSlack(float DeltaTime)
 			// 같은 이유로 알림도 여기서 걷는다. 다운 중 개발 판이 끝나는 건 예외가 아니라 흔한 종료 경로라,
 			// 빠뜨리면 판이 끝났는데 "뛰쳐나갔습니다"가 레일에 남는다.
 			NotifyRailRecovered();
+			BroadcastSlackPhaseChanged(ResetFromPhase);
 		}
 		return false;
 	}
@@ -314,28 +531,30 @@ bool UEmployeeBehaviorComponent::TickFatigueSlack(float DeltaTime)
 
 	// 결과 모달 중엔 페이즈를 그대로 홀드 — 모달이 닫히면 모드 전환이 페이즈를 초기화하므로 고착되지 않는다.
 	if (bFatigueFrozenByLifecycle) return false;
+	if (!GetEquipmentStage()) return FatigueSlackPhase != EFatigueSlackPhase::None;
 
 	const float SlackT = FatigueConfig->SlackingThreshold;
 
 	switch (FatigueSlackPhase)
 	{
 	case EFatigueSlackPhase::None:
+		if (auto* Attempt = GetEquipmentStage()->FindEquipmentAttempt())
+			if (auto* Runtime = Attempt->Employees.Find(Owner->GetEmployeeID()))
+				if (Fatigue < SlackT) Runtime->bDrowsyArmed = true;
 		// 자리에서 일/휴식 중 Slacking 도달 → 늘어짐(텔레그래프) 진입
 		if (Fatigue >= SlackT &&
 			(EmployeeState == EEmployeeState::Typing || EmployeeState == EEmployeeState::Sitting))
 		{
-			EnterSlackTelegraph();
-			return true;
+			if (TryBeginEquipmentDown(false))
+			{
+				EnterSlackTelegraph();
+				return true;
+			}
 		}
 		return false;
 
 	case EFatigueSlackPhase::Telegraph:
-		// 클릭("확 깨움")으로 피로가 떨어지면 즉시 복귀
-		if (Fatigue < SlackT)
-		{
-			ExitSlackToWork();
-			return true;
-		}
+		// 외부 회복은 다운 페이즈를 종료하지 않는다. 수동/자동 캐치는 각 명령이 직접 종료한다.
 		SlackTelegraphTimer += DeltaTime;
 		if (SlackTelegraphTimer >= FatigueConfig->SlackTelegraphDuration)
 		{
@@ -347,7 +566,7 @@ bool UEmployeeBehaviorComponent::TickFatigueSlack(float DeltaTime)
 		// 자리에서 고정 시간 늘어짐 — 그동안 기여 0, 피로는 TickFatigue 가 빠르게 회복.
 		// 시간 기준으로 끝내야 손해가 "정확히 N초"로 예측 가능(피로 기준이면 체력 편차로 들쭉날쭉).
 		SlackSlumpTimer += DeltaTime;
-		if (SlackSlumpTimer >= FatigueConfig->SlackSlumpDuration)
+		if (SlackSlumpTimer >= EquipmentSlumpDuration)
 		{
 			// 늘어짐은 조용히 복귀로만 끝난다 — 폭주는 피로 사슬에서 분리돼 TickBoltRoll 이 독립 소유
 			ExitSlackToWork();
@@ -357,7 +576,7 @@ bool UEmployeeBehaviorComponent::TickFatigueSlack(float DeltaTime)
 	case EFatigueSlackPhase::Bolting:
 		// 자리 이탈해 배회(움직이는 캐치 타깃). 고정 시간 뒤 스스로 복귀 — 손해 상한 유지(만회 불가 방지).
 		SlackBoltTimer += DeltaTime;
-		if (SlackBoltTimer >= FatigueConfig->BoltDuration)
+		if (SlackBoltTimer >= EquipmentBoltDuration)
 		{
 			ExitSlackToWork();
 		}
@@ -368,6 +587,7 @@ bool UEmployeeBehaviorComponent::TickFatigueSlack(float DeltaTime)
 
 void UEmployeeBehaviorComponent::EnterSlackTelegraph()
 {
+	const EFatigueSlackPhase OldPhase = FatigueSlackPhase;
 	FatigueSlackPhase = EFatigueSlackPhase::Telegraph;
 	SlackTelegraphTimer = 0.0f;
 
@@ -383,20 +603,42 @@ void UEmployeeBehaviorComponent::EnterSlackTelegraph()
 
 	// 다운 진입 = 상태 토스트 1회. 진입 시에만이라 스팸 없음.
 	NotifyRailDown(SlackReason);
+	BroadcastSlackPhaseChanged(OldPhase);
 }
 
 void UEmployeeBehaviorComponent::EnterSlackSlump()
 {
+	EquipmentSlumpDuration = FatigueConfig ? FatigueConfig->SlackSlumpDuration : 6.f;
+	if (const auto* Stage = GetEquipmentStage())
+		if (const auto* Worker = Cast<AOfficeworker>(GetOwner()))
+		{
+			const auto* Tables = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+			const auto* Definition = Tables ? Tables->FindEmployeeEquipmentEffect(TEXT("EQF_DROWSY_RECOVERY")) : nullptr;
+			EquipmentSlumpDuration = FMath::Max(Definition ? Definition->ScalarParameters.FindRef(TEXT("MinimumDuration")) : 0.f,
+				EquipmentSlumpDuration * (1.f - Stage->GetEquipmentLoadout(Worker->GetEmployeeID()).Basic(TEXT("EQF_DROWSY_RECOVERY")) / 100.f));
+		}
+	const EFatigueSlackPhase OldPhase = FatigueSlackPhase;
 	FatigueSlackPhase = EFatigueSlackPhase::Slumping;
 	SlackSlumpTimer = 0.0f;
 
 	// 자리를 뜨지 않는다 — 개발 판이 짧아 이탈 배회는 판보다 긴 손해가 되어 만회가 불가능해짐.
 	// 기여는 EnterSlackTelegraph 의 StopFloatingTextTimer 로 이미 중단된 상태이므로 여기선 자세만 유지.
 	SetState(EEmployeeState::Sitting);
+	BroadcastSlackPhaseChanged(OldPhase);
 }
 
 void UEmployeeBehaviorComponent::EnterSlackBolt()
 {
+	EquipmentBoltDuration = FatigueConfig ? FatigueConfig->BoltDuration : 8.f;
+	if (const auto* Stage = GetEquipmentStage())
+		if (const auto* Worker = Cast<AOfficeworker>(GetOwner()))
+		{
+			const auto* Tables = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+			const auto* Definition = Tables ? Tables->FindEmployeeEquipmentEffect(TEXT("EQF_BOLT_RETURN")) : nullptr;
+			EquipmentBoltDuration = FMath::Max(Definition ? Definition->ScalarParameters.FindRef(TEXT("MinimumDuration")) : 0.f,
+				EquipmentBoltDuration * (1.f - Stage->GetEquipmentLoadout(Worker->GetEmployeeID()).Basic(TEXT("EQF_BOLT_RETURN")) / 100.f));
+		}
+	const EFatigueSlackPhase OldPhase = FatigueSlackPhase;
 	FatigueSlackPhase = EFatigueSlackPhase::Bolting;
 	SlackBoltTimer = 0.0f;
 
@@ -447,10 +689,15 @@ void UEmployeeBehaviorComponent::EnterSlackBolt()
 	// 움직이는 캐치 타깃이라 화면에서 놓치기 쉽다 — 레일 알림이 "누가 어디로 갔는지"의 유일한 단서
 	SlackReason = EWorkerDownReason::Bolted;
 	NotifyRailDown(SlackReason);
+	BroadcastSlackPhaseChanged(OldPhase);
 }
 
-void UEmployeeBehaviorComponent::ExitSlackToWork()
+void UEmployeeBehaviorComponent::ExitSlackToWork(EEquipmentRecoverySource Source)
 {
+	const EFatigueSlackPhase OldPhase = FatigueSlackPhase;
+	// 복귀 달리기 연출의 출발점 — 아래 착석 보정이 액터를 좌석으로 옮기기 전 위치
+	const FVector PreviousLocation = GetOwner() ? GetOwner()->GetActorLocation() : FVector::ZeroVector;
+	RecordEquipmentRecovery(Source);
 	FatigueSlackPhase = EFatigueSlackPhase::None;
 	SlackTelegraphTimer = 0.0f;
 	SlackSlumpTimer = 0.0f;
@@ -473,6 +720,7 @@ void UEmployeeBehaviorComponent::ExitSlackToWork()
 	}
 	SetState(EEmployeeState::Typing);
 	StartFloatingTextTimer();
+	BroadcastSlackPhaseChanged(OldPhase, Source == EEquipmentRecoverySource::ManualTap, PreviousLocation);
 }
 
 void UEmployeeBehaviorComponent::NotifyRailDown(EWorkerDownReason Reason)
@@ -505,6 +753,14 @@ void UEmployeeBehaviorComponent::NotifyRailRecovered()
 	EmpMgr->NotifyEmployeeRecovered(OwnerWorker->GetEmployeeID());
 }
 
+void UEmployeeBehaviorComponent::BroadcastSlackPhaseChanged(EFatigueSlackPhase OldPhase, bool bManualCatch, const FVector& PreviousLocation)
+{
+	if (OldPhase != FatigueSlackPhase)
+	{
+		OnFatigueSlackPhaseChanged.Broadcast(OldPhase, FatigueSlackPhase, bManualCatch, PreviousLocation);
+	}
+}
+
 void UEmployeeBehaviorComponent::SetState(EEmployeeState NewState)
 {
 	if (EmployeeState == NewState)
@@ -525,10 +781,6 @@ void UEmployeeBehaviorComponent::SetState(EEmployeeState NewState)
 		default:                     SeatedPoseIndex = 0; break;                                // 멀쩡
 		}
 	}
-
-	// 새 상태 진입 = 새 사이클 시작 — 외부 경로(Wander/이벤트)로 이전 상태에 누적된 시간이
-	// 새 상태에 그대로 이어지면 즉시 전환되는 버그가 생김. 진입 시점에 항상 reset.
-	CurrentStateTime = 0.0f;
 
 	// 디버그: 상태 전환 로그 (항상 출력)
 	AOfficeworker* Owner = Cast<AOfficeworker>(GetOwner());
@@ -593,6 +845,12 @@ void UEmployeeBehaviorComponent::SetState(EEmployeeState NewState)
 		break;
 	}
 
+	if (Owner && (NewState == EEmployeeState::Wander || NewState == EEmployeeState::CheerStandUp
+		|| NewState == EEmployeeState::Greeting || NewState == EEmployeeState::Dance))
+	{
+		Owner->StandUpFromWorkstation();
+	}
+
 	// 인사(Greeting) 클립엔 완료 노티파이가 없어 폴백 타이머가 종료 트리거가 된다.
 	// (서기/앉기는 AnimBP 가 EmployeeState 로 직접 전이하므로 중간 홀드/타이머 불필요)
 	if (NewState == EEmployeeState::Greeting)
@@ -619,100 +877,16 @@ void UEmployeeBehaviorComponent::SetOperationIncome(float IncomePerSecond)
 	OperationIncomePerSecond = IncomePerSecond;
 }
 
-void UEmployeeBehaviorComponent::StartWander()
-{
-	if (EmployeeState == EEmployeeState::Wander)
-	{
-		return;
-	}
-
-	// 배회 목적지 랜덤 선택 (확률에 따라)
-	float Rand = FMath::FRand();
-	if (Rand < 0.5f)
-	{
-		CurrentWanderDestination = EWanderDestination::RandomPoint;
-	}
-	else if (Rand < 0.8f)
-	{
-		CurrentWanderDestination = EWanderDestination::NearCoworker;
-	}
-	else if (Rand < 0.95f)
-	{
-		CurrentWanderDestination = EWanderDestination::WindowArea;
-	}
-	else
-	{
-		CurrentWanderDestination = EWanderDestination::CenterArea;
-	}
-
-	SetState(EEmployeeState::Wander);
-	Walking = true;
-	Speed = 1.0f;  // 걷기 속도
-}
-
-void UEmployeeBehaviorComponent::ReturnToWorkstation()
-{
-	// 복귀 시 빠른 이동
-	Walking = true;
-	Speed = 6.0f;  // 달리기 속도
-
-	// 실제 이동 완료 후 외부에서 SetState(Working/Rest) 호출
-}
-
+// 착석 업무는 모드 불문 연속 타이핑 — 자리이탈/휴식은 피로 슬랙 루프가 단독 소유한다.
 void UEmployeeBehaviorComponent::TickWorking(float DeltaTime)
 {
-	// 수익 발생 (모드 공통)
 	GenerateIncome(DeltaTime);
-
-	// Stage 는 연속 타이핑만 유지 — Stage 틱은 Typing 외 상태를 복귀시키지 않아, 여기서 Sitting 으로
-	// 넘기면 복귀 경로가 없어 영구 정지한다. Stage 의 자리이탈은 피로 슬랙 루프가 전담.
-	if (CurrentBehaviorMode == EEmployeeBehaviorMode::Stage)
-	{
-		return;
-	}
-
-	// Idle/Operation: Stamina 기반 Work 사이클 — WorkDuration 초과 시 Sitting(휴식)으로 전환(복귀는 TickRest)
-	CurrentStateTime += DeltaTime;
-	if (CurrentStateTime >= GetWorkDuration())
-	{
-		CurrentStateTime = 0.0f;
-		StopFloatingTextTimer();
-		SetState(EEmployeeState::Sitting);
-		return;
-	}
-}
-
-void UEmployeeBehaviorComponent::TickRest(float DeltaTime)
-{
-	// Stamina 기반 Rest 사이클 — 누적 시간이 GetRestDuration() 초과하면 업무 복귀
-	CurrentStateTime += DeltaTime;
-
-	if (CurrentStateTime >= GetRestDuration())
-	{
-		CurrentStateTime = 0.0f;
-		SetState(EEmployeeState::Typing);
-		StartFloatingTextTimer();
-	}
 }
 
 void UEmployeeBehaviorComponent::TickWander(float DeltaTime)
 {
 	// 배회 중 수익 발생 (50%)
 	GenerateIncome(DeltaTime);
-}
-
-float UEmployeeBehaviorComponent::GetWorkDuration() const
-{
-	// 체력 높은 직원은 더 오래 일함 — 기본 30s × (1 + Stamina × 계수). ★15 평균(35) → 90s
-	const int32 Stamina = GetOwnerStamina();
-	return BaseWorkDuration * (1.0f + FMath::Max(0, Stamina) * EmployeeStatTuning::WorkDurationStaminaScale);
-}
-
-float UEmployeeBehaviorComponent::GetRestDuration() const
-{
-	// 체력 높은 직원은 짧게 쉼 — 기본 8s / (1 + Stamina × 계수). ★15 평균(35) → 4s
-	const int32 Stamina = GetOwnerStamina();
-	return BaseRestDuration / (1.0f + FMath::Max(0, Stamina) * EmployeeStatTuning::RestDurationStaminaScale);
 }
 
 int32 UEmployeeBehaviorComponent::GetOwnerStamina() const
@@ -748,7 +922,10 @@ float UEmployeeBehaviorComponent::GetEffectiveBoltChance() const
 	// V/(V+K) 는 절대 캡에 안 닿지만 계속 오른다. K = 반효과 지점(=구 캡 도달점) 이라 초반 기울기는 동일.
 	const float HalfPoint = FMath::Max(1.0f, FatigueConfig->MaxBoltReduction / FMath::Max(KINDA_SMALL_NUMBER, FatigueConfig->ComposureBoltScale));
 	const float Reduction = FatigueConfig->MaxBoltReduction * (Effective / (Effective + HalfPoint));
-	return FatigueConfig->BoltChancePerSec * (1.0f - Reduction);
+	float Chance = FatigueConfig->BoltChancePerSec * (1.0f - Reduction);
+	if (const auto* Stage = GetEquipmentStage())
+		Chance *= 1.f - Stage->GetEquipmentLoadout(OwnerWorker->GetEmployeeID()).Basic(TEXT("EQF_BOLT_RESIST")) / 100.f;
+	return Chance;
 }
 
 void UEmployeeBehaviorComponent::TickBoltRoll(float DeltaTime)
@@ -762,6 +939,7 @@ void UEmployeeBehaviorComponent::TickBoltRoll(float DeltaTime)
 	if (FatigueSlackPhase != EFatigueSlackPhase::None) { return; }
 
 	if (bFatigueFrozenByLifecycle) { return; }
+	if (!GetEquipmentStage()) return;
 
 	AOfficeworker* OwnerWorker = Cast<AOfficeworker>(GetOwner());
 	if (!OwnerWorker || !OwnerWorker->WasRecentlyRendered(0.5f)) { return; }
@@ -778,7 +956,7 @@ void UEmployeeBehaviorComponent::TickBoltRoll(float DeltaTime)
 	if (BoltRollTimer < 1.0f) { return; }
 	BoltRollTimer -= 1.0f;
 
-	if (FMath::FRand() < GetEffectiveBoltChance())
+	if (FMath::FRand() < GetEffectiveBoltChance() && TryBeginEquipmentDown(true))
 	{
 		EnterSlackBolt();
 	}
@@ -821,11 +999,28 @@ void UEmployeeBehaviorComponent::GenerateIncome(float DeltaTime)
 {
 	// 적립만 — 지급은 플로팅텍스트 타이머(코인 연출)가 단독으로 소유한다.
 	// 요율 계산도 게터가 단독 소유라 표시(수익 칩)와 지급이 갈릴 수 없다.
-	AccumulatedIncome += GetCurrentIncomePerSecond() * DeltaTime;
+	AccumulatedIncome += static_cast<double>(GetCurrentIncomePerSecond()) * DeltaTime;
+}
+
+int64 UEmployeeBehaviorComponent::ResolveAccumulatedIncomePayout(double& PendingIncome)
+{
+	const FOperationTickPayout Payout = ResolveOperationTickPayout(false, PendingIncome, 0.0);
+	PendingIncome = Payout.NewPending;
+	return Payout.PayoutNow;
 }
 
 void UEmployeeBehaviorComponent::SetBehaviorMode(EEmployeeBehaviorMode NewMode)
 {
+	if (IsContinuousManufacturingWorker()) NewMode = EEmployeeBehaviorMode::Manufacturing;
+	if (CurrentBehaviorMode == EEmployeeBehaviorMode::Stage && (NewMode != CurrentBehaviorMode || EmployeeState != EEmployeeState::Typing))
+	{
+		RecordEquipmentRecovery(EEquipmentRecoverySource::ModeExit);
+		if (UWorld* CurrentWorld = GetWorld())
+			if (auto* Stage = CurrentWorld->GetSubsystem<UOfficeStageProgressManager>())
+				if (auto* Attempt = Stage->FindEquipmentAttempt())
+					if (auto* Worker = Cast<AOfficeworker>(GetOwner()))
+						if (auto* Runtime = Attempt->Employees.Find(Worker->GetEmployeeID())) Runtime->RestUntil = 0;
+	}
 	// 같은 모드로 다시 설정할 때
 	if (CurrentBehaviorMode == NewMode)
 	{
@@ -833,10 +1028,12 @@ void UEmployeeBehaviorComponent::SetBehaviorMode(EEmployeeBehaviorMode NewMode)
 		if (NewMode == EEmployeeBehaviorMode::Stage && EmployeeState != EEmployeeState::Typing)
 		{
 			// 슬랙 점유 상태(텔레그래프/배회)에서 무대 강제 착석 — 스테일 페이즈 리셋(영구 정지 방지)
+			const EFatigueSlackPhase ResetFromPhase = FatigueSlackPhase;
 			FatigueSlackPhase = EFatigueSlackPhase::None;
 			SlackTelegraphTimer = 0.0f;
 			SlackBoltTimer = 0.0f;
 			ApplyMoveSpeed();  // 배회(Bolting) 중 강제 착석이면 Bolt 속도가 남으므로 원복
+			BroadcastSlackPhaseChanged(ResetFromPhase);
 
 			AOfficeworker* Owner = Cast<AOfficeworker>(GetOwner());
 			if (Owner)
@@ -876,10 +1073,12 @@ void UEmployeeBehaviorComponent::SetBehaviorMode(EEmployeeBehaviorMode NewMode)
 
 	// 모드 전환은 워커 상태를 새로 셋업(강제 착석/배회)하므로 슬랙 페이즈도 초기화 —
 	// 스테일 페이즈가 남으면 TickFatigueSlack 이 영구 점유해 워커가 정지(피로 100 고정)된다
+	const EFatigueSlackPhase ModeResetFromPhase = FatigueSlackPhase;
 	FatigueSlackPhase = EFatigueSlackPhase::None;
 	SlackTelegraphTimer = 0.0f;
 	SlackBoltTimer = 0.0f;
 	ApplyMoveSpeed();  // 페이즈를 지웠으니 걷기 속도로 원복 (Bolting 중 모드 전환 시 450 고착 방지)
+	BroadcastSlackPhaseChanged(ModeResetFromPhase);
 
 	// Stage/Operation 모드에서 벗어나면 FloatingText 타이머 중지
 	if ((OldMode == EEmployeeBehaviorMode::Stage || OldMode == EEmployeeBehaviorMode::Operation) && OldMode != NewMode)
@@ -891,6 +1090,11 @@ void UEmployeeBehaviorComponent::SetBehaviorMode(EEmployeeBehaviorMode NewMode)
 
 	switch (NewMode)
 	{
+	case EEmployeeBehaviorMode::Manufacturing:
+		StartOperationSeatedWork();
+		StopFloatingTextTimer();
+		break;
+
 	case EEmployeeBehaviorMode::Idle:
 		// Idle 모드: 현재 상태에 따른 전환 시퀀스 실행
 		if (Owner)
@@ -1123,6 +1327,7 @@ void UEmployeeBehaviorComponent::StartIdleWander()
 	{
 		return;
 	}
+	Owner->StandUpFromWorkstation();
 
 	// 현재 위치에서 가장 가까운 NavMesh 위치로 텔레포트
 	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(GetWorld());
@@ -1195,6 +1400,44 @@ void UEmployeeBehaviorComponent::OnGreetingComplete()
 	UE_LOG(LogTemp, Log, TEXT("[EmployeeBehaviorComponent] Greeting complete"));
 	SetState(EEmployeeState::Wander);
 	OnGreetingFinished.Broadcast();
+}
+
+void UEmployeeBehaviorComponent::BeginRecruitmentArrival()
+{
+	// 외부 입장 흐름이 초기 상태를 소유하므로 예약된 자동 초기화도 건너뛴다.
+	bSkipAutoInit = true;
+	bRecruitmentArrivalActive = true;
+	StopFloatingTextTimer();
+	GetWorld()->GetTimerManager().ClearTimer(TransitionFallbackTimerHandle);
+	GetWorld()->GetTimerManager().ClearTimer(DanceTimerHandle);
+	if (AOfficeworker* ArrivalWorker = Cast<AOfficeworker>(GetOwner()))
+	{
+		ArrivalWorker->StopRandomRoaming();
+		ArrivalWorker->StandUpFromWorkstation();
+		if (UCharacterMovementComponent* ArrivalMovement = ArrivalWorker->GetCharacterMovement())
+		{
+			ArrivalMovement->MaxWalkSpeed = MoveSpeedBolt;
+		}
+	}
+	SetState(EEmployeeState::Wander);
+}
+
+void UEmployeeBehaviorComponent::EndRecruitmentArrival()
+{
+	StopDance();
+	bRecruitmentArrivalActive = false;
+	ApplyMoveSpeed();
+	if (IsContinuousManufacturingWorker())
+	{
+		SetBehaviorMode(EEmployeeBehaviorMode::Manufacturing);
+		return;
+	}
+	if (AOfficeworker* ArrivalWorker = Cast<AOfficeworker>(GetOwner()))
+	{
+		ArrivalWorker->TeleportToWorkstationAndSit();
+	}
+	SetState(EEmployeeState::Typing);
+	StartFloatingTextTimer();
 }
 
 void UEmployeeBehaviorComponent::StartDance(int32 DanceIndex, float Duration)
@@ -1319,7 +1562,7 @@ void UEmployeeBehaviorComponent::SpawnScoreFloatingText()
 	}
 
 	// Operation 모드: 누적 수익 확인
-	if (CurrentBehaviorMode == EEmployeeBehaviorMode::Operation && AccumulatedIncome < 1.f)
+	if (CurrentBehaviorMode == EEmployeeBehaviorMode::Operation && AccumulatedIncome < 1.0)
 	{
 		StartFloatingTextTimer();
 		return;
@@ -1362,6 +1605,22 @@ void UEmployeeBehaviorComponent::SpawnScoreFloatingText()
 			StartFloatingTextTimer();
 			return;
 		}
+		auto* EquipmentAttempt = StageMgr->FindEquipmentAttempt();
+		const auto* EquipmentManager = GameInst->GetSubsystem<UEmployeeEquipmentManagerSubsystem>();
+		if (!EquipmentAttempt || !EquipmentManager || !EquipmentAttempt->Employees.Contains(Employee->EmployeeID))
+		{
+			StartFloatingTextTimer();
+			return;
+		}
+		const FEquipmentEffectLoadout EquipmentLoadout = StageMgr->GetEquipmentLoadout(Employee->EmployeeID);
+		FEmployeeEquipmentEffectEvaluator::SyncLoadout(EquipmentAttempt->Employees.FindChecked(Employee->EmployeeID), EquipmentLoadout, false);
+		FEquipmentContributionContext EquipmentContext;
+		EquipmentContext.RootEventId = FGuid::NewGuid(); EquipmentContext.AttemptId = EquipmentAttempt->AttemptId;
+		EquipmentContext.LoadoutRevision = EquipmentManager->GetState().Revision;
+		EquipmentContext.EmployeeId = Employee->EmployeeID; EquipmentContext.PrimarySlot = GetPrimaryDisciplineSlot(*Employee);
+		EquipmentContext.Disciplines = StageMgr->GetEquipmentDisciplines();
+		EquipmentContext.Participants = StageMgr->GetEquipmentParticipants();
+		EquipmentContext.ProjectYield = StageMgr->GetContributionYieldMultiplier();
 
 		// 기여 간격 (이 직원의 WorkInterval)
 		float WorkInterval = CalculateWorkInterval();
@@ -1385,24 +1644,21 @@ void UEmployeeBehaviorComponent::SpawnScoreFloatingText()
 		}
 		if (CandStepNo.Num() == 0) { return; }  // 활성 직능 없음 (착수 전 / 직능 미설정)
 
-		// 업무집중도 — 이 확률로 주 직능(부서칩과 같은 argmax)을 강제 지정한다. 굴림 실패거나
-		// 주 직능이 이번 프로젝트의 활성 스텝에 없으면 조용히 아래 가중 랜덤으로 떨어진다.
-		// 상한(MaxFocusChance)이 100% 를 막는 이유 = 직원 1명 사무실에서 다른 스텝이 영구 0점이 되면
-		// 출시 게이트를 영영 못 넘는다.
-		int32 Pick = INDEX_NONE;
+		int32 ForcedRoute = FEmployeeEquipmentEffectEvaluator::SelectRoute(*EquipmentAttempt, Employee->EmployeeID, EquipmentLoadout,
+			EquipmentContext.Disciplines, 1.f, EquipmentContext.RouteEffect);
+		if (ForcedRoute == INDEX_NONE && EquipmentLoadout.Has(TEXT("EQF_DEFICIT_ROUTER")))
+			ForcedRoute = FEmployeeEquipmentEffectEvaluator::SelectRoute(*EquipmentAttempt, Employee->EmployeeID, EquipmentLoadout,
+				EquipmentContext.Disciplines, FMath::FRand(), EquipmentContext.RouteEffect);
+		int32 Pick = CandSlot.IndexOfByKey(ForcedRoute);
+		if (Pick == INDEX_NONE && CandSlot.Num() > 1 && EquipmentLoadout.Has(TEXT("EQF_ROUND_ROBIN")))
 		{
-			const int32 EffectiveFocus = Employee->Stats.Focus + UEmployeeTypeHelper::GetEnhanceStatBonus(Employee->EnhancementLevel);
-			const float FocusChance = FMath::Min(EffectiveFocus * EmployeeStatTuning::FocusPerPoint, EmployeeStatTuning::MaxFocusChance);
-			if (FMath::FRand() < FocusChance)
+			const int32 Previous = EquipmentAttempt->Employees.FindChecked(Employee->EmployeeID).LastNativeTarget;
+			const int32 Excluded = CandSlot.IndexOfByKey(Previous);
+			if (Excluded != INDEX_NONE)
 			{
-				const int32 PrimarySlot = GetPrimaryDisciplineSlot(*Employee);
-				if (PrimarySlot != INDEX_NONE)
-				{
-					Pick = CandSlot.IndexOfByKey(PrimarySlot);
-				}
+				TotalW -= CandWeight[Excluded]; CandSlot.RemoveAt(Excluded); CandStepNo.RemoveAt(Excluded); CandWeight.RemoveAt(Excluded);
 			}
 		}
-
 		// 가중 랜덤 — 직능 포인트 높은 직능일수록 자주 선택
 		if (Pick == INDEX_NONE)
 		{
@@ -1415,9 +1671,9 @@ void UEmployeeBehaviorComponent::SpawnScoreFloatingText()
 				if (Roll < Acc) { Pick = k; break; }
 			}
 		}
-		const int32 ChosenStep = CandStepNo[Pick];   // orb/strip 라우팅 1-based 인덱스
 		const int32 ChosenSlot = CandSlot[Pick];
 		const float ChosenAffinity = CandWeight[Pick];
+		EquipmentContext.ChosenSlot = ChosenSlot;
 
 		// 정규화 기준을 고정 상수로 두어 자기상쇄를 끊는다 — 간격이 짧아진 만큼 초당 산출이 오른다.
 		// 시각 바닥(MinWorkInterval)을 넘는 초과분은 Overflow 로 흡수해 개당 점수/배출 개수로 환산.
@@ -1426,7 +1682,11 @@ void UEmployeeBehaviorComponent::SpawnScoreFloatingText()
 		const int32 OrbCount = FMath::Clamp(FMath::RoundToInt(Overflow), 1, MaxOrbPerEmission);
 
 		float BaseScore = UEmployeeTypeHelper::CalculateBaseOutput(Employee->Level);
-		float RandomFactor = FMath::RandRange(0.8f, 1.2f);
+		const float RandomCeiling = EquipmentLoadout.Has(TEXT("EQF_STEADY_OUTPUT")) ?
+			EquipmentLoadout.Param(TEXT("EQF_STEADY_OUTPUT"), TEXT("RandomCeiling")) : 1.2f;
+		const float RandomFloor = EquipmentLoadout.Has(TEXT("EQF_STEADY_OUTPUT")) ?
+			FMath::Min(EquipmentLoadout.Param(TEXT("EQF_STEADY_OUTPUT"), TEXT("RandomFloor")), RandomCeiling) : 0.8f;
+		float RandomFactor = FMath::RandRange(RandomFloor, RandomCeiling);
 		// 정규화는 ScoreNormInterval(케이던스와 분리된 고정 상수) 로 — BaseWorkInterval 을 쓰면
 		// 점수가 케이던스의 제곱에 비례해 히트 수를 늘리는 순간 DPS 가 같이 깎인다.
 		float ContributionScore = BaseScore * ChosenAffinity * RandomFactor * ScoreNormInterval * Overflow;
@@ -1455,35 +1715,57 @@ void UEmployeeBehaviorComponent::SpawnScoreFloatingText()
 		// 잠재큐브 (메이플식 % 축) — 줄 최대 3개 순회라 캐시 불요
 		const FPotentialModifiers PotMods = UEmployeePotentialHelper::AggregateModifiers(Employee->PotentialAbility);
 		ContributionScore *= PotMods.ScoreMult;
+		if (const AWorkstationActorBase* ScoreDesk = Owner->GetAssignedWorkstation())
+		{
+			ContributionScore *= 1.f + ScoreDesk->GetComponentBonus(EWorkstationUpgradeType::Tools);
+		}
+		ContributionScore *= 1.f + FEmployeeEquipmentEffectEvaluator::PersonalScorePercent(*EquipmentAttempt, EquipmentContext, EquipmentLoadout) / 100.f;
+		ContributionScore *= 1.f + FEmployeeEquipmentEffectEvaluator::TeamScorePercent(EquipmentContext) / 100.f;
 
 		// 크리티컬 판정 (스테이지 기본/특성/피버 + 버프 + 큐브 잭팟 줄 + 크리티컬 확률 스탯)
 		// 상한을 두는 이유: 크리에만 sweep 사운드+orb 버스트가 붙어 punctuation 역할을 하므로 상시 크리는 연출을 죽인다
 		const int32 EffectiveCrit = Employee->Stats.CritChance + UEmployeeTypeHelper::GetEnhanceStatBonus(Employee->EnhancementLevel);
-		float CritChance = FMath::Min(
+		float CritChance = FEmployeeEquipmentEffectEvaluator::GeneralCritChance(
 			StageMgr->GetCriticalChance() + GetTotalCritChanceBonus() + PotMods.CritChanceAdd
 				+ EffectiveCrit * EmployeeStatTuning::CritChancePerPoint,
-			EmployeeStatTuning::MaxCritChance);
+			EmployeeStatTuning::MaxCritChance, *EquipmentAttempt, Employee->EmployeeID, EquipmentLoadout);
 		float CritMultiplier = 1.0f;
-		if (FMath::FRand() < CritChance)
+		EquipmentContext.GuaranteedEffect = FEmployeeEquipmentEffectEvaluator::GuaranteedCrit(*EquipmentAttempt, Employee->EmployeeID, EquipmentLoadout);
+		if (!EquipmentContext.GuaranteedEffect.IsNone() || FMath::FRand() < CritChance)
 		{
-			CritMultiplier = 2.0f + PotMods.CritDamageAdd;
+			const int32 EffectiveCritDamage = Employee->Stats.CritDamage +
+				UEmployeeTypeHelper::GetEnhanceStatBonus(Employee->EnhancementLevel);
+			CritMultiplier = EmployeeStatTuning::CriticalMultiplier(EffectiveCritDamage, PotMods.CritDamageAdd) +
+				FEmployeeEquipmentEffectEvaluator::CritPower(*EquipmentAttempt, Employee->EmployeeID, EquipmentLoadout);
 		}
 		ContributionScore *= CritMultiplier;
+		EquipmentContext.bCritical = CritMultiplier > 1.f;
+		EquipmentContext.NativeQ = ContributionScore;
 
-		// 선택된 직능 스텝에만 점수 반영
-		StageMgr->AddDisciplineContribution(ChosenSlot, ContributionScore);
+		const auto PlannedPackets = FEmployeeEquipmentEffectEvaluator::PlanPackets(*EquipmentAttempt, EquipmentContext,
+			EquipmentLoadout, EquipmentLoadout.Rule(TEXT("BonusScoreCapPercent")));
+		TArray<FEquipmentContributionPacket> AppliedPackets;
+		if (!StageMgr->TryCommitContributionBatch(EquipmentContext, PlannedPackets, AppliedPackets))
+		{
+			StartFloatingTextTimer();
+			return;
+		}
 
 		// 점수 숫자 "+N" 연출은 orb 요청 경로(OfficeMainWidget::OnScoreOrbRequestedReceived)에서
 		// orb와 함께 스크린스페이스로 스폰 (ScoreOrbContainer::SpawnScoreNumber)
 		// 히트당 점수가 ~1점 근처라 버림 시 orb 가 침묵 — 반올림 + 최소 1 표시
-		int32 DisplayInt = FMath::Max(1, FMath::RoundToInt(ContributionScore));
-
-		// 구슬 비행 요청 (직원의 실제 현재 위치 사용 - 터치 이동 대응)
-		if (DisplayInt > 0)
+		TMap<int32, float> VisualScores;
+		for (const auto& Packet : AppliedPackets) VisualScores.FindOrAdd(Packet.DisciplineSlot) += Packet.Score;
+		TArray<int32> VisualTargets; VisualScores.GetKeys(VisualTargets); VisualTargets.Sort();
+		int32 RemainingOrbs = FMath::Min(MaxOrbPerEmission, FMath::Max(OrbCount, VisualTargets.Num()));
+		FVector EmployeePos = Owner->GetActorLocation(); EmployeePos.Z += 80.f;
+		for (int32 Index = 0; Index < VisualTargets.Num() && RemainingOrbs > 0; ++Index)
 		{
-			FVector EmployeePos = Owner->GetActorLocation();
-			EmployeePos.Z += 80.f;
-			StageMgr->RequestScoreOrb(EmployeePos, ChosenStep, ContributionScore, CritMultiplier > 1.0f, OrbCount);
+			const int32 Target = VisualTargets[Index];
+			const int32 StepIndex = ActiveSteps.IndexOfByPredicate([Target](const auto& Step) { return Step.DisciplineSlot == Target; });
+			const int32 Count = FMath::Max(1, RemainingOrbs - (VisualTargets.Num() - Index - 1));
+			RemainingOrbs -= Count;
+			StageMgr->RequestScoreOrb(EmployeePos, StepIndex + 1, VisualScores.FindChecked(Target), CritMultiplier > 1.0f, Count, Index == 0);
 		}
 
 		StageMgr->OnEmployeeFloatingTextSpawned.Broadcast();
@@ -1491,6 +1773,7 @@ void UEmployeeBehaviorComponent::SpawnScoreFloatingText()
 		// 크리 때만 sweep — 1초 드립에선 매 틱 재생 = 청각 피로 (정상 틱은 무음, 크리가 punctuation)
 		if (CritMultiplier > 1.0f)
 		{
+			OnCriticalContribution.Broadcast();
 			if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
 			{
 				if (USoundManagerSubsystem* SoundMgr = GI->GetSubsystem<USoundManagerSubsystem>())
@@ -1507,36 +1790,40 @@ void UEmployeeBehaviorComponent::SpawnScoreFloatingText()
 	{
 		// Operation 모드: 직원별 "+N" 자금 플로팅(귀속 표시) + 조용한 적립 + 코인 연출용 pending.
 		// MoneyVFX(나이아가라 파티클)만 제거 — 수집 시각화는 오피스 코인 플라이아웃이 담당(난잡 방지).
-		int32 DisplayInt = static_cast<int32>(AccumulatedIncome);
-
 		UCGGameInstance* GameInst = UCGGameInstance::GetInstance();
 		if (GameInst)
 		{
 			// "+N" 자금 텍스트는 코인 경로(OfficeLayer::OnIncomeCoinRequestedReceived → SpawnIncomeText)에서
 			// C++ 직접 렌더 — BP_DamageText 미사용
-
 			if (UResourceItemManager* ResourceMgr = GameInst->GetSubsystem<UResourceItemManager>())
 			{
-				ResourceMgr->StoreResource(EResourceType::Money, static_cast<int64>(DisplayInt), false);
-			}
-
-			if (UProjectOperationManager* OpMgr = GameInst->GetSubsystem<UProjectOperationManager>())
-			{
-				// 결산서용 직원 수익 누적
-				const int32 BuildingIndex = GameInst->GetCurrentManagedBuildingIndex();
-				if (BuildingIndex != INDEX_NONE)
+				double RemainingIncome = AccumulatedIncome;
+				const int64 PayoutAmount = ResolveAccumulatedIncomePayout(RemainingIncome);
+				if (PayoutAmount == 0)
 				{
-					OpMgr->AddEmployeeRevenue(BuildingIndex, static_cast<float>(DisplayInt));
+					// 잘못된 요율로 누적값이 NaN/Inf가 된 경우 헬퍼가 0으로 정리한다.
+					AccumulatedIncome = RemainingIncome;
 				}
-				// 코인 연출: 이 직원 머리 위에서 돈 아이콘으로 코인 1개 (OfficeLayer 구독)
-				FVector CoinPos = Owner->GetActorLocation();
-				CoinPos.Z += 80.f;
-				OpMgr->RequestIncomeCoin(CoinPos, static_cast<int64>(DisplayInt), Owner->GetEmployeeID());
+				if (PayoutAmount > 0)
+				{
+					ResourceMgr->StoreResource(EResourceType::Money, PayoutAmount, false);
+					AccumulatedIncome = RemainingIncome;
+
+					if (UProjectOperationManager* OpMgr = GameInst->GetSubsystem<UProjectOperationManager>())
+					{
+						// 결산서와 코인 연출에는 은행에 지급한 동일 금액을 사용한다.
+						const int32 BuildingIndex = GameInst->GetCurrentManagedBuildingIndex();
+						if (BuildingIndex != INDEX_NONE)
+						{
+							OpMgr->AddEmployeeRevenue(BuildingIndex, static_cast<double>(PayoutAmount));
+						}
+						FVector CoinPos = Owner->GetActorLocation();
+						CoinPos.Z += 80.f;
+						OpMgr->RequestIncomeCoin(CoinPos, PayoutAmount, Owner->GetEmployeeID());
+					}
+				}
 			}
 		}
-
-		// 정수 부분만 차감, 소수점 잔여분은 유지
-		AccumulatedIncome -= static_cast<float>(DisplayInt);
 	}
 
 	// 다음 타이머 예약
@@ -1580,7 +1867,7 @@ float UEmployeeBehaviorComponent::ComposeWorkstationSpeedFactor(
 	return EmployeeSpeedFactor * (1.0f + FMath::Max(0.0f, WorkstationRate));
 }
 
-float UEmployeeBehaviorComponent::GetSpeedFactor() const
+float UEmployeeBehaviorComponent::GetBaseWorkSpeedFactor() const
 {
 	AOfficeworker* OwnerWorker = Cast<AOfficeworker>(GetOwner());
 	UCGGameInstance* GameInst = UCGGameInstance::GetInstance();
@@ -1602,6 +1889,16 @@ float UEmployeeBehaviorComponent::GetSpeedFactor() const
 		? AssignedWorkstation->GetWorkSpeedBonusRate()
 		: 0.0f;
 	return ComposeWorkstationSpeedFactor(EmployeeSpeedFactor, WorkstationRate);
+}
+
+float UEmployeeBehaviorComponent::GetSpeedFactor() const
+{
+	float Result = GetBaseWorkSpeedFactor();
+	if (const auto* Stage = GetEquipmentStage())
+		if (const auto* Attempt = Stage->FindEquipmentAttempt())
+			if (const auto* Worker = Cast<AOfficeworker>(GetOwner()))
+				Result *= 1.f + FEmployeeEquipmentEffectEvaluator::SpeedPercent(*Attempt, Worker->GetEmployeeID(), Stage->GetEquipmentLoadout(Worker->GetEmployeeID())) / 100.f;
+	return Result;
 }
 
 void UEmployeeBehaviorComponent::OnTransitionFallbackTimeout()

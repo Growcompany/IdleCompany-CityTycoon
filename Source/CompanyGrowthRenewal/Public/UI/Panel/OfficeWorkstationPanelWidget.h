@@ -7,8 +7,10 @@
 #include "OfficeWorkstationPanelWidget.generated.h"
 
 class UButtonWidget;
+class UCloseButtonWidget;
 class UTableManagerSubsystem;
 class UListView;
+class UWidget;
 
 /**
  * 오피스 업무공간 배치/업그레이드 패널
@@ -24,6 +26,12 @@ class COMPANYGROWTHRENEWAL_API UOfficeWorkstationPanelWidget : public UAnimatedA
 {
 	GENERATED_BODY()
 
+public:
+	UWidget* GetCloseButtonWidget() const;
+	// 표시 중인 해금·활성 책상이 있을 때 자유 선택 목록을 안내 앵커로 제공한다.
+	UWidget* GetDeskGuideCatalogWidget() const;
+
+private:
 	UPROPERTY()
 	UTableManagerSubsystem* TableManager;
 
@@ -35,11 +43,16 @@ protected:
 
 	UFUNCTION()
 	void OnBackButtonClicked();
+	UFUNCTION() void OnRelocateClicked();
+	bool bPendingPlacementEdit = false;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UButtonWidget* RelocateButton;
 
 	// ========== UI 바인딩 ==========
 
+	// 공용 닫기 X (UIE_CloseButton)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UButtonWidget* BackButton;
+	TObjectPtr<UCloseButtonWidget> BackButton;
 
 	// 업무공간 카드 ListView
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))

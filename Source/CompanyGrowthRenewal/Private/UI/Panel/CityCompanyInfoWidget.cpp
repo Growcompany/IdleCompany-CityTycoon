@@ -66,6 +66,7 @@ void UCityCompanyInfoWidget::NativeConstruct()
 
 void UCityCompanyInfoWidget::NativeDestruct()
 {
+	StopOwnedMoneyFollow();
 	if (ConfirmCancelWidget)
 	{
 		ConfirmCancelWidget->OnConfirm.RemoveAll(this);
@@ -91,6 +92,7 @@ void UCityCompanyInfoWidget::NativeOnActivated()
 void UCityCompanyInfoWidget::NativeOnDeactivated()
 {
 	Super::NativeOnDeactivated();
+	StopOwnedMoneyFollow();
 
 	// 관리 패널로 잇는 체인이면 Push 만 하고 GoToNormalMode 는 건너뜀 — 관리 패널 NativeOnActivated 가 다시 GoToUIMode 를 불러
 	// Normal→UI 로 한 프레임 튀며 그 사이 월드 입력이 열리는 사고(스치는 탭이 뒤 빌딩에 꽂힘)를 막는다.
@@ -101,9 +103,8 @@ void UCityCompanyInfoWidget::NativeOnDeactivated()
 		bPendingManagePanelOpen = false;
 		if (UCityAcquisitionManager* Acq = GetWorld() ? GetWorld()->GetSubsystem<UCityAcquisitionManager>() : nullptr)
 		{
-			Acq->OpenManagePanel(CompanyKey);
+			if (Acq->OpenManagePanel(CompanyKey)) return;
 		}
-		return;
 	}
 
 	// 연속으로 다른 모달이 열리는 경우가 아니면 UI 모드 해제
@@ -354,6 +355,27 @@ void UCityCompanyInfoWidget::ConfigureForCompany(int32 InKey)
 	}
 }
 
+void UCityCompanyInfoWidget::ApplyOwnedMoney(int64 Amount)
+{
+	if (Text_Owned)
+	{
+		Text_Owned->SetText(FText::FromString(FString::Printf(TEXT("보유 %s"), *UGlobalUtilFunctions::AbbreviateNumber(Amount).ToString())));
+	}
+}
+
+void UCityCompanyInfoWidget::StopOwnedMoneyFollow()
+{
+	if (!OwnedMoneyHandle.IsValid())
+	{
+		return;
+	}
+	if (UResourceItemManager* OwnedMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UResourceItemManager>() : nullptr)
+	{
+		OwnedMgr->OnResourceChanged.Remove(OwnedMoneyHandle);
+	}
+	OwnedMoneyHandle.Reset();
+}
+
 void UCityCompanyInfoWidget::ApplyReturnAmount(int64 Amount)
 {
 	FString NumberPart;
@@ -396,6 +418,25 @@ void UCityCompanyInfoWidget::HandleAcquireConfirmed()
 		return;
 	}
 
+	// 「보유」는 창을 열 때 값이라 인수비가 빠진 지금 값으로 다시 쓰고, 결과를 보는 동안 들어오는 수익도 따라간다(부족 표시는 이제 의미 없다)
+	if (Text_Owned)
+	{
+		UResourceItemManager* OwnedMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UResourceItemManager>() : nullptr;
+		ApplyOwnedMoney(OwnedMgr ? OwnedMgr->GetResourceAmount(EResourceType::Money) : 0);
+		Text_Owned->SetColorAndOpacity(FSlateColor(CardInkCapColor));
+		StopOwnedMoneyFollow();
+		if (OwnedMgr)
+		{
+			OwnedMoneyHandle = OwnedMgr->OnResourceChanged.AddWeakLambda(this, [this](EResourceType Type, int64 NewValue)
+			{
+				if (Type == EResourceType::Money)
+				{
+					ApplyOwnedMoney(NewValue);
+				}
+			});
+		}
+	}
+
 	// 굴린 회수액 역산 — 인수 직후라 Earned=0 이므로 Remaining 이 곧 총액이다.
 	// 원 굴림값이 아니라 RTotal 에서 뽑는다: 플레이어가 실제로 받는 값이라 이쪽이 정확하다.
 	int64 RolledTotal = 0;
@@ -428,6 +469,15 @@ void UCityCompanyInfoWidget::HandleAcquireConfirmed()
 		RevealToAmount = RolledTotal;
 
 		if (Text_ReturnLabel) { Text_ReturnLabel->SetText(FText::FromString(TEXT("실제 회수"))); }
+		// 회수 속도는 회사마다 고정이라 걸리는 시간은 굴린 총액이 정한다 ― 관리 창의 남은 시간과 같은 식
+		int64 DripChunk = 0;
+		int64 DripPerSec = 0;
+		float SecPerDrip = 0.f;
+		if (Text_EstTime && Acq->GetDripInfo(CompanyKey, DripChunk, DripPerSec, SecPerDrip) && DripPerSec > 0)
+		{
+			Text_EstTime->SetText(FText::FromString(FString::Printf(TEXT("약 %s에 걸쳐 들어옵니다"),
+				*UGlobalUtilFunctions::FormatEstimateDurationKorean(static_cast<double>(RolledTotal) / static_cast<double>(DripPerSec)).ToString())));
+		}
 		// 결과가 나왔으므로 구간은 무의미
 		if (Text_MinPart) { Text_MinPart->SetVisibility(ESlateVisibility::Collapsed); }
 		if (Text_MaxPart) { Text_MaxPart->SetVisibility(ESlateVisibility::Collapsed); }

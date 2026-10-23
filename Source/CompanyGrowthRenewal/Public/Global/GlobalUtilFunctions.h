@@ -5,10 +5,13 @@
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h" // 전역함수를 언리얼에서 관리하게 해줌
 #include "Math/RandomStream.h"
+#include "Templates/Function.h"
 #include "GlobalUtilFunctions.generated.h"
 
 class UProgressBar;
 class UImage;
+class UTexture2D;
+struct FSlateFontInfo;
 
 // 큰 수 축약 표기 스타일. Auto는 현재 컬처로 한국식(만/억/조)/서양식(K/M/B) 자동 선택.
 UENUM(BlueprintType)
@@ -64,6 +67,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Util|Number")
 	static FText FormatExactNumber(int64 Value);
 
+	// 4자리 그룹(만/억/조/경) 분해 정확표기 — "1억 3442만 2342". MaxGroups = 위에서 몇 그룹까지 쓸지.
+	// 축약과 달리 반올림이 없어 보유/비용 모두 정확값이다. 값이 0인 그룹은 자리만 비운다.
+	UFUNCTION(BlueprintPure, Category = "Util|Number")
+	static FText FormatKoreanUnitsDetailed(int64 Value, int32 MaxGroups = 3);
+
+	// 주어진 폭에 들어가는 최대 상세도. 반환 = FormatKoreanUnitsDetailed 에 넘길 그룹 수, 0 = 축약으로 폴백.
+	// 측정은 같은 자릿수의 최악폭 모양으로 하므로 카운트업 중 값이 변해도 상세도가 흔들리지 않는다.
+	static int32 SelectAmountDetailGroups(int64 Value, float AvailableWidthPx,
+		TFunctionRef<float(const FString&)> MeasureWidth);
+
+	// 위 둘 + Slate 폰트 측정을 묶은 위젯용 진입점. 측정이 불가하거나 칸이 좁으면 기존 축약을 돌려준다.
+	static FText FitAmountToWidth(int64 Value, float AvailableWidthPx, const FSlateFontInfo& Font,
+		ENumberRoundMode FallbackRoundMode = ENumberRoundMode::Floor);
+
 	// 소요/남은 시간 한글 표기 ("52초" / "11분 40초" / "2시간 5분"). 가장 큰 두 단위까지만.
 	// 위젯마다 흩어진 FormatDuration 사본들의 신규 표준 — 새 시간 표기는 이걸 쓸 것.
 	UFUNCTION(BlueprintPure, Category = "Util|Number")
@@ -83,6 +100,18 @@ public:
 	// Step(1 기획/2 개발/3 QA) 대표색 — orb·플로팅 텍스트 단일 출처
 	UFUNCTION(BlueprintPure, Category = "Util|Color")
 	static FLinearColor GetStepColor(int32 Step);
+
+	// 분야(EProductionDiscipline 0~5) 글리프 — 같은 경로표가 세 곳에 복제되던 것을 여기로 모았다.
+	// 범위 밖이면 nullptr 이라 호출부가 곧바로 아이콘을 접을 수 있다.
+	UFUNCTION(BlueprintPure, Category = "Util|UI")
+	static UTexture2D* GetDisciplineIcon(int32 SlotIdx);
+
+	// 행/칸 위젯의 아이콘 3속성(텍스처·표시크기·슬롯패딩)을 한 번에 적용한다.
+	// 슬롯 종류를 코드가 흡수하므로 호출 위젯은 컨테이너가 HBox 든 VBox 든 같은 코드를 쓴다.
+	// bCollapseWhenEmpty=false 면 텍스처가 없어도 자리를 비워 둔다(고정폭 아이콘 박스용).
+	// BlueprintCallable 아님 — 위젯 내부 헬퍼다.
+	static void ApplyWidgetIcon(UImage* Icon, const TSoftObjectPtr<UTexture2D>& Texture,
+		FVector2D IconSize, FMargin IconPadding, bool bCollapseWhenEmpty = true);
 
 	// 진행바 채움 끝에 글로우 헤드를 붙인다 (T_UI_ProgressHead_* — DOBO_ASSET_INTEGRATION §5).
 	// Head 는 Bar 를 덮는 CanvasPanel 의 자식이어야 한다(슬롯 alignment 0.5,0.5).

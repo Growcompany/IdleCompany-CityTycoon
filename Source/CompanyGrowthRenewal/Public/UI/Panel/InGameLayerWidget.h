@@ -22,11 +22,13 @@ class UCanvasPanel;
 class UCanvasPanelSlot;
 class UBubbleContainerWidget;
 class UCoinFlyoutContainerWidget;
+class UTexture2D;
 class UImage;
 class UTextBlock;
 class UMissionTrackerWidget;
 class ACityPlotActor;
 class UPlacementHandler;
+class ABrickFactory;
 
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UInGameLayerWidget : public UCommonActivatableWidget
@@ -50,6 +52,7 @@ private:
 
 	// 건물 수 변경 구독 핸들 (EntityManager::OnBuildingCountChanged)
 	FDelegateHandle BuildingCountChangedHandle;
+	FDelegateHandle PlotCompanyClearedHandle;
 
 	// 현재 건물 수 / 최대치를 UIE_Resource_Building에 반영
 	void RefreshBuildingCount();
@@ -90,7 +93,7 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UCanvasPanel* InGameCanvas;
 
-	// 벽돌 비행과 자원 델타 숫자 전용 최상단 레이어. 월드 추적 UI는 InGameCanvas에 유지한다.
+	// 코인·벽돌 비행과 자원 델타 숫자 전용 최상단 레이어. 월드 추적 UI는 InGameCanvas에 유지한다.
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UCanvasPanel* EffectCanvas;
 
@@ -175,17 +178,23 @@ public:
 
 	// 리소스 타입에 해당하는 아이콘 위치에 브릭 생성 (CollectAmount 개수만큼 증가)
 	UFUNCTION(BlueprintCallable)
-	void SpawnBrickCollectAt(FVector2D startpos, EResourceType TargetResourceType, int CollectAmount = 1);
+	void SpawnBrickCollectAt(FVector2D startpos, EResourceType TargetResourceType, int CollectAmount = 1, bool bSourceProjected = true);
+
+	// 비행 착지와 화면 밖 즉시 적립이 공유하는 벽돌 HUD 피드백.
+	void PlayBrickCollectionFeedback(int32 Amount, float LandSoundVolume = 1.f);
 
 	// 해당 자원 HUD 카운터 아이콘 위에 획득 "+N" / 지출 "-N" 플로팅 숫자 팝업
 	UFUNCTION(BlueprintCallable)
 	void SpawnGainPopup(EResourceType Type, int64 DeltaAmount);
 
+	// 이미 지급된 수익을 월드 생산점에서 표시한다. 화면 밖이면 연출만 생략한다.
+	void SpawnWorldMoneyIncome(const FVector& WorldLocation, int64 Amount);
+
 	UFUNCTION(BlueprintCallable)
 	void SpawnSpendPopup(EResourceType Type, int64 DeltaAmount);
 
 	// 전체 빌딩 StoredRevenue 일괄 수거 + 코인 플라이아웃 애니메이션 + 토스트
-	// BuildOpenWidget 의 "전체 수거" 버튼에서 호출
+	// 오프라인 리포트 [모두 수령] 전용 — 연출 없는 조용한 수거는 매니저 CollectAllStoredRevenue 를 직접 부른다
 	UFUNCTION(BlueprintCallable)
 	void ExecuteAllVaultCollection();
 
@@ -204,10 +213,9 @@ public:
 	// ProjectTouchToGroundPlane 류 물리픽셀 좌표를 넘기면 DPI 불일치)
 	void SpawnTapRing();
 
-	// 홀드 동안 포인터 아래 라디얼 진행 게이지. CycleSeconds 마다 한 바퀴 = 생산 주기,
-	// 한 바퀴 완료(=생산 틱)마다 게이지 팝 플래시
-	void BeginHoldPulse(float CycleSeconds);
-	void EndHoldPulse();
+	// 공장 홀드 배지를 최초 누름점 위에 고정한다.
+	void BeginFactoryBoost(float Multiplier);
+	void EndFactoryBoost();
 
 	// 선택 건물 위 셰브론 마커 (nullptr = 해제). 좌표는 버블 앵커 체인 재사용, 매 틱 재투영
 	void SetSelectedBuildingMarker(class ABuildingBaseActor* Building);
@@ -242,10 +250,6 @@ private:
 
 	// 단일 건물 이벤트는 즉시 갱신 대신 이 플래그로 다음 틱 전역 재평가에 합류 (상한 3개 정합 + 이벤트 버스트 합산)
 	bool bBubbleReevalPending = false;
-
-	// 현재 금고가 만액인 건물 집합 — HandleWarehouseUpdated 가 "상태가 뒤집혔는지" 를 판정하는 근거.
-	// ⚠ 건물 목록이 바뀌면 반드시 비울 것: 파괴된 인덱스가 남으면 재사용된 인덱스의 첫 전이를 삼킨다.
-	TSet<int32> FullVaultBuildings;
 
 	// 전체 건물 버블 상태 일괄 재평가
 	void EvaluateAllBuildingBubbles();
@@ -308,10 +312,6 @@ private:
 	FRotator LastGaugeViewRot = FRotator::ZeroRotator;
 	bool bForceVaultGaugeReproject = true;
 
-	// 창고 만액 감지 전용 ― Bar 길이는 시간 축이라 창고 값을 더는 읽지 않는다.
-	UFUNCTION()
-	void HandleWarehouseUpdated(int32 BuildingID, float Amount, float Capacity);
-
 	// 건강도와 진행률을 한 번에 뽑는다 ― 둘 다 같은 FOperationData 조회에서 나오므로 조회를 쪼개지 않는다
 	void EvaluateGauge(class UProjectOperationManager* OpMgr, int32 BuildingID,
 		EGaugeHealth& OutHealth, float& OutProgress) const;
@@ -355,6 +355,35 @@ private:
 	UPROPERTY(EditAnywhere, Category = "VaultGauge|LOD")
 	int32 MaxConcurrentGauges = 16;
 
+	// 수익 연출 박자. 전 건물이 이 주기에 일제히 금액 팝업 + 코인 1발을 낸다(2026-10-02 결정: 동기 박자).
+	// 적립은 여전히 매니저 1초 틱이고 이 값은 표시만 묶는다 — 5초분 합계라 숫자가 읽을 만해진다.
+	UPROPERTY(EditAnywhere, Category = "IncomePopup")
+	float IncomeBeatInterval = 5.0f;
+
+	// 줌인 기준 코인 크기. 64 는 오피스 직원 코인(44 -> 64)에서 올려온 값이고, 줌아웃된 도시 뷰
+	// 실측으로 도착점 HUD 자금 아이콘의 1.35배로 읽힌다.
+	UPROPERTY(EditAnywhere, Category = "IncomePopup")
+	float StreamCoinSizeNear = 64.0f;
+
+	// 최대 줌아웃 코인 크기. ⚠ 컨테이너가 비행 중 RenderScale 0.85 를 곱하므로 체감은 이 값의 85% —
+	// 42 는 체감 36px 를 목표로 한 값이다(움직이는 금색 점의 판독 하한).
+	UPROPERTY(EditAnywhere, Category = "IncomePopup")
+	float StreamCoinSizeFar = 42.0f;
+
+	// 크기 보간 구간. Near 는 게이지가 Bar 로 떨어지는 경계(0.48)에 맞춰 두 연출의 리듬을 같게 한다.
+	UPROPERTY(EditAnywhere, Category = "IncomePopup")
+	float StreamCoinZoomNear = 0.48f;
+
+	UPROPERTY(EditAnywhere, Category = "IncomePopup")
+	float StreamCoinZoomFar = 0.90f;
+
+	// 매니저 틱이 건물별로 쏘는 적립을 박자 하나 동안 모은다. 키 = BuildingIndex.
+	TMap<int32, int64> PendingIncomeByBuilding;
+	float IncomeBeatTimer = 0.0f;
+
+	// 모인 적립을 보이는 옥상마다 금액 팝업으로 내보낸다. 버려도 적립에는 영향이 없다.
+	void FlushPendingIncomeStream();
+
 	// 게이지 폭 = 건물 화면폭 × 이 비율, 아래 상하한으로 클램프.
 	UPROPERTY(EditAnywhere, Category = "VaultGauge|Size")
 	float GaugeWidthRatio = 0.70f;
@@ -392,15 +421,11 @@ private:
 	EBubbleType EvaluateBubbleTypeForBuilding(int32 BuildingIndex) const;
 
 	// ProjectOperationManager 델리게이트 핸들러
-	// (창고 갱신은 HandleWarehouseUpdated 단독 — 게이트 없는 형제를 다시 만들지 말 것)
 	UFUNCTION()
 	void OnOperationCompletedForBubble(int32 BuildingID, const FOperationData& Data);
 
 	UFUNCTION()
 	void OnOperationStartedForBubble(int32 BuildingID);
-
-	UFUNCTION()
-	void OnRevenueCollectedForBubble(int64 Amount);
 
 	// 개별 건물 창문 조명 토글 (운영 시작/완료 시)
 	void UpdateBuildingWindowLight(int32 BuildingID, bool bActive);
@@ -410,9 +435,6 @@ private:
 	// BubbleContainer에서 클릭 이벤트 수신
 	void HandleBubbleAction(int32 BuildingIndex, EBubbleType Type);
 	void HandleActiveBubbleMembershipChanged();
-
-	// VaultFull 버블 클릭: 수금 → 코인 플라이아웃 → 토스트 → 버블 제거
-	void ExecuteVaultCollection(int32 BuildingIndex);
 
 	// 코인 플라이아웃 애니메이션 + Money 위젯 동기화 공용 경로 (개별/전체 수거 공통)
 	// CollectedAmount 은 이미 Money 에 반영된 상태여야 함
@@ -428,6 +450,22 @@ private:
 	// 코인 플라이아웃 관련 멤버
 	UPROPERTY()
 	UCoinFlyoutContainerWidget* CurrentCoinFlyout = nullptr;
+
+	// 건물 수익 적립 연출. 모으기만 하고 판정·스폰은 FlushPendingIncomeStream 이 한다.
+	// ⚠ 순수 연출 전용: 매니저 상태를 건드리거나 재화 잔액을 읽지 말 것(브로드캐스트가 지갑 적립보다 먼저다).
+	void HandleBuildingIncomeStreamed(int32 BuildingIndex, int64 Amount);
+
+	// 상주 스트리밍 컨테이너를 1회 생성해 HUD 위 EffectCanvas 에 붙인다.
+	void EnsureStreamCoinFlyout(class APlayerController* PC);
+
+	// ⚠ 일회성 CurrentCoinFlyout(수거 버스트용)과 별개다. 스트림은 레이어가 떠 있는 동안 상주한다.
+	UPROPERTY()
+	UCoinFlyoutContainerWidget* StreamCoinFlyout = nullptr;
+
+	UPROPERTY()
+	UTexture2D* CachedStreamCoinTexture = nullptr;
+	FLinearColor CachedStreamCoinColor = FLinearColor::White;
+	bool bStreamCoinPresentationCached = false;
 
 	bool bSuppressMoneyUpdate = false;
 	int64 CoinAnimOldMoney = 0;
@@ -477,12 +515,16 @@ private:
 	};
 	TArray<FScreenRingFX> ActiveRings;
 
-	// 홀드 라디얼 게이지
-	bool bHoldPulseActive = false;
-	FVector2D HoldPulseAbsPos = FVector2D::ZeroVector;
-	float HoldPulseElapsed = 0.f;
-	float HoldPulseCycle = 0.5f;
-	float GaugePopElapsed = -1.f;   // <0 = 비활성. 한 바퀴 완료 시 0 부터 재생
+	// 공장 홀드 2배속 UI 층 — 한 번에 한 공장만 쥘 수 있어 풀이 없다
+	UPROPERTY(Transient)
+	class UFactoryBoostWidget* FactoryBoostWidget = nullptr;
+
+	FVector2D FactoryBoostAnchorAbsolute = FVector2D::ZeroVector;
+	FVector2D FactoryBoostAnchorNormalized = FVector2D::ZeroVector;
+	FVector2D FactoryBoostLastCanvasSize = FVector2D::ZeroVector;
+	bool bFactoryBoostAnchorResolved = false;
+
+	void UpdateFactoryBoostPosition();
 
 	// 선택/배치 건물 셰브론 마커 — 캔버스 슬롯 배치 (버블과 동일 좌표계 = 투영 정합 보장.
 	// 루트 NativePaint 직접 드로잉은 페인트 공간 불일치로 줌 의존 어긋남 발생해 폐기 —

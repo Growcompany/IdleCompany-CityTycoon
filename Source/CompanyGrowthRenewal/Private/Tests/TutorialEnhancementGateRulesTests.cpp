@@ -10,49 +10,45 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCGRTutorialEnhancementGateRulesTest::RunTest(const FString& Parameters)
 {
-	TestTrue(TEXT("튜토리얼 중에는 빌드업만 구매 가능"),
-		FTutorialEnhancementGateRules::IsPurchaseAllowed(
+	TestFalse(TEXT("M1~M7 진행 중(도출형 아님)에는 회사 강화 잠금"),
+		FTutorialEnhancementGateRules::IsCompanyEnhancementUnlocked(
 			/*bTutorialCompleted=*/false,
-			EBuildingEnhancementType::BuildingFloor,
-			/*bUnlockedByTier=*/true,
-			/*bIsKeystone=*/false));
-	TestFalse(TEXT("튜토리얼 중에는 T1 Money 강화도 차단"),
-		FTutorialEnhancementGateRules::IsPurchaseAllowed(
+			/*bDerivedGuideActive=*/false));
+	TestTrue(TEXT("M7 수령 뒤 도출형 체인(M8~M31) 진행 중에는 회사 강화 해금"),
+		FTutorialEnhancementGateRules::IsCompanyEnhancementUnlocked(
 			/*bTutorialCompleted=*/false,
-			EBuildingEnhancementType::VaultCapacity,
-			/*bUnlockedByTier=*/true,
-			/*bIsKeystone=*/false));
-	TestFalse(TEXT("튜토리얼 중에는 키스톤 영향력도 차단"),
-		FTutorialEnhancementGateRules::IsPurchaseAllowed(
-			/*bTutorialCompleted=*/false,
-			EBuildingEnhancementType::KeystoneAuraPower,
-			/*bUnlockedByTier=*/true,
-			/*bIsKeystone=*/true));
+			/*bDerivedGuideActive=*/true));
+	TestTrue(TEXT("튜토리얼 완료 후에는 체인이 없어도 해금"),
+		FTutorialEnhancementGateRules::IsCompanyEnhancementUnlocked(
+			/*bTutorialCompleted=*/true,
+			/*bDerivedGuideActive=*/false));
 
-	TestTrue(TEXT("튜토리얼 완료 후 티어 해금 강화 허용"),
+	TestTrue(TEXT("잠금 중에도 빌드업은 구매 가능"),
 		FTutorialEnhancementGateRules::IsPurchaseAllowed(
-			/*bTutorialCompleted=*/true,
+			/*bCompanyEnhancementUnlocked=*/false,
+			EBuildingEnhancementType::BuildingFloor,
+			/*bUnlockedByTier=*/true));
+	TestFalse(TEXT("잠금 중에는 T1 Money 강화도 차단"),
+		FTutorialEnhancementGateRules::IsPurchaseAllowed(
+			/*bCompanyEnhancementUnlocked=*/false,
+			EBuildingEnhancementType::VaultCapacity,
+			/*bUnlockedByTier=*/true));
+
+	TestTrue(TEXT("해금 후 티어 해금 강화 허용"),
+		FTutorialEnhancementGateRules::IsPurchaseAllowed(
+			/*bCompanyEnhancementUnlocked=*/true,
 			EBuildingEnhancementType::MarketingPower,
-			/*bUnlockedByTier=*/true,
-			/*bIsKeystone=*/false));
-	TestFalse(TEXT("튜토리얼 완료 후에도 티어 미해금 강화 차단"),
+			/*bUnlockedByTier=*/true));
+	TestFalse(TEXT("해금 후에도 티어 미해금 강화 차단"),
 		FTutorialEnhancementGateRules::IsPurchaseAllowed(
-			/*bTutorialCompleted=*/true,
+			/*bCompanyEnhancementUnlocked=*/true,
 			EBuildingEnhancementType::ProjectGrade,
-			/*bUnlockedByTier=*/false,
-			/*bIsKeystone=*/false));
-	TestTrue(TEXT("완료한 키스톤은 전용 영향력 강화 허용"),
+			/*bUnlockedByTier=*/false));
+	TestTrue(TEXT("M10 자금 강화 — 도출형 체인 중 티어 해금 강화 허용"),
 		FTutorialEnhancementGateRules::IsPurchaseAllowed(
-			/*bTutorialCompleted=*/true,
-			EBuildingEnhancementType::KeystoneAuraPower,
-			/*bUnlockedByTier=*/false,
-			/*bIsKeystone=*/true));
-	TestFalse(TEXT("일반 건물은 키스톤 전용 강화를 직접 호출해도 차단"),
-		FTutorialEnhancementGateRules::IsPurchaseAllowed(
-			/*bTutorialCompleted=*/true,
-			EBuildingEnhancementType::KeystoneAuraPower,
-			/*bUnlockedByTier=*/true,
-			/*bIsKeystone=*/false));
+			FTutorialEnhancementGateRules::IsCompanyEnhancementUnlocked(false, true),
+			EBuildingEnhancementType::VaultCapacity,
+			/*bUnlockedByTier=*/true));
 
 	return true;
 }

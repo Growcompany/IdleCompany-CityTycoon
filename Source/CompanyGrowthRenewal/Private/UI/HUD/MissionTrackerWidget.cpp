@@ -1,5 +1,4 @@
 #include "UI/HUD/MissionTrackerWidget.h"
-#include "UI/HUD/MissionTrackerDisplayRules.h"
 
 #include "CommonTextBlock.h"
 #include "TimerManager.h"
@@ -9,7 +8,6 @@
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/Border.h"
-#include "Components/HorizontalBox.h"
 #include "Components/Image.h"
 #include "Components/ProgressBar.h"
 #include "Components/VerticalBox.h"
@@ -21,10 +19,9 @@
 
 #include "Manager/MissionManagerSubsystem.h"
 #include "Manager/TableManagerSubsystem.h"
-#include "Table/ResourceInfo.h"
-#include "Table/ShopItemTable.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Global/GlobalUtilFunctions.h"
-#include "UI/Element/Common/RewardChipUtils.h"
+#include "Utils/FWidgetAnimationUtils.h"
 
 namespace
 {
@@ -59,18 +56,19 @@ void UMissionTrackerWidget::NativeConstruct()
 	// (Manager 없음 = 아직 init 전 → 디자인타임 플레이스홀더 노출 방지 위해 숨김 유지)
 	if (Manager.IsValid())
 	{
+		bPresentationSuppressed = Manager->IsRecruitmentPresentationActive();
 		RefreshFromManager();
 	}
 	else
 	{
-		SetVisibility(ESlateVisibility::Collapsed);
+		SetMissionVisibility(ESlateVisibility::Collapsed);
 	}
 }
 
 void UMissionTrackerWidget::BuildFallbackTree()
 {
 	// WBP 에 동명 위젯이 하나라도 배치돼 있으면 디자이너 오버라이드를 존중하고 손대지 않는다.
-	if (MissionTitleText || MentorLineText || ProgressText || RewardText)
+	if (MissionTitleText || MentorLineText || ProgressText)
 	{
 		return;
 	}
@@ -158,11 +156,11 @@ void UMissionTrackerWidget::BuildFallbackTree()
 		return Text;
 	};
 
-	// 제목=NEXON Bold 26 / 문구=NEXON Regular 17 / 진행도=Pretendard SemiBold 22 / 보상=NEXON Regular 15
-	MissionTitleText = MakeText(TEXT("MissionTitleText"), NexonBold, TEXT("Default"), 26, InkPrimary, 0.f);
+	// 제목=NEXON Bold 26 / 문구=NEXON Regular 17 / 진행도=Pretendard SemiBold 22
+	MissionSequenceText = MakeText(TEXT("MissionSequenceText"), NexonRegular, TEXT("Default"), 20, InkSub, 0.f);
+	MissionTitleText = MakeText(TEXT("MissionTitleText"), NexonBold, TEXT("Default"), 26, InkPrimary, 4.f);
 	MentorLineText   = MakeText(TEXT("MentorLineText"), NexonRegular, TEXT("Default"), 17, InkSub, 6.f);
 	ProgressText     = MakeText(TEXT("ProgressText"), Pretendard, TEXT("SemiBold"), 22, AccentOrange, 6.f);
-	RewardText       = MakeText(TEXT("RewardText"), NexonRegular, TEXT("Default"), 15, InkSub, 8.f);
 }
 
 void UMissionTrackerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -183,21 +181,28 @@ void UMissionTrackerWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	// 클레임 대기 강조 — 글린트 반복 스윕 + 카드 전체 펄스 + 초록/골드 외곽선 + 배경 틴트 전환 (탭 유도)
 	if (bAwaitingClaim)
 	{
-		ClaimPulseTime += InDeltaTime;
-		const float Pulse = 0.5f + 0.5f * FMath::Sin(ClaimPulseTime * (2.f * PI / 1.1f));
+		// 연출 감소: 시간을 진전시키지 않고 강조 끝값(Pulse=1)만 적용한다 — 색이 나르는 정보는 남기고 움직임만 끈다
+		const bool bReducedClaim = FMotionGate::IsReduced();
+		if (!bReducedClaim)
+		{
+			ClaimPulseTime += InDeltaTime;
+		}
+		const float Pulse = bReducedClaim ? 1.f : (0.5f + 0.5f * FMath::Sin(ClaimPulseTime * (2.f * PI / 1.1f)));
 
 		// 외곽선: 초록↔골드 시머 + 강한 알파 브리딩
 		if (UImage* Outline = CardOutline.Get())
 		{
-			FLinearColor C = FMath::Lerp(BadgeGreen, BadgeAmber, Pulse);
-			C.A = 0.55f + 0.45f * Pulse;
-			Outline->SetColorAndOpacity(C);
+			if (UMaterialInstanceDynamic* OutlineMaterial = Outline->GetDynamicMaterial())
+			{
+				OutlineMaterial->SetVectorParameterValue(TEXT("AccentColor"), FMath::Lerp(BadgeGreen, BadgeAmber, Pulse));
+				OutlineMaterial->SetScalarParameterValue(TEXT("FrameOpacity"), 0.55f + 0.45f * Pulse);
+			}
 		}
 
 		// 배지 숨쉬기 (시선 유도)
 		if (UWidget* Icon = MissionIconWidget.Get())
 		{
-			const float S = 1.f + 0.06f * Pulse;
+			const float S = 0.96f + 0.04f * Pulse;   // R29: 1.0 초과 금지 — 클립 부모 안이라 커지면 잘린다
 			Icon->SetRenderScale(FVector2D(S, S));
 		}
 
@@ -217,6 +222,7 @@ void UMissionTrackerWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 			if (P < 0.35f)      { GA = P / 0.35f; }                  // 빠른 상승
 			else if (P < 0.8f)  { GA = 1.f - (P - 0.35f) / 0.45f; }  // 부드러운 하강
 			else                { GA = 0.f; }                        // 짧은 암전
+			if (bReducedClaim) { GA = 0.f; }   // 글린트는 순수 장식 — 감소면 정지가 아니라 소등
 			FLinearColor C = Glint->GetColorAndOpacity();
 			C.A = GA;
 			Glint->SetColorAndOpacity(C);
@@ -273,12 +279,13 @@ void UMissionTrackerWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	}
 	if (UImage* Outline = CardOutline.Get())
 	{
-		FLinearColor C = Outline->GetColorAndOpacity();
-		C.A = OutlineAlpha;
-		Outline->SetColorAndOpacity(C);
+		if (UMaterialInstanceDynamic* OutlineMaterial = Outline->GetDynamicMaterial())
+		{
+			OutlineMaterial->SetScalarParameterValue(TEXT("FrameOpacity"), OutlineAlpha);
+		}
 	}
 
-	// --- 완료 스파클: 시차 팝 (스케일 0→1.2→0.9 + 살짝 회전, 후반 페이드아웃) ---
+	// --- 완료 스파클: 시차 팝 (스케일 0→1.0→0.9 + 살짝 회전, 후반 페이드아웃) ---
 	auto DriveSparkle = [T](const TWeakObjectPtr<UImage>& Img, float StartTime, float BaseAngle)
 	{
 		UImage* W = Img.Get();
@@ -292,8 +299,9 @@ void UMissionTrackerWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 			W->SetRenderOpacity(0.f);
 			return;
 		}
-		const float S = (L < 0.4f) ? FMath::Lerp(0.f, 1.2f, L / 0.4f)
-		                           : FMath::Lerp(1.2f, 0.9f, (L - 0.4f) / 0.6f);
+		// 스케일 상한 1.0. 넘기면 부모 클립에 잘리고 래스터가 깨진다
+		const float S = (L < 0.4f) ? FMath::Lerp(0.f, 1.f, L / 0.4f)
+		                           : FMath::Lerp(1.f, 0.9f, (L - 0.4f) / 0.6f);
 		W->SetRenderScale(FVector2D(S, S));
 		W->SetRenderTransformAngle(BaseAngle + L * 90.f);
 		W->SetRenderOpacity(FMath::Min(L * 5.f, 1.f) * (1.f - FMath::Max(0.f, (L - 0.7f) / 0.3f)));
@@ -323,9 +331,10 @@ void UMissionTrackerWidget::StartCompleteGlow()
 	}
 	if (UImage* Outline = CardOutline.Get())
 	{
-		FLinearColor C = Outline->GetColorAndOpacity();
-		C.A = OutlineBase;
-		Outline->SetColorAndOpacity(C);
+		if (UMaterialInstanceDynamic* OutlineMaterial = Outline->GetDynamicMaterial())
+		{
+			OutlineMaterial->SetScalarParameterValue(TEXT("FrameOpacity"), OutlineBase);
+		}
 	}
 }
 
@@ -343,9 +352,10 @@ void UMissionTrackerWidget::StopCompleteGlow()
 	}
 	if (UImage* Outline = CardOutline.Get())
 	{
-		FLinearColor C = Outline->GetColorAndOpacity();
-		C.A = OutlineBase;
-		Outline->SetColorAndOpacity(C);
+		if (UMaterialInstanceDynamic* OutlineMaterial = Outline->GetDynamicMaterial())
+		{
+			OutlineMaterial->SetScalarParameterValue(TEXT("FrameOpacity"), OutlineBase);
+		}
 	}
 	for (const TWeakObjectPtr<UImage>& Sparkle : { SparkleA, SparkleB, SparkleC })
 	{
@@ -395,6 +405,7 @@ void UMissionTrackerWidget::InitTracker(UMissionManagerSubsystem* InManager)
 	}
 
 	Manager = InManager;
+	bPresentationSuppressed = InManager->IsRecruitmentPresentationActive();
 
 	// 완료 글로우 폴백용 순수 WBP 위젯 캐시 (이름 계약). 없으면 null -> 글로우만 생략.
 	CardGlint = Cast<UImage>(GetWidgetFromName(TEXT("CardGlint")));
@@ -422,7 +433,6 @@ void UMissionTrackerWidget::InitTracker(UMissionManagerSubsystem* InManager)
 	}
 
 	// 클레임 상태 시각용 캐시 (이름 계약 — 없으면 해당 연출만 생략)
-	AccentBarImage = Cast<UImage>(GetWidgetFromName(TEXT("AccentBar")));
 	MissionIconWidget = GetWidgetFromName(TEXT("MissionIcon"));
 	CardBgImage = Cast<UImage>(GetWidgetFromName(TEXT("CardBg")));
 
@@ -450,6 +460,8 @@ void UMissionTrackerWidget::HandleMissionActivated(const FMissionTable& Mission)
 	{
 		if (World->GetTimerManager().IsTimerActive(CompleteTimerHandle))
 		{
+			// 완료 반짝임은 마저 보여 주되 번호·제목은 바로 바꾼다 ― 안내 화면은 이미 새 미션이다
+			ApplyMissionHeadline(Mission);
 			return;
 		}
 	}
@@ -505,20 +517,21 @@ void UMissionTrackerWidget::HandleMissionReadyToClaim(const FMissionTable& /*Mis
 	ClaimPulseTime = 0.f;
 
 	// 보상 클레임 대기 중에만 클릭 가능 상태로 전환 (평소엔 HitTestInvisible 소프트 HUD)
-	SetVisibility(ESlateVisibility::Visible);
+	SetMissionVisibility(ESlateVisibility::Visible);
 
-	// 완료 상태색 — 배지 그린 + 클레임 유도 문구 + 액센트 그린 (원색 백업 후, 다음 미션 렌더에서 복원)
+	// 완료 상태색 — 배지 그린 + 클레임 유도 문구 + 외곽선 왼쪽 액센트 그린
 	ApplyBadgeColor(*this, BadgeGreen);
 	if (MentorLineText)
 	{
 		MentorLineText->SetText(NSLOCTEXT("MissionTracker", "TapToClaim", "미션 완료! 탭해서 보상 받기"));
 		MentorLineText->SetVisibility(ESlateVisibility::HitTestInvisible);
 	}
-	if (UImage* Accent = AccentBarImage.Get())
+	if (UImage* Outline = CardOutline.Get())
 	{
-		SavedAccentTint = Accent->GetBrush().TintColor;
-		Accent->SetBrushTintColor(FSlateColor(BadgeGreen));
-		bAccentTintSaved = true;
+		if (UMaterialInstanceDynamic* OutlineMaterial = Outline->GetDynamicMaterial())
+		{
+			OutlineMaterial->SetVectorParameterValue(TEXT("AccentColor"), BadgeGreen);
+		}
 	}
 	if (UImage* Bg = CardBgImage.Get())
 	{
@@ -583,13 +596,38 @@ void UMissionTrackerWidget::SetFocusHidden(bool bHidden)
 	// bHidden==true 는 NativeTick 이 알파 1 로 보간하며 슬라이드아웃 처리.
 }
 
+void UMissionTrackerWidget::SetPresentationSuppressed(bool bSuppressed)
+{
+	if (bPresentationSuppressed == bSuppressed) { return; }
+	bPresentationSuppressed = bSuppressed;
+	if (bSuppressed)
+	{
+		if (GetVisibility() != ESlateVisibility::Collapsed) { SetVisibility(ESlateVisibility::Hidden); }
+		return;
+	}
+	RefreshFromManager();
+	if (UMissionManagerSubsystem* Mgr = Manager.Get())
+	{
+		if (Mgr->HasActiveMission() && Mgr->IsReadyToClaim())
+		{
+			HandleMissionReadyToClaim(FMissionTable());
+		}
+	}
+}
+
+void UMissionTrackerWidget::SetMissionVisibility(ESlateVisibility DesiredVisibility)
+{
+	SetVisibility(bPresentationSuppressed && DesiredVisibility != ESlateVisibility::Collapsed
+		? ESlateVisibility::Hidden : DesiredVisibility);
+}
+
 void UMissionTrackerWidget::RefreshFromManager()
 {
 	UMissionManagerSubsystem* Mgr = Manager.Get();
 	if (!Mgr || !Mgr->HasActiveMission())
 	{
 		// 체인이 끝나면 이 카드는 할 일이 없다 — 미션판은 별도 위젯(UGoalTrackerWidget)이 그린다
-		SetVisibility(ESlateVisibility::Collapsed);
+		SetMissionVisibility(ESlateVisibility::Collapsed);
 		return;
 	}
 
@@ -601,7 +639,7 @@ void UMissionTrackerWidget::RefreshFromManager()
 	else
 	{
 		// 체인이 끝나면 이 카드는 할 일이 없다 — 미션판은 별도 위젯(UGoalTrackerWidget)이 그린다
-		SetVisibility(ESlateVisibility::Collapsed);
+		SetMissionVisibility(ESlateVisibility::Collapsed);
 	}
 }
 
@@ -613,7 +651,16 @@ void UMissionTrackerWidget::ResetCardVisuals()
 
 	if (UImage* Outline = CardOutline.Get())
 	{
-		Outline->SetColorAndOpacity(FLinearColor(1.f, 1.f, 1.f, OutlineBase));
+		if (UMaterialInstanceDynamic* OutlineMaterial = Outline->GetDynamicMaterial())
+		{
+			// 기본 상태색은 WBP가 참조하는 머티리얼 인스턴스가 소유한다.
+			FLinearColor DefaultAccentColor;
+			if (OutlineMaterial->Parent && OutlineMaterial->Parent->GetVectorParameterValue(
+				FMaterialParameterInfo(TEXT("AccentColor")), DefaultAccentColor))
+			{
+				OutlineMaterial->SetVectorParameterValue(TEXT("AccentColor"), DefaultAccentColor);
+			}
+		}
 	}
 	if (UImage* Glint = CardGlint.Get())
 	{
@@ -624,14 +671,6 @@ void UMissionTrackerWidget::ResetCardVisuals()
 	if (UWidget* Icon = MissionIconWidget.Get())
 	{
 		Icon->SetRenderScale(FVector2D(1.f, 1.f));
-	}
-	if (bAccentTintSaved)
-	{
-		if (UImage* Accent = AccentBarImage.Get())
-		{
-			Accent->SetBrushTintColor(SavedAccentTint);
-		}
-		bAccentTintSaved = false;
 	}
 	if (bCardBgTintSaved)
 	{
@@ -645,7 +684,7 @@ void UMissionTrackerWidget::ResetCardVisuals()
 
 void UMissionTrackerWidget::RenderMission(const FMissionTable& Mission)
 {
-	SetVisibility(ESlateVisibility::HitTestInvisible);
+	SetMissionVisibility(ESlateVisibility::HitTestInvisible);
 
 	// 클레임 상태 해제 + 시각 복원 (외곽선 흰 0.15 / 배지 스케일 1 / 액센트 원색)
 	bAwaitingClaim = false;
@@ -654,68 +693,31 @@ void UMissionTrackerWidget::RenderMission(const FMissionTable& Mission)
 	// 새 미션 = 진행 상태 — 배지 앰버 복귀
 	ApplyBadgeColor(*this, BadgeAmber);
 
+	ApplyMissionHeadline(Mission);
+}
+
+void UMissionTrackerWidget::ApplyMissionHeadline(const FMissionTable& Mission)
+{
 	if (MissionTitleText)
 	{
 		MissionTitleText->SetText(Mission.Title);
+	}
+	if (MissionSequenceText)
+	{
+		int32 Current = 0;
+		int32 Total = 0;
+		const bool bHasSequence = Manager.IsValid() && Manager->GetMissionSequence(Current, Total);
+		MissionSequenceText->SetText(bHasSequence
+			? FText::Format(NSLOCTEXT("MissionTracker", "TutorialSequence", "튜토리얼 {0} / {1}"),
+				FText::FromString(FString::Printf(TEXT("%02d"), Current)),
+				FText::FromString(FString::Printf(TEXT("%02d"), Total)))
+			: FText::GetEmpty());
+		MissionSequenceText->SetVisibility(bHasSequence ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	}
 
 	UpdateMentorLine();
 	UpdateProgress();
 
-	// 중간 미션의 Rewards 는 진행 공급이고, 피날레만 플레이어 보상으로 표시한다.
-	const FMissionTrackerRewardDisplayState RewardDisplay =
-		FMissionTrackerDisplayRules::ResolveRewardDisplay(Mission);
-	if (RewardLabel)
-	{
-		RewardLabel->SetText(RewardDisplay.Label);
-	}
-
-	// 보상 표시: RewardBox(HorizontalBox) 가 있으면 [아이콘+축약수치] 페어 동적 생성(아이콘 모드),
-	// 없으면 기존 RewardText 1줄 요약(폴백). 두 경로는 상호배타 — 둘 다 있으면 RewardText 는 Collapsed.
-	UHorizontalBox* RewardContainer = RewardBox
-		? RewardBox.Get()
-		: Cast<UHorizontalBox>(GetWidgetFromName(TEXT("RewardBox")));
-	if (RewardContainer)
-	{
-		if (!RewardDisplay.bShowSection)
-		{
-			RewardContainer->ClearChildren();
-		}
-		const bool bAnyReward = RewardDisplay.bShowSection && WidgetTree
-			&& CGRewardChip::RenderIcons(*WidgetTree, GetGameInstance(), *RewardContainer, Mission.Rewards);
-		const ESlateVisibility RewardVisibility = bAnyReward
-			? ESlateVisibility::HitTestInvisible
-			: ESlateVisibility::Collapsed;
-		RewardContainer->SetVisibility(RewardVisibility);
-		if (RewardLabel)
-		{
-			RewardLabel->SetVisibility(RewardVisibility);
-		}
-		if (RewardSection)
-		{
-			RewardSection->SetVisibility(RewardVisibility);
-		}
-
-		// 아이콘 모드에선 텍스트 요약을 숨겨 이중 표시 방지
-		if (RewardText)
-		{
-			RewardText->SetVisibility(ESlateVisibility::Collapsed);
-		}
-	}
-	else if (RewardText)
-	{
-		const FText Summary = RewardDisplay.bShowSection
-			? BuildRewardSummary(Mission.Rewards)
-			: FText::GetEmpty();
-		RewardText->SetText(Summary);
-		RewardText->SetVisibility(Summary.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
-		if (RewardSection)
-		{
-			RewardSection->SetVisibility(Summary.IsEmpty()
-				? ESlateVisibility::Collapsed
-				: ESlateVisibility::HitTestInvisible);
-		}
-	}
 }
 
 void UMissionTrackerWidget::UpdateMentorLine()
@@ -795,67 +797,4 @@ void UMissionTrackerWidget::UpdateProgress()
 			Bar->SetVisibility(ESlateVisibility::HitTestInvisible);
 		}
 	}
-}
-
-FText UMissionTrackerWidget::BuildRewardSummary(const TArray<FMissionReward>& Rewards) const
-{
-	const TArray<CGRewardChip::FDisplayEntry> Entries = CGRewardChip::BuildDisplayEntries(Rewards);
-	if (Entries.Num() == 0)
-	{
-		return FText::GetEmpty();
-	}
-
-	UTableManagerSubsystem* TableMgr = nullptr;
-	if (UGameInstance* GI = GetGameInstance())
-	{
-		TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-	}
-
-	TArray<FString> Parts;
-	Parts.Reserve(Entries.Num());
-
-	for (const CGRewardChip::FDisplayEntry& Entry : Entries)
-	{
-		// 표시명은 DT 단일 진실 (코드 하드코딩 금지) — 없으면 해당 보상 항목 생략
-		FString DisplayName;
-		if (TableMgr)
-		{
-			if (Entry.ResourceType != EResourceType::None)
-			{
-				bool bFound = false;
-				const FResourceInfo Info = TableMgr->GetResourceInfo(Entry.ResourceType, bFound);
-				if (bFound && !Info.DisplayName.IsEmpty())
-				{
-					DisplayName = Info.DisplayName.ToString();
-				}
-			}
-			else if (Entry.ItemType != EItemType::None)
-			{
-				FShopItemTable ItemRow;
-				if (TableMgr->GetShopItemByItemType(Entry.ItemType, ItemRow)
-					&& !ItemRow.DisplayName.IsEmpty())
-				{
-					DisplayName = ItemRow.DisplayName.ToString();
-				}
-			}
-		}
-		if (DisplayName.IsEmpty())
-		{
-			continue;
-		}
-
-		const FText QuantityText = Entry.ItemType != EItemType::None
-			? FText::Format(NSLOCTEXT("Reward", "Qty", "x{0}"), FText::AsNumber(Entry.Quantity))
-			: UGlobalUtilFunctions::AbbreviateNumber(Entry.Quantity);
-		const FString QuantityString = QuantityText.ToString();
-		Parts.Add(FString::Printf(TEXT("%s %s"), *DisplayName, *QuantityString));
-	}
-
-	if (Parts.Num() == 0)
-	{
-		return FText::GetEmpty();
-	}
-
-	const FString Joined = FString::Join(Parts, TEXT(" · "));
-	return FText::FromString(FString::Printf(TEXT("보상: %s"), *Joined));
 }

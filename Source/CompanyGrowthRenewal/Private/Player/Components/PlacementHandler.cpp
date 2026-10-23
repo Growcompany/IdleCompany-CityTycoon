@@ -18,6 +18,7 @@
 #include "Materials/MaterialInterface.h"
 #include "Util/CoordinateUtils.h"
 #include "Entity/Building/BuildingBaseActor.h"
+#include "Entity/Factory/BrickFactory.h"
 
 #include "Core/CGGameInstance.h"
 #include "Table/InteractableInfo.h"
@@ -46,21 +47,51 @@
 #include "Manager/TableManagerSubsystem.h"
 #include "Kismet/GameplayStatics.h"
 #include "Table/CityPlotData.h"
-#include "Table/BuildingData.h" // FootprintCellSize (격자 셀 한 변 크기) 단일 소스
+#include "Table/BuildingData.h"
 #include "Entity/Plot/CityPlotActor.h"
+#include "Entity/Plot/CityPlotWalkwayManager.h"
 #include "Entity/Ambient/VacantPlotDressingManager.h"
 #include "UI/Panel/InGameLayerWidget.h"
+#include "UI/Panel/OfficeMainWidget.h"
+#include "EngineUtils.h"
 
-
-// 배치 회전은 90° 배수라 footprint 사각형은 축정렬을 유지한다 — 홀수 회전이면 W/D 스왑만으로 충분.
-// 프리뷰 사각형(시각)·부지 clamp·겹침 AABB 가 전부 이 헬퍼를 거쳐 같은 규약을 공유한다.
-static void ApplyYawToFootprintCells(float Yaw, int32& InOutWidthCells, int32& InOutDepthCells)
+// 건물의 논리 칸수와 공통 칸 간격을 표시와 판정에서 공유한다.
+static FVector2D ResolvePlotFootprintHalfExtent(
+	const AActor* PreviewActor, int32 WidthCells, int32 DepthCells, bool bWorldAxes = true)
 {
-	const int32 QuarterTurns = FMath::RoundToInt(FRotator::NormalizeAxis(Yaw) / 90.f);
-	if (FMath::Abs(QuarterTurns) % 2 == 1)
+	if (const ABuildingBaseActor* Building = Cast<ABuildingBaseActor>(PreviewActor))
 	{
-		Swap(InOutWidthCells, InOutDepthCells);
+		return Building->GetPlacementFootprintHalfExtent(bWorldAxes);
 	}
+	if (const ABrickFactory* Factory = Cast<ABrickFactory>(PreviewActor))
+	{
+		return Factory->GetPlacementFootprintHalfExtent(bWorldAxes);
+	}
+	FVector2D HalfExtent(
+		FMath::Max(1, WidthCells) * BuildingFootprintCellSize * 0.5,
+		FMath::Max(1, DepthCells) * BuildingFootprintCellSize * 0.5);
+	if (PreviewActor && bWorldAxes)
+	{
+		const int32 QuarterTurns = FMath::RoundToInt(FRotator::NormalizeAxis(PreviewActor->GetActorRotation().Yaw) / 90.f);
+		if (FMath::Abs(QuarterTurns) % 2 == 1)
+		{
+			Swap(HalfExtent.X, HalfExtent.Y);
+		}
+	}
+	return HalfExtent;
+}
+
+static FVector ResolvePlotFootprintCenter(const AActor* PreviewActor)
+{
+	if (const ABuildingBaseActor* Building = Cast<ABuildingBaseActor>(PreviewActor))
+	{
+		return Building->GetPlacementFootprintCenter();
+	}
+	if (const ABrickFactory* Factory = Cast<ABrickFactory>(PreviewActor))
+	{
+		return Factory->GetPlacementFootprintCenter();
+	}
+	return PreviewActor ? PreviewActor->GetActorLocation() : FVector::ZeroVector;
 }
 
 
@@ -120,10 +151,20 @@ void UPlacementHandler::BeginPlay()
 	TSoftObjectPtr<UMaterialInterface> HighlightMatPath(
 		FSoftObjectPath(TEXT("/Game/CompanyGrowth/Resources/Materials/M_PlotHighlight.M_PlotHighlight")));
 	PlotHighlightBaseMaterial = HighlightMatPath.LoadSynchronous();
+	TSoftObjectPtr<UMaterialInterface> OfficeGuidePath(
+		FSoftObjectPath(TEXT("/Game/CompanyGrowth/Resources/Materials/M_OfficePlacementGuide.M_OfficePlacementGuide")));
+	OfficeGuideBaseMaterial = OfficeGuidePath.LoadSynchronous();
+
+	// 부지 건설 인디케이터 전용 머티리얼. 로드 실패해도 기본 M_Placeable 로 동작한다(graceful).
+	TSoftObjectPtr<UMaterialInterface> PlotEdgePath(
+		FSoftObjectPath(TEXT("/Game/CompanyGrowth/Resources/Materials/M_PlaceableEdge.M_PlaceableEdge")));
+	PlotEdgeBaseMaterial = PlotEdgePath.LoadSynchronous();
 }
 
 void UPlacementHandler::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	FinishExistingOfficeMove(false);
+	HideOfficeGridPreview();
 	EndPlacementFeedback();
 	HidePlotFootprintPreview();
 	Super::EndPlay(EndPlayReason);
@@ -132,10 +173,22 @@ void UPlacementHandler::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void UPlacementHandler::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	if (bOfficeEditSession)
+	{
+		// 쓰로틀은 여기서만 판단한다 — 갱신 함수가 같은 변수를 dirty 조건에 함께 쓰면
+		// 이 경로에서 항상 false 가 되어 변화가 없어도 전수 재계산이 돌았다.
+		OfficeOccupiedRefreshElapsed += DeltaTime;
+		if (OfficeOccupiedRefreshElapsed >= 0.1f)
+		{
+			OfficeOccupiedRefreshElapsed = 0.f;
+			UpdateOfficeOccupiedPreview();
+		}
+	}
 
 	// 건물을 잡고 드래그할 때 Edge Panning + 건물 위치 업데이트
 	if (bIsDraggingPlacement)
 	{
+		if (bOfficeEditSession && !CoordinateUtils::SingleTouchCheck()) return;
 		// TrackMovePlacement 먼저 호출 (벽 전환 감지)
 		// 그 후 UpdateEdgePanning (새 벽 기준으로 패닝)
 		TrackMovePlacement();
@@ -242,6 +295,15 @@ void UPlacementHandler::SetPlacementTargetEntity(const FInteractableInfo& intera
 	UE_LOG(LogTemp, Log, TEXT("[UPlacementHandler]::SetPlacementTargetEntity: %s"), *interactableInfo.Name.ToString());
 
 	USpawnManager* SpawnManager = GetWorld()->GetSubsystem<USpawnManager>();
+	if (!SpawnManager)
+	{
+		// ShouldCreateSubsystem 이 레벨 화이트리스트로 거부할 수 있다 - 없으면 역참조 대신 빌드 모드를 접는다.
+		UE_LOG(LogTemp, Error, TEXT("[UPlacementHandler] USpawnManager 없음 - 이 레벨은 허용 목록 밖이다."));
+		Owner->EndBuild();
+		return;
+	}
+
+	ACityPlotActor::PrepareCityGroundQueries(GetWorld());
 
 	AInteractableBaseActor* interactableActor = SpawnManager->SpawnNewBuilding(PlacementTargetInfo);
 	if (interactableActor == nullptr)
@@ -254,9 +316,16 @@ void UPlacementHandler::SetPlacementTargetEntity(const FInteractableInfo& intera
 	PlacementTargetEntity = interactableActor;
 	FVector IntersectionPos;
 	CoordinateUtils::ProjectViewportCenterToGroundPlane(IntersectionPos);
+	if (bPlotBuildSession && Owner)
+	{
+		const FVector CenterOffset = ResolvePlotFootprintCenter(PlacementTargetEntity)
+			- PlacementTargetEntity->GetActorLocation();
+		IntersectionPos = FPlotPlacementRules::ResolveInitialPlacementPosition(
+			Owner->GetActorLocation(), IntersectionPos, CenterOffset);
+	}
 
 	// 부지 탭 진입(InitialSeedPlotId 유효) 시 초기 프리뷰를 그 부지 중심에서 시작(선택적 nicety).
-	// 전역 [건설] 버튼은 시드 없음 → 뷰포트 중심 밑 소유 부지로 동적 수렴.
+	// 전역 [건설] 버튼은 시드 없음 → 카메라 초점 XY 근처 소유 부지로 동적 수렴.
 	if (bPlotBuildSession && !InitialSeedPlotId.IsNone())
 	{
 		if (UTableManagerSubsystem* SeedTableMgr = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>())
@@ -271,7 +340,7 @@ void UPlacementHandler::SetPlacementTargetEntity(const FInteractableInfo& intera
 		}
 	}
 
-	// 신규 프리뷰는 화면 중앙에서 가까운 실제 유효 지점을 1회 탐색한다. 이후 드래그는 기존 자유 이동 규칙 그대로다.
+	// 신규 프리뷰는 카메라 초점 XY에서 가까운 실제 유효 지점을 1회 탐색한다. 이후 드래그는 기존 자유 이동 규칙 그대로다.
 	bPlotPlacementValid = true;
 	{
 		FVector PlotSnapped;
@@ -313,6 +382,33 @@ void UPlacementHandler::SetPlacementTargetEntity(const FInteractableInfo& intera
 	UpdatePlotFootprintPreview();
 }
 
+void UPlacementHandler::ApplyPlacementIndicatorMaterial(bool bUsePlotEdge)
+{
+	if (!PlacementSMC)
+	{
+		return;
+	}
+
+	if (bUsePlotEdge && PlotEdgeBaseMaterial)
+	{
+		if (!PlotEdgeMID)
+		{
+			PlotEdgeMID = UMaterialInstanceDynamic::Create(PlotEdgeBaseMaterial, this);
+		}
+		if (PlotEdgeMID)
+		{
+			PlacementSMC->SetMaterial(0, PlotEdgeMID);
+			return;
+		}
+	}
+
+	// 기본 복귀 — 오피스 책상/장식 인디케이터가 쓰는 그 머티리얼이다.
+	if (GlobalAssetCache)
+	{
+		PlacementSMC->SetMaterial(0, GlobalAssetCache->GetPlaceableMaterial());
+	}
+}
+
 void UPlacementHandler::PostPlacementTargetRecalcBoxExtent()
 {
 	if (!IsValid(PlacementTargetEntity))
@@ -326,18 +422,40 @@ void UPlacementHandler::PostPlacementTargetRecalcBoxExtent()
 	const FVector boundExtent = PlacementTargetEntity->CalculateComponentsBoundingBoxInLocalSpace(true).GetExtent()
 		* PlacementTargetEntity->GetActorScale3D().GetAbs();
 
-	// 건물에 붙이지 않고 월드 좌표로 직접 설정 (Floating 효과와 분리)
-	FVector ActorLocation = PlacementTargetEntity->GetActorLocation();
-	PlacementSMC->SetWorldLocation(FVector(ActorLocation.X, ActorLocation.Y, 1.0f));
-	// 크기: 건물보다 살짝 크게 (1.1배)
-	PlacementSMC->SetWorldScale3D((boundExtent / 50.0f) * 1.05f);
+	const double IndicatorHalfZ = boundExtent.Z * 1.05;
+
+	// XY는 배치 판정과 같은 footprint다. 큐브가 액터 회전을 먹으므로 크기에는 Yaw를 넣지 않는다.
+	const FVector2D IndicatorHalfExtent = ResolvePlotFootprintHalfExtent(
+		PlacementTargetEntity, PendingFootprintWidthCells, PendingFootprintDepthCells, false);
+	const double IndicatorHalfX = IndicatorHalfExtent.X;
+	const double IndicatorHalfY = IndicatorHalfExtent.Y;
+	PlacementSMC->SetWorldScale3D(FVector(
+		IndicatorHalfX / 50.0,
+		IndicatorHalfY / 50.0,
+		IndicatorHalfZ / 50.0));
 	PlacementSMC->SetVisibility(true);
+
+	// 테두리 두께와 차오름 높이를 큐브의 월드 크기에 맞춘다.
+	ApplyPlacementIndicatorMaterial(true);
+	if (PlotEdgeMID)
+	{
+		PlotEdgeMID->SetScalarParameterValue(TEXT("HalfX"), static_cast<float>(IndicatorHalfX));
+		PlotEdgeMID->SetScalarParameterValue(TEXT("HalfY"), static_cast<float>(IndicatorHalfY));
+		PlotEdgeMID->SetScalarParameterValue(TEXT("HalfZ"), static_cast<float>(IndicatorHalfZ));
+	}
 
 	UpdateBuildAsset();
 }
 
 void UPlacementHandler::ReleasePlacementTargetEntity()
 {
+	if (ABrickFactory* MovingFactory = Cast<ABrickFactory>(PlacementTargetEntity))
+	{
+		if (MovingFactory->IsRelocating())
+		{
+			CancelBuildingMove();
+		}
+	}
 	EndPlacementFeedback();
 
 	PlacementSMC->SetVisibility(false);
@@ -382,7 +500,7 @@ bool UPlacementHandler::PlacingEntity()
 		{
 			// 바닥 위치로 설정 후 착지 애니메이션
 			FVector CurrentLoc = Building->GetActorLocation();
-			CurrentLoc.Z = 0.0f;
+			CurrentLoc.Z = ResolveLandingGroundZ(ConfirmedPlotId, CurrentLoc.Z);
 			Building->SetActorLocation(CurrentLoc);
 			Building->StartFloating(500.0f, true);
 			Building->LandBuilding();  // 내려오면서 VFX 재생
@@ -407,12 +525,19 @@ bool UPlacementHandler::PlacingEntity()
 	// 산업 베이크 — finalize 직후 (SetCompanyType 이 세이브를 동반하므로 등록 후 호출 필수)
 	if (PlacedBuilding)
 	{
-		// 스타터 프리셋 예약 — 영속 보증은 아래 CompleteBuildingPlacement의 무조건 SaveGameData (SetCompanyType의 저장은 부가)
-		FStarterPresetSeeder::SeedPendingForBuilding(PlacedBuilding);
-
 		if (PendingCompanyType != ECompanyType::None)
 		{
 			PlacedBuilding->SetCompanyType(PendingCompanyType);
+		}
+	}
+	if (UWorld* RuntimeWorld = GetWorld())
+	{
+		if (USpawnManager* SpawnMgr = RuntimeWorld->GetSubsystem<USpawnManager>())
+		{
+			if (ACityPlotWalkwayManager* WalkwayManager = SpawnMgr->GetPlotWalkwayManager())
+			{
+				WalkwayManager->RefreshPlot(ConfirmedPlotId, interactableActor);
+			}
 		}
 	}
 	RefreshVacantPlotDressingPlots(NAME_None, ConfirmedPlotId);
@@ -428,6 +553,12 @@ bool UPlacementHandler::PlacingEntity()
 
 	UpdateBuildAsset();
 	CompleteBuildingPlacement(interactableActor);
+	if (PlacedBuilding)
+	{
+		// 첫 저장으로 신규 세이브 컨텍스트를 만든 뒤 프리셋 예약까지 같은 건설 확정에 영속화한다.
+		FStarterPresetSeeder::SeedPendingForBuilding(PlacedBuilding);
+		PlacedBuilding->SaveGameData();
+	}
 
 	// 미션 진행 신호 — 신규 건물 배치 확정 (오프닝 M1 '첫 회사 건설' 등). 이동 확정 경로(ConfirmBuildingMove)는 제외
 	if (UMissionManagerSubsystem* MissionMgr = GetWorld()->GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
@@ -560,12 +691,12 @@ FVector2D UPlacementHandler::GetPlacementTargetBottomScreenPosition() const
 	return PlacementTargetBottomScreenPosition;
 }
 
-void UPlacementHandler::UpdateBuildAsset()
+bool UPlacementHandler::ComputeCanDrop()
 {
 	AActor* TargetActor = GetPlacementTargetActor();
 	if (!TargetActor)
 	{
-		return;
+		return false;
 	}
 
 	TArray<AActor*> overlappingActors;
@@ -576,11 +707,44 @@ void UPlacementHandler::UpdateBuildAsset()
 		TArray<AActor*> workstationOverlaps;
 		TArray<AActor*> decorationOverlaps;
 
-		TargetActor->GetOverlappingActors(workstationOverlaps, AWorkstationActorBase::StaticClass());
+		// 책상↔바닥 장식은 점유 사각형으로만 판정한다(책상 쪽은 IsOfficeWorkstationFootprintValid).
+		// 물리 겹침은 메시 상자라 화면에 그린 사각형과 어긋난다.
+		if (CurrentPlacementMode == EPlacementMode::Decoration && PlacementDecoration && CachedOfficeInterior)
+		{
+			const FBox2D DecorationRect = PlacementDecoration->GetFloorFootprint(CachedOfficeInterior->GetActorTransform());
+			const UOfficeManager* OfficeManager = GetWorld()->GetSubsystem<UOfficeManager>();
+			if (DecorationRect.bIsValid && OfficeManager)
+			{
+				const FBox2D ShrunkDecorationRect = DecorationRect.ExpandBy(-0.01);
+				for (AWorkstationActorBase* Desk : OfficeManager->GetPlacedWorkstations())
+				{
+					FBox2D DeskRect;
+					if (IsValid(Desk) && GetOfficeWorkstationFootprint(Desk, DeskRect) && ShrunkDecorationRect.Intersect(DeskRect))
+					{
+						workstationOverlaps.Add(Desk);
+					}
+				}
+			}
+		}
 		TargetActor->GetOverlappingActors(decorationOverlaps, ADecorationActor::StaticClass());
+		if (CurrentPlacementMode == EPlacementMode::Workstation)
+		{
+			decorationOverlaps.RemoveAll([](const AActor* Other)
+			{
+				const ADecorationActor* Decoration = Cast<ADecorationActor>(Other);
+				return !Decoration || Decoration->AllowedSurface != EDecorationSurface::Wall;
+			});
+		}
 
 		overlappingActors.Append(workstationOverlaps);
 		overlappingActors.Append(decorationOverlaps);
+		overlappingActors.RemoveAll([TargetActor](const AActor* Other)
+		{
+			const ADecorationActor* TargetDecoration = Cast<ADecorationActor>(TargetActor);
+			const ADecorationActor* OtherDecoration = Cast<ADecorationActor>(Other);
+			return TargetDecoration ? !TargetDecoration->BlocksPlacementWith(Other)
+				: OtherDecoration && !OtherDecoration->BlocksPlacementWith(TargetActor);
+		});
 	}
 	// 벽 장식: 데코레이션끼리만 충돌 체크
 	else if (CurrentPlacementMode == EPlacementMode::WallDecoration)
@@ -600,7 +764,7 @@ void UPlacementHandler::UpdateBuildAsset()
 		TargetActor->GetOverlappingActors(overlappingActors, OverlapCheckClass);
 	}
 
-	CanDrop = false;
+	bool bValidPosition = false;
 
 	// 부지 배치: bPlotPlacementValid(footprint 사각형 + 블록 실형상 트레이스 + 되밀기)가 단일 권위.
 	// IsPlacementGrounded 를 AND 로 걸면 안 된다 — 그쪽은 액터 메시 월드 AABB ×1.05 로 재서 footprint 보다
@@ -609,14 +773,32 @@ void UPlacementHandler::UpdateBuildAsset()
 	// 되밀기가 있는 footprint 게이트 쪽이 경계 판정의 권위라, 트레이스 9~14회도 같이 절약된다.
 	if (CurrentPlacementMode == EPlacementMode::Building && bPlotBuildSession)
 	{
-		CanDrop = bPlotPlacementValid;
+		bValidPosition = bPlotPlacementValid;
+	}
+	else if (CurrentPlacementMode == EPlacementMode::Workstation)
+	{
+		bValidPosition = overlappingActors.Num() == 0 && IsOfficeWorkstationFootprintValid();
+	}
+	else if (CurrentPlacementMode == EPlacementMode::Decoration && PlacementDecoration && PlacementDecoration->IsFloorCovering())
+	{
+		bValidPosition = IsOfficeFloorCoveringPlacementValid();
 	}
 	else if (overlappingActors.Num() == 0 && IsPlacementGrounded())
 	{
-		CanDrop = true;
+		bValidPosition = true;
 	}
+	return bValidPosition && IsOfficeEntrancePlacementValid();
+}
+
+void UPlacementHandler::UpdateBuildAsset()
+{
+	SyncOfficeMoveSeatedWorkers();
+	AActor* TargetActor = GetPlacementTargetActor();
+	if (!TargetActor) return;
+	CanDrop = ComputeCanDrop();
 
 	// 위치·회전·호버 부지 판정이 모두 수렴한 뒤 같은 footprint로 동적 부지 소품을 갱신한다.
+	UpdateOfficeGridPreview();
 	UpdateVacantPlotDressingPreview();
 
 	FVector targetPosition = TargetActor->GetActorLocation();
@@ -655,12 +837,49 @@ void UPlacementHandler::UpdateBuildAsset()
 		UE_LOG(LogTemp, Error, TEXT("UpdateBuildAsset - Target Position parameter not found!"));
 	}
 
-	// 건물 배치 모드: PlacementSMC 위치/회전을 건물 따라가되 Z는 바닥에 고정
+	// 큐브 밑면은 지면에 고정하고 XY/회전은 건물을 따른다.
 	if (CurrentPlacementMode == EPlacementMode::Building && PlacementSMC)
 	{
-		FVector ActorLoc = TargetActor->GetActorLocation();
-		PlacementSMC->SetWorldLocation(FVector(ActorLoc.X, ActorLoc.Y, 1.0f));
+		const FVector ActorLoc = ResolvePlotFootprintCenter(TargetActor);
+		// 바닥 = 부지 표면. 상수 1.0 은 리버워크(지면 Z=0)에서만 맞는 값이었다.
+		const float FloorSeedZ = GetPlotSurfaceZ(PendingPlotId, ActorLoc.Z);
+		const float FloorZ = TraceGroundZAt(FVector2D(ActorLoc.X, ActorLoc.Y), FloorSeedZ) + OverlayLiftCm * 0.25f;
+		const UStaticMesh* IndicatorMesh = PlacementSMC->GetStaticMesh();
+		const double IndicatorHalfZ = IndicatorMesh
+			? IndicatorMesh->GetBounds().BoxExtent.Z * FMath::Abs(PlacementSMC->GetComponentScale().Z)
+			: 0.0;
+		PlacementSMC->SetWorldLocation(FVector(ActorLoc.X, ActorLoc.Y, FloorZ + IndicatorHalfZ));
 		PlacementSMC->SetWorldRotation(TargetActor->GetActorRotation());
+		if (PlotEdgeMID)
+		{
+			PlotEdgeMID->SetScalarParameterValue(TEXT("GroundOffsetZ"), static_cast<float>(FloorZ - targetPosition.Z));
+		}
+	}
+	else if (CurrentPlacementMode == EPlacementMode::Workstation && PlacementSMC && PlacementWorkstation
+		&& CachedOfficeInterior)
+	{
+		FBox2D PreviewRect;
+		if (GetOfficeWorkstationFootprint(PlacementWorkstation, PreviewRect))
+		{
+			// CanDrop 효과를 배치 판정과 같은 그리드 사각형에 맞춰 낮게 표시한다.
+			constexpr float IndicatorHeight = 24.f;
+			const FTransform FloorTransform = CachedOfficeInterior->GetActorTransform();
+			const FVector FloorPosition = FloorTransform.TransformPosition(FVector(
+				PreviewRect.GetCenter(), CachedOfficeInterior->GetStructuralFloorZLocal() + 2.f));
+			const FVector2D Size = PreviewRect.GetSize();
+			PlacementSMC->SetWorldLocation(FloorPosition + FVector(0.f, 0.f, IndicatorHeight * 0.5f));
+			PlacementSMC->SetWorldRotation(CachedOfficeInterior->GetActorRotation());
+			ApplyPlacementIndicatorMaterial(false); // 오피스는 기존 꽉 찬 인디케이터 유지
+			PlacementSMC->SetWorldScale3D(FVector(
+				Size.X / 100.f * FloorTransform.GetScale3D().X,
+				Size.Y / 100.f * FloorTransform.GetScale3D().Y,
+				IndicatorHeight / 100.f));
+			PlacementSMC->SetVisibility(true);
+		}
+		else
+		{
+			PlacementSMC->SetVisibility(false);
+		}
 	}
 
 	// 부지 footprint 프리뷰 갱신(이동/위치/색의 단일 수렴점 — TrackMovePlacement 2종 모두 여기로 모임).
@@ -902,6 +1121,7 @@ void UPlacementHandler::OnBuildMoveReleased(const FInputActionValue& Value)
 
 void UPlacementHandler::UpdateTrackMovePlacement()
 {
+	if (bOfficeEditSession && !CoordinateUtils::SingleTouchCheck()) return;
 	if (HasMappingContext)
 	{
 		TrackMovePlacement();
@@ -915,13 +1135,26 @@ void UPlacementHandler::RotatePlacementEntity()
 	{
 		return;
 	}
+	FBox2D PreviousOfficeFootprint;
+	const bool bAnchorOfficeCorner = CurrentPlacementMode == EPlacementMode::Workstation
+		&& GetOfficeWorkstationFootprint(PlacementWorkstation, PreviousOfficeFootprint);
+	ABrickFactory* PlacementFactory = Cast<ABrickFactory>(TargetActor);
 
 	// 벽 장식 모드: Pitch만 90도씩 회전 (Yaw는 벽 방향 고정)
 	if (CurrentPlacementMode == EPlacementMode::WallDecoration)
 	{
 		WallDecorationRotationOffset = FMath::Fmod(WallDecorationRotationOffset + 90.f, 360.f);
 		float BaseYaw = (CurrentWallSide == EWallSide::Left) ? 180.f : 270.f;
+		if (const AOfficeInterior* Interior = Cast<AOfficeInterior>(
+			UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass())))
+		{
+			BaseYaw += Interior->GetActorRotation().Yaw;
+		}
 		TargetActor->SetActorRotation(FRotator(WallDecorationRotationOffset, BaseYaw, 0.f));
+	}
+	else if (PlacementFactory)
+	{
+		PlacementFactory->RotatePlacementQuarterTurn();
 	}
 	else
 	{
@@ -931,10 +1164,22 @@ void UPlacementHandler::RotatePlacementEntity()
 
 	// 그라운드 캐시 키는 위치만 담아 회전을 못 잡는다 — 점유 축이 바뀌었으므로 강제 무효화.
 	bGroundCacheValid = false;
+	if (CurrentPlacementMode == EPlacementMode::Workstation)
+	{
+		FBox2D RotatedOfficeFootprint;
+		if (bAnchorOfficeCorner && CachedOfficeInterior
+			&& GetOfficeWorkstationFootprint(PlacementWorkstation, RotatedOfficeFootprint))
+		{
+			// 최소 모서리의 셀을 고정해 홀수/짝수 폭 회전에서 반 칸 반올림이 누적되지 않게 한다.
+			const FVector2D CornerDelta = PreviousOfficeFootprint.Min - RotatedOfficeFootprint.Min;
+			TargetActor->AddActorWorldOffset(CachedOfficeInterior->GetActorTransform().TransformVector(FVector(CornerDelta, 0)));
+		}
+		TargetActor->SetActorLocation(ComputeOfficeFloorPosition(TargetActor->GetActorLocation()));
+	}
 
-	// 부지 세션: 뒤집힌 footprint 로 부지 안에 다시 clamp(가장자리에서 삐져나옴 방지)하면서 프리뷰/CanDrop 까지 갱신.
-	// 그 외 모드: 위치 재계산 없이 데칼 회전 + 겹침/그라운드 판정만 즉시 갱신.
-	if (CurrentPlacementMode == EPlacementMode::Building && bPlotBuildSession)
+	// 공장의 정사각형 예약은 제자리 90도 회전 전후 동일하다. 기존 유효성을 유지해 자석/지면 보정이 위치를 밀지 않게 한다.
+	// 직사각형 건물은 점유 축이 바뀌므로 부지 위치와 유효성을 다시 계산한다.
+	if (CurrentPlacementMode == EPlacementMode::Building && bPlotBuildSession && !PlacementFactory)
 	{
 		TrackMovePlacement(TargetActor->GetActorLocation());
 	}
@@ -996,8 +1241,32 @@ UStaticMeshComponent* UPlacementHandler::GetOrCreatePlotOccupiedSMC(int32 Index)
 	return MarkerSMC;
 }
 
+void UPlacementHandler::SetOwnedPlotOutlines(bool bVisible)
+{
+	// 소유 부지 외곽 테두리 — 빌드 모드 중에만. footprint 프리뷰와 생명주기를 묶어 짝이 어긋나지 않게 한다.
+	UWorld* RuntimeWorld = GetWorld();
+	USpawnManager* SpawnMgr = RuntimeWorld ? RuntimeWorld->GetSubsystem<USpawnManager>() : nullptr;
+	if (!SpawnMgr)
+	{
+		return;
+	}
+
+	TArray<FName> OwnedIds;
+	SpawnMgr->GatherOwnedPlotIds(OwnedIds);
+	for (const FName& Id : OwnedIds)
+	{
+		if (ACityPlotActor* Plot = SpawnMgr->GetSpawnedPlotById(Id))
+		{
+			Plot->SetBuildModeOutlineVisible(bVisible);
+		}
+	}
+}
+
 void UPlacementHandler::HidePlotFootprintPreview()
 {
+	// 테두리도 함께 끈다 — 프리뷰와 생명주기 동일(세션 종료·조건 미달 전부 이 경로를 지난다).
+	SetOwnedPlotOutlines(false);
+
 	if (PlotFootprintSMC)
 	{
 		PlotFootprintSMC->SetVisibility(false);
@@ -1021,33 +1290,47 @@ bool UPlacementHandler::HasCapacityForCurrentPlacement(FName PlotId) const
 	}
 
 	UWorld* RuntimeWorld = GetWorld();
-	UGameInstance* GameInstance = RuntimeWorld ? RuntimeWorld->GetGameInstance() : nullptr;
-	UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
 	UEntityManager* EntityMgr = RuntimeWorld ? RuntimeWorld->GetSubsystem<UEntityManager>() : nullptr;
-	if (!TableMgr || !EntityMgr)
+	USpawnManager* SpawnMgr = RuntimeWorld ? RuntimeWorld->GetSubsystem<USpawnManager>() : nullptr;
+	if (!EntityMgr || !SpawnMgr)
 	{
 		return false;
 	}
 
-	bool bPlotDataOk = false;
-	const FCityPlotData PlotData = TableMgr->GetCityPlotData(PlotId, bPlotDataOk);
-	if (!bPlotDataOk)
+	// 수용량 권위는 부지 액터다 — 레벨 배치형은 박스 크기에서 산출하므로 DT 값을 읽으면 안 된다.
+	const ACityPlotActor* Plot = SpawnMgr->GetSpawnedPlotById(PlotId);
+	if (!Plot)
 	{
 		return false;
 	}
+	// 공장은 회사 건설 슬롯 대신 자체 예약 영역으로 점유한다.
+	if (Cast<ABrickFactory>(PlacementTargetEntity)) return Plot->IsOwned();
 
-	const int32 CurrentBuildingCount = EntityMgr->GetBuildingsOnPlot(PlotId).Num();
+	// 개수만 쓰는 자리 — 값 반환 버전은 드래그 프레임마다 배열을 새로 만든다.
+	const int32 CurrentBuildingCount = EntityMgr->CountBuildingsOnPlot(PlotId);
 	const ABuildingBaseActor* MovingBuilding = Cast<ABuildingBaseActor>(PlacementTargetEntity);
 	const bool bExcludeMovingBuilding = MovingBuilding && MovingBuilding->GetOwningPlotId() == PlotId;
 	return FPlotPlacementRules::HasCapacity(
 		CurrentBuildingCount,
-		PlotData.BuildingCapacity,
+		Plot->GetBuildingCapacity(),
 		bExcludeMovingBuilding);
 }
 
 void UPlacementHandler::BeginPlacementFeedback()
 {
 	EndPlacementFeedback();
+	if (CurrentPlacementMode == EPlacementMode::Workstation && PlacementWorkstation)
+	{
+		UGameInstance* GameInstance = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
+		if (UUIManagerSubsystem* UIManager = GameInstance ? GameInstance->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+		{
+			if (UOfficeMainWidget* OfficeMain = UIManager->GetOfficeMain())
+			{
+				OfficeMain->SetPlacementWorkstationMarker(PlacementWorkstation, this);
+			}
+		}
+		return;
+	}
 
 	if (!bPlotBuildSession || CurrentPlacementMode != EPlacementMode::Building)
 	{
@@ -1076,6 +1359,10 @@ void UPlacementHandler::EndPlacementFeedback()
 	UGameInstance* GameInstance = RuntimeWorld ? RuntimeWorld->GetGameInstance() : nullptr;
 	if (UUIManagerSubsystem* UIManager = GameInstance ? GameInstance->GetSubsystem<UUIManagerSubsystem>() : nullptr)
 	{
+		if (UOfficeMainWidget* OfficeMain = UIManager->GetOfficeMain())
+		{
+			OfficeMain->SetPlacementWorkstationMarker(nullptr, nullptr);
+		}
 		if (UInGameLayerWidget* InGameLayer = UIManager->GetInGameLayer())
 		{
 			InGameLayer->SetPlacementBuildingMarker(nullptr, nullptr);
@@ -1090,36 +1377,33 @@ void UPlacementHandler::UpdateVacantPlotDressingPreview()
 	AVacantPlotDressingManager* DressingManager = SpawnMgr
 		? SpawnMgr->GetVacantPlotDressingManager()
 		: nullptr;
-	if (!DressingManager)
-	{
-		return;
-	}
+	ACityPlotWalkwayManager* WalkwayManager = SpawnMgr ? SpawnMgr->GetPlotWalkwayManager() : nullptr;
 
 	AActor* PreviewActor = GetPlacementTargetActor();
 	if (!bPlotBuildSession || CurrentPlacementMode != EPlacementMode::Building
 		|| !PreviewActor || PendingPlotId.IsNone())
 	{
-		DressingManager->ClearBuildingPreview();
+		if (WalkwayManager) { WalkwayManager->ClearBuildingPreview(); }
+		if (DressingManager) { DressingManager->ClearBuildingPreview(); }
 		return;
 	}
 
-	int32 FootprintWidth = FMath::Max(1, PendingFootprintWidthCells);
-	int32 FootprintDepth = FMath::Max(1, PendingFootprintDepthCells);
-	ApplyYawToFootprintCells(
-		PreviewActor->GetActorRotation().Yaw, FootprintWidth, FootprintDepth);
-	const FVector PreviewLocation = PreviewActor->GetActorLocation();
-	DressingManager->UpdateBuildingPreview(
-		PendingPlotId,
-		FVector2D(PreviewLocation.X, PreviewLocation.Y),
-		FVector2D(
-			FootprintWidth * FootprintCellSize * 0.5f,
-			FootprintDepth * FootprintCellSize * 0.5f));
+	const FVector PreviewLocation = ResolvePlotFootprintCenter(PreviewActor);
+	const FVector2D PreviewXY(PreviewLocation.X, PreviewLocation.Y);
+	const FVector2D HalfExtent = ResolvePlotFootprintHalfExtent(PreviewActor,
+		PendingFootprintWidthCells, PendingFootprintDepthCells);
+	if (WalkwayManager) { WalkwayManager->UpdateBuildingPreview(PendingPlotId, PreviewXY, HalfExtent, PreviewActor); }
+	if (DressingManager) { DressingManager->UpdateBuildingPreview(PendingPlotId, PreviewXY, HalfExtent); }
 }
 
 void UPlacementHandler::ClearVacantPlotDressingPreview()
 {
 	UWorld* RuntimeWorld = GetWorld();
 	USpawnManager* SpawnMgr = RuntimeWorld ? RuntimeWorld->GetSubsystem<USpawnManager>() : nullptr;
+	if (ACityPlotWalkwayManager* WalkwayManager = SpawnMgr ? SpawnMgr->GetPlotWalkwayManager() : nullptr)
+	{
+		WalkwayManager->ClearBuildingPreview();
+	}
 	if (AVacantPlotDressingManager* DressingManager = SpawnMgr
 		? SpawnMgr->GetVacantPlotDressingManager()
 		: nullptr)
@@ -1173,13 +1457,11 @@ void UPlacementHandler::UpdatePlotFootprintPreview()
 	}
 
 	// DT는 유효한 부지의 표면 높이와 점유 정보만 제공한다. 부지/DT가 없어도 실제 크기를 줄이지 않고 빨강으로 표시한다.
-	// footprint 한 변(월드) = 칸수 × 셀크기. 격자선 비율 곱하지 않음 — 실제 점유 크기 1:1.
-	// 프리뷰 건물의 현재 회전을 반영하되 부지 크기로 줄이지 않는다. oversized도 실제 크기 그대로 빨강 표시한다.
-	int32 FootW = FMath::Max(1, PendingFootprintWidthCells);
-	int32 FootD = FMath::Max(1, PendingFootprintDepthCells);
-	ApplyYawToFootprintCells(PreviewActor->GetActorRotation().Yaw, FootW, FootD);
-	const float WidthWorld = FootW * FootprintCellSize;
-	const float DepthWorld = FootD * FootprintCellSize;
+	// 프리뷰와 점유 마커는 배치 판정의 월드 축정렬 사각형을 그대로 표시한다.
+	const FVector2D FootprintHalfExtent = ResolvePlotFootprintHalfExtent(
+		PreviewActor, PendingFootprintWidthCells, PendingFootprintDepthCells);
+	const float WidthWorld = static_cast<float>(FootprintHalfExtent.X * 2.0);
+	const float DepthWorld = static_cast<float>(FootprintHalfExtent.Y * 2.0);
 
 	// Plane 기본 한 변(보통 100cm)을 실측해 스케일 환산(X=widthWorld/base, Y=depthWorld/base).
 	float PlaneBaseSize = 100.f;
@@ -1191,12 +1473,17 @@ void UPlacementHandler::UpdatePlotFootprintPreview()
 	const float ScaleX = WidthWorld / PlaneBaseSize;
 	const float ScaleY = DepthWorld / PlaneBaseSize;
 
-	// footprint 평면 Z — 부지(블록) 표면 위로 살짝 띄워 가시화(블록에 묻혀 안 보이는 문제 회피).
-	constexpr float FootprintLiftZ = 10.f;
-	const float FootprintZ = bHasValidPlotData ? PlotData.Center.Z + FootprintLiftZ : FootprintLiftZ;
+	// 여기까지 왔으면 부지 건설 세션이 살아 있다 — 소유 부지 테두리를 켠다("여기까지 내 땅").
+	SetOwnedPlotOutlines(true);
 
 	// XY는 현재 프리뷰 위치를 그대로 쓴다. 유효한 부지에서는 ComputePlotPlacement가 경계 안으로 clamp한다.
-	const FVector ActorLoc = PreviewActor->GetActorLocation();
+	const FVector ActorLoc = ResolvePlotFootprintCenter(PreviewActor);
+
+	// 부지 액터 Z 를 씨드로 삼아 **실제 바닥을 트레이스로 재고** 그 위로 띄운다.
+	// 부지 Z + 고정 오프셋만 쓰면, 부지가 바닥보다 낮은 곳에서 평면이 묻혀 깜빡인다(Z-파이팅).
+	const float PlotSurfaceZ = GetPlotSurfaceZ(PendingPlotId, ActorLoc.Z);
+	const float FootprintZ = TraceGroundZAt(FVector2D(ActorLoc.X, ActorLoc.Y), PlotSurfaceZ) + OverlayLiftCm;
+
 	const FVector FootprintWorldLoc(ActorLoc.X, ActorLoc.Y, FootprintZ);
 
 	// footprint SMC lazy 생성(첫 사용 시 1회). 머티리얼/월드 미비면 graceful 숨김.
@@ -1250,7 +1537,25 @@ void UPlacementHandler::UpdatePlotFootprintPreview()
 	int32 MarkerIndex = 0;
 	if (bHasValidPlotData && TableMgr)
 	{
-		const float OccupiedZ = PlotData.Center.Z + OccupiedLiftZ;
+		const float OccupiedZ = PlotSurfaceZ + OccupiedLiftZ;
+		auto ShowOccupiedMarker = [&](const FVector& OtherLoc, const FVector2D& OtherHalfExtent)
+		{
+			if (MarkerIndex >= MaxPlotOccupiedMarkers) return;
+			UStaticMeshComponent* MarkerSMC = GetOrCreatePlotOccupiedSMC(MarkerIndex);
+			if (!MarkerSMC) return;
+			const float MarkerZ = TraceGroundZAt(FVector2D(OtherLoc.X, OtherLoc.Y), OccupiedZ)
+				+ OverlayLiftCm * 0.5f;
+			MarkerSMC->SetWorldLocation(FVector(OtherLoc.X, OtherLoc.Y, MarkerZ));
+			MarkerSMC->SetWorldRotation(FRotator::ZeroRotator);
+			MarkerSMC->SetWorldScale3D(FVector(OtherHalfExtent.X * 2.0 / PlaneBaseSize,
+				OtherHalfExtent.Y * 2.0 / PlaneBaseSize, 1.f));
+			if (PlotOccupiedMIDs.IsValidIndex(MarkerIndex) && PlotOccupiedMIDs[MarkerIndex])
+			{
+				PlotOccupiedMIDs[MarkerIndex]->SetVectorParameterValue(TEXT("Color"), OccupiedColor);
+			}
+			MarkerSMC->SetVisibility(true);
+			++MarkerIndex;
+		};
 		if (UEntityManager* EntityMgr = W->GetSubsystem<UEntityManager>())
 		{
 			const TArray<ABuildingBaseActor*> PlotBuildings = EntityMgr->GetBuildingsOnPlot(PendingPlotId);
@@ -1265,39 +1570,15 @@ void UPlacementHandler::UpdatePlotFootprintPreview()
 					continue;
 				}
 
-				int32 OtherW = 1;
-				int32 OtherD = 1;
-				bool bBOk = false;
-				const FBuildingData OtherData = TableMgr->GetBuildingData(Existing->GetInteractableRowName(), bBOk);
-				if (bBOk)
-				{
-					OtherW = FMath::Max(1, OtherData.FootprintWidthCells);
-					OtherD = FMath::Max(1, OtherData.FootprintDepthCells);
-				}
-				// 기존 건물도 회전 상태로 저장/복원되므로(EntityManager 스폰 트랜스폼) 점유 축을 회전에 맞춘다.
-				ApplyYawToFootprintCells(Existing->GetActorRotation().Yaw, OtherW, OtherD);
-
-				UStaticMeshComponent* MarkerSMC = GetOrCreatePlotOccupiedSMC(MarkerIndex);
-				if (!MarkerSMC)
-				{
-					break; // 생성 실패(머티리얼/월드 부재) — 더 진행 의미 없음.
-				}
-
-				// 마커 = 기존 건물 위치 중심, 그 건물 footprint 월드 크기(겹침 판정 AABB 와 동일 박스).
-				const FVector OtherLoc = Existing->GetActorLocation();
-				const float MarkerScaleX = (OtherW * FootprintCellSize) / PlaneBaseSize;
-				const float MarkerScaleY = (OtherD * FootprintCellSize) / PlaneBaseSize;
-
-				MarkerSMC->SetWorldLocation(FVector(OtherLoc.X, OtherLoc.Y, OccupiedZ));
-				MarkerSMC->SetWorldRotation(FRotator::ZeroRotator);
-				MarkerSMC->SetWorldScale3D(FVector(MarkerScaleX, MarkerScaleY, 1.f));
-				if (PlotOccupiedMIDs.IsValidIndex(MarkerIndex) && PlotOccupiedMIDs[MarkerIndex])
-				{
-					PlotOccupiedMIDs[MarkerIndex]->SetVectorParameterValue(TEXT("Color"), OccupiedColor);
-				}
-				MarkerSMC->SetVisibility(true);
-				++MarkerIndex;
+				ShowOccupiedMarker(Existing->GetPlacementFootprintCenter(), Existing->GetPlacementFootprintHalfExtent());
 			}
+		}
+		for (TActorIterator<ABrickFactory> FactoryIt(W); FactoryIt; ++FactoryIt)
+		{
+			const ABrickFactory* Factory = *FactoryIt;
+			if (!IsValid(Factory) || Factory == PlacementTargetEntity
+				|| Factory->GetOwningPlotId() != PendingPlotId || Factory->IsActorBeingDestroyed()) continue;
+			ShowOccupiedMarker(Factory->GetPlacementFootprintCenter(true), Factory->GetPlacementFootprintHalfExtent(true, true));
 		}
 	}
 
@@ -1364,8 +1645,73 @@ FContactSnapResult UPlacementHandler::ComputeContactSnap(
 	return Result;
 }
 
+void UPlacementHandler::PositionWorkstationPreview(const FVector& DesiredWorldPosition)
+{
+	if (!PlacementWorkstation || !CachedOfficeInterior) return;
+	const FVector FallbackPosition = ComputeOfficeFloorPosition(DesiredWorldPosition);
+	PlacementWorkstation->SetActorLocation(FallbackPosition);
+	if (ComputeCanDrop()) return;
+
+	FBox2D Footprint;
+	if (!GetOfficeWorkstationFootprint(PlacementWorkstation, Footprint)) return;
+	const FTransform FloorTransform = CachedOfficeInterior->GetActorTransform();
+	const FBox2D FloorBounds = CachedOfficeInterior->GetCurrentFloorBoundsLocal();
+	const FVector LocalPivot = FloorTransform.InverseTransformPosition(FallbackPosition);
+	const FVector2D PivotXY(LocalPivot.X, LocalPivot.Y);
+	const FVector2D MinOffset = Footprint.Min - PivotXY;
+	const FVector2D AvailableSize = FloorBounds.GetSize() - Footprint.GetSize();
+	if (AvailableSize.X < 0.0 || AvailableSize.Y < 0.0) return;
+
+	// 실제 방 안에 들어가는 격자만 한 번 순회한다. 드래그 중에는 자동 재배치하지 않는다.
+	const int32 LastColumn = FMath::FloorToInt((AvailableSize.X + 0.01) / OfficeGridCellSize);
+	const int32 LastRow = FMath::FloorToInt((AvailableSize.Y + 0.01) / OfficeGridCellSize);
+	TArray<FVector2D> Candidates;
+	Candidates.Reserve((LastColumn + 1) * (LastRow + 1));
+	for (int32 RowIndex = 0; RowIndex <= LastRow; ++RowIndex)
+	{
+		for (int32 ColumnIndex = 0; ColumnIndex <= LastColumn; ++ColumnIndex)
+		{
+			Candidates.Add(FloorBounds.Min + FVector2D(ColumnIndex * OfficeGridCellSize,
+				RowIndex * OfficeGridCellSize) - MinOffset);
+		}
+	}
+	Candidates.Sort([PivotXY](const FVector2D& A, const FVector2D& B)
+	{
+		return FVector2D::DistSquared(A, PivotXY) < FVector2D::DistSquared(B, PivotXY);
+	});
+	// 탐색 동안 점유 데이터는 고정이다. 막힌 후보는 메시 이동/물리 겹침 갱신 없이 거른다.
+	TArray<FBox2D> BlockingRects;
+	GetOfficeWorkstationBlockingFootprints(BlockingRects);
+	for (const FVector2D& Candidate : Candidates)
+	{
+		const FVector2D CandidateMin = Candidate + MinOffset;
+		const FBox2D CandidateRect(CandidateMin, CandidateMin + Footprint.GetSize());
+		if (!IsOfficeWorkstationFootprintValid(CandidateRect, BlockingRects)
+			|| CachedOfficeInterior->IsRecruitmentEntranceFloorBlocked(CandidateRect)) continue;
+		PlacementWorkstation->SetActorLocation(FloorTransform.TransformPosition(FVector(Candidate, LocalPivot.Z)));
+		if (ComputeCanDrop()) return;
+	}
+	PlacementWorkstation->SetActorLocation(FallbackPosition);
+}
+
 FVector UPlacementHandler::ComputeOfficeFloorPosition(const FVector& InWorldPos) const
 {
+	if (CurrentPlacementMode == EPlacementMode::Workstation && CachedOfficeInterior)
+	{
+		const FTransform FloorTransform = CachedOfficeInterior->GetActorTransform();
+		FVector LocalPosition = FloorTransform.InverseTransformPosition(InWorldPos);
+		FBox2D CurrentRect;
+		if (!GetOfficeWorkstationFootprint(PlacementWorkstation, CurrentRect)) return InWorldPos;
+		const FVector CurrentPivot = FloorTransform.InverseTransformPosition(PlacementWorkstation->GetActorLocation());
+		const FVector2D MinOffset = CurrentRect.Min - FVector2D(CurrentPivot.X, CurrentPivot.Y);
+		const FVector2D GridOrigin = CachedOfficeInterior->GetCurrentFloorBoundsLocal().Min;
+		LocalPosition.X = GridOrigin.X + FMath::GridSnap(LocalPosition.X + MinOffset.X - GridOrigin.X,
+			static_cast<double>(OfficeGridCellSize)) - MinOffset.X;
+		LocalPosition.Y = GridOrigin.Y + FMath::GridSnap(LocalPosition.Y + MinOffset.Y - GridOrigin.Y,
+			static_cast<double>(OfficeGridCellSize)) - MinOffset.Y;
+		LocalPosition.Z = 0.f;
+		return FloorTransform.TransformPosition(LocalPosition);
+	}
 	// 5 유닛 격자
 	FVector Stepped = InWorldPos / 5.f;
 	Stepped.X = FMath::RoundToFloat(Stepped.X) * 5.f;
@@ -1408,6 +1754,10 @@ FVector2D UPlacementHandler::ApplyOfficeContactSnap(const FVector2D& InXY) const
 		{
 			return;
 		}
+		const ADecorationActor* PreviewDecoration = Cast<ADecorationActor>(Preview);
+		const ADecorationActor* OtherDecoration = Cast<ADecorationActor>(Other);
+		if ((PreviewDecoration && !PreviewDecoration->BlocksPlacementWith(Other))
+			|| (OtherDecoration && !OtherDecoration->BlocksPlacementWith(Preview))) return;
 		FVector O, E;
 		Other->GetActorBounds(false, O, E);
 		if (E.X > 0.f && E.Y > 0.f)
@@ -1416,10 +1766,33 @@ FVector2D UPlacementHandler::ApplyOfficeContactSnap(const FVector2D& InXY) const
 		}
 	};
 
+	// 책상은 메시가 아니라 점유 사각형에 붙인다 — 판정과 같은 사각형이어야 자석이 빨간 자리로 끌고 가지 않는다.
+	auto AddDeskFootprint = [&](const AWorkstationActorBase* Desk)
+	{
+		FBox2D LocalRect;
+		if (!CachedOfficeInterior || !GetOfficeWorkstationFootprint(Desk, LocalRect))
+		{
+			AddActorFootprint(Desk);
+			return;
+		}
+		const ADecorationActor* PreviewDecoration = Cast<ADecorationActor>(Preview);
+		if (Desk == Preview || (PreviewDecoration && !PreviewDecoration->BlocksPlacementWith(Desk))) return;
+		const FTransform FloorTransform = CachedOfficeInterior->GetActorTransform();
+		FBox WorldBox(ForceInit);
+		for (const FVector2D& Corner : { LocalRect.Min, LocalRect.Max,
+			FVector2D(LocalRect.Min.X, LocalRect.Max.Y), FVector2D(LocalRect.Max.X, LocalRect.Min.Y) })
+		{
+			WorldBox += FloorTransform.TransformPosition(FVector(Corner, 0.0));
+		}
+		const FVector Center = WorldBox.GetCenter();
+		const FVector Extent = WorldBox.GetExtent();
+		Neighbors.Add({ FVector2D(Center.X, Center.Y), static_cast<float>(Extent.X), static_cast<float>(Extent.Y) });
+	};
+
 	// 월드 순회 대신 OfficeManager 등록부를 쓴다 — 배치 확정이 여기에 등록하므로 항상 최신이다.
 	if (const UOfficeManager* OfficeMgr = W->GetSubsystem<UOfficeManager>())
 	{
-		for (const AWorkstationActorBase* WS : OfficeMgr->GetPlacedWorkstations()) { AddActorFootprint(WS); }
+		for (const AWorkstationActorBase* WS : OfficeMgr->GetPlacedWorkstations()) { AddDeskFootprint(WS); }
 		for (const ADecorationActor* Dec : OfficeMgr->GetPlacedDecorations()) { AddActorFootprint(Dec); }
 	}
 
@@ -1502,15 +1875,14 @@ bool UPlacementHandler::TryFindInitialPlotPlacement(
 		return false;
 	}
 
-	int32 FootW = FMath::Max(1, PendingFootprintWidthCells);
-	int32 FootD = FMath::Max(1, PendingFootprintDepthCells);
-	if (const AActor* PreviewActor = GetPlacementTargetActor())
-	{
-		ApplyYawToFootprintCells(PreviewActor->GetActorRotation().Yaw, FootW, FootD);
-	}
-	const float HalfX = FootW * FootprintCellSize * 0.5f;
-	const float HalfY = FootD * FootprintCellSize * 0.5f;
-	const FVector2D DesiredXY(DesiredWorldPos.X, DesiredWorldPos.Y);
+	const AActor* PreviewActor = GetPlacementTargetActor();
+	const FVector CenterOffset = ResolvePlotFootprintCenter(PreviewActor)
+		- (PreviewActor ? PreviewActor->GetActorLocation() : FVector::ZeroVector);
+	const FVector2D FootprintHalfExtent = ResolvePlotFootprintHalfExtent(
+		PreviewActor, PendingFootprintWidthCells, PendingFootprintDepthCells);
+	const float HalfX = static_cast<float>(FootprintHalfExtent.X);
+	const float HalfY = static_cast<float>(FootprintHalfExtent.Y);
+	const FVector2D DesiredXY(DesiredWorldPos.X + CenterOffset.X, DesiredWorldPos.Y + CenterOffset.Y);
 
 	struct FInitialPlotSearchEntry
 	{
@@ -1597,11 +1969,11 @@ bool UPlacementHandler::TryFindInitialPlotPlacement(
 		bool bValidCandidate = false;
 		FName ResolvedPlotId = NAME_None;
 		const bool bHandled = ComputePlotPlacement(
-			FVector(CandidateInput.X, CandidateInput.Y, DesiredWorldPos.Z),
+			FVector(CandidateInput.X - CenterOffset.X, CandidateInput.Y - CenterOffset.Y, DesiredWorldPos.Z),
 			SnappedPosition,
 			bValidCandidate,
 			ResolvedPlotId);
-		OutCandidatePosition = FVector2D(SnappedPosition.X, SnappedPosition.Y);
+		OutCandidatePosition = FVector2D(SnappedPosition.X + CenterOffset.X, SnappedPosition.Y + CenterOffset.Y);
 		return bHandled && bValidCandidate && ResolvedPlotId == SearchEntry.PlotId;
 	};
 
@@ -1693,8 +2065,8 @@ bool UPlacementHandler::TryFindInitialPlotPlacement(
 		return false;
 	}
 
-	OutPlacementPos.X = BestCandidatePosition.X;
-	OutPlacementPos.Y = BestCandidatePosition.Y;
+	OutPlacementPos.X = BestCandidatePosition.X - CenterOffset.X;
+	OutPlacementPos.Y = BestCandidatePosition.Y - CenterOffset.Y;
 	OutPlotId = BestCandidatePlotId;
 	return true;
 }
@@ -1718,8 +2090,12 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 		return true;
 	}
 
-	// === 동적 호버 부지 판정 — 프리뷰 입력 위치 밑의 소유 부지 ===
-	ACityPlotActor* HoverPlot = SpawnMgr->GetOwnedPlotAt(InWorldPos);
+	// 입력과 반환은 액터 피벗이며, 경계·접지·겹침은 실제 본체 중심의 공통 칸 사각형으로 검사한다.
+	const AActor* PreviewActor = GetPlacementTargetActor();
+	const FVector CenterOffset = ResolvePlotFootprintCenter(PreviewActor)
+		- (PreviewActor ? PreviewActor->GetActorLocation() : FVector::ZeroVector);
+	const FVector DesiredCenter = InWorldPos + CenterOffset;
+	ACityPlotActor* HoverPlot = SpawnMgr->GetOwnedPlotAt(DesiredCenter);
 	if (!HoverPlot)
 	{
 		// 소유 부지 위가 아님 → clamp 안 함(입력 유지), 무효(빨강). 세션이므로 true(자유 배치 폴백 차단).
@@ -1730,19 +2106,15 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 	const FVector PlotCenter = HoverPlot->GetCenter();
 	const FVector2D Extent = HoverPlot->GetExtent();
 
-	// 현재 회전 footprint은 줄이지 않는다. 부지보다 큰 축은 PlotCenter로 clamp하고 exact-fit 규칙이 무효 처리한다.
-	int32 FootW = FMath::Max(1, PendingFootprintWidthCells);
-	int32 FootD = FMath::Max(1, PendingFootprintDepthCells);
-	if (const AActor* PreviewActor = GetPlacementTargetActor())
-	{
-		ApplyYawToFootprintCells(PreviewActor->GetActorRotation().Yaw, FootW, FootD);
-	}
-
-	// footprint 월드 반경.
-	const float HalfX = FootW * FootprintCellSize * 0.5f;
-	const float HalfY = FootD * FootprintCellSize * 0.5f;
+	// 현재 회전의 점유 크기를 그대로 검사한다. 큰 축은 중심만 clamp하고 크기는 보존한다.
+	const FVector2D FootprintHalfExtent = ResolvePlotFootprintHalfExtent(
+		GetPlacementTargetActor(), PendingFootprintWidthCells, PendingFootprintDepthCells);
+	const float HalfX = static_cast<float>(FootprintHalfExtent.X);
+	const float HalfY = static_cast<float>(FootprintHalfExtent.Y);
 	const bool bFitsCurrentOrientation = FPlotPlacementRules::DoesCurrentOrientationFitWithinPlot(
 		Extent.X, Extent.Y, HalfX, HalfY);
+	const ACityPlotWalkwayManager* WalkwayManager = HoverPlot->IsAuthoredInLevel()
+		? SpawnMgr->GetPlotWalkwayManager() : nullptr;
 
 	// === 위치 clamp — footprint 사각형이 부지 안에 통째로 들어오도록 center 만 clamp ===
 	// center.X ∈ [Center.X - ExtentX + HalfX, Center.X + ExtentX - HalfX]. footprint 가 부지보다 크면(Min>Max)
@@ -1758,7 +2130,7 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 		InOutXY.Y = (MinCenterY > MaxCenterY) ? PlotCenter.Y : FMath::Clamp(InOutXY.Y, MinCenterY, MaxCenterY);
 	};
 
-	FVector2D RawXY(InWorldPos.X, InWorldPos.Y);
+	FVector2D RawXY(DesiredCenter.X, DesiredCenter.Y);
 	ClampCenterToPlot(RawXY);
 	OutResolvedPlotId = HoverPlot->GetPlotId();
 
@@ -1767,8 +2139,6 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 	// 검은데 안 붙는" 불일치가 난다. 프리뷰 건물 자신은 제외(재배치 중인 건물 자신도).
 	TArray<FNeighborFootprint, TInlineAllocator<16>> Neighbors;
 
-	UGameInstance* GI = W ? W->GetGameInstance() : nullptr;
-	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
 	if (UEntityManager* EntityMgr = W->GetSubsystem<UEntityManager>())
 	{
 		const TArray<ABuildingBaseActor*> PlotBuildings = EntityMgr->GetBuildingsOnPlot(OutResolvedPlotId);
@@ -1779,25 +2149,21 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 				continue;
 			}
 
-			int32 OtherW = 1;
-			int32 OtherD = 1;
-			if (TableMgr)
-			{
-				bool bBOk = false;
-				const FBuildingData OtherData = TableMgr->GetBuildingData(Existing->GetInteractableRowName(), bBOk);
-				if (bBOk)
-				{
-					OtherW = FMath::Max(1, OtherData.FootprintWidthCells);
-					OtherD = FMath::Max(1, OtherData.FootprintDepthCells);
-				}
-			}
-			// 마커 표시(UpdatePlotFootprintPreview)와 동일 규약 — 회전한 기존 건물의 실제 점유 축.
-			ApplyYawToFootprintCells(Existing->GetActorRotation().Yaw, OtherW, OtherD);
-
-			const FVector OtherLoc = Existing->GetActorLocation();
+			const FVector OtherLoc = Existing->GetPlacementFootprintCenter();
+			const FVector2D OtherHalfExtent = Existing->GetPlacementFootprintHalfExtent();
 			Neighbors.Add({ FVector2D(OtherLoc.X, OtherLoc.Y),
-				OtherW * FootprintCellSize * 0.5f, OtherD * FootprintCellSize * 0.5f });
+				static_cast<float>(OtherHalfExtent.X), static_cast<float>(OtherHalfExtent.Y) });
 		}
+	}
+	for (TActorIterator<ABrickFactory> FactoryIt(W); FactoryIt; ++FactoryIt)
+	{
+		const ABrickFactory* ExistingFactory = *FactoryIt;
+		if (!IsValid(ExistingFactory) || ExistingFactory == PlacementTargetEntity
+			|| ExistingFactory->IsActorBeingDestroyed()) continue;
+		const FVector OtherLoc = ExistingFactory->GetPlacementFootprintCenter(true);
+		const FVector2D OtherHalf = ExistingFactory->GetPlacementFootprintHalfExtent(true, true);
+		Neighbors.Add({ FVector2D(OtherLoc.X, OtherLoc.Y),
+			static_cast<float>(OtherHalf.X), static_cast<float>(OtherHalf.Y) });
 	}
 
 	// 연속 AABB 겹침(footprint 사각형 ↔ 이웃 footprint 사각형).
@@ -1852,7 +2218,11 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 			GroundXY = XY;
 			bGrounded = false;
 		}
-		return { GroundXY, !OverlapsNeighbor(GroundXY) && bGrounded };
+		const bool bFootprintAllowed = bGrounded && !OverlapsNeighbor(GroundXY);
+		const bool bWalkwayAllowed = bFootprintAllowed && (!HoverPlot->IsAuthoredInLevel()
+			|| (IsValid(WalkwayManager) && WalkwayManager->CanPlaceBuilding(
+				OutResolvedPlotId, GroundXY, FootprintHalfExtent, PreviewActor)));
+		return { GroundXY, bWalkwayAllowed };
 	};
 
 	// 자석은 상황을 악화시키지 않음: 스냅 무효면 축을 하나씩 제외, 그래도 무효면 스냅 포기 (손가락 위치 존중)
@@ -1871,8 +2241,8 @@ bool UPlacementHandler::ComputePlotPlacement(const FVector& InWorldPos, FVector&
 		Chosen = EvaluateCandidate(false, false);
 	}
 
-	OutSnappedPos.X = Chosen.XY.X;
-	OutSnappedPos.Y = Chosen.XY.Y;
+	OutSnappedPos.X = Chosen.XY.X - CenterOffset.X;
+	OutSnappedPos.Y = Chosen.XY.Y - CenterOffset.Y;
 
 	// 최종 확정과 후보 피드백이 같은 capacity helper를 사용한다. 이동 중 원래 부지에서는 자기 자신만 제외한다.
 	bOutValidCell = bFitsCurrentOrientation
@@ -1944,63 +2314,21 @@ void UPlacementHandler::TrackMovePlacement()
 			if (HitComponent)
 			{
 				FString CompName = HitComponent->GetName();
-				if (CompName.Contains(TEXT("WallLeft")) && CurrentWallSide != EWallSide::Left)
+				// 출입구 조각(DoorWall*)은 왼쪽 벽을 대신하므로 이름에 Right 가 들어 있어도 왼쪽 벽이다.
+				const bool bLeftWallPiece = CompName.Contains(TEXT("WallLeft")) || CompName.StartsWith(TEXT("DoorWall"));
+				if (bLeftWallPiece && CurrentWallSide != EWallSide::Left)
 				{
 					SwitchToWall(EWallSide::Left, HitLocation);
 					return;
 				}
-				else if (CompName.Contains(TEXT("WallRight")) && CurrentWallSide != EWallSide::Right)
+				else if (!bLeftWallPiece && CompName.Contains(TEXT("WallRight")) && CurrentWallSide != EWallSide::Right)
 				{
 					SwitchToWall(EWallSide::Right, HitLocation);
 					return;
 				}
 			}
 
-			// 벽 범위 가져오기
-			FVector MinBounds = FVector::ZeroVector;
-			FVector MaxBounds = FVector(0.f, 0.f, 300.f);
-
-			AOfficeInterior* OfficeInterior = Cast<AOfficeInterior>(
-				UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass()));
-			if (OfficeInterior)
-			{
-				OfficeInterior->GetWallPlacementBounds(CurrentWallSide, MinBounds, MaxBounds);
-			}
-
-			// 그리드 스냅 (5 유닛) 및 고정 축 설정
-			FVector SteppedPosition = HitLocation;
-
-			if (CurrentWallSide == EWallSide::Left)
-			{
-				// Left 벽: X, Z만 이동, Y=-11 고정
-				SteppedPosition.X = FMath::RoundToFloat(HitLocation.X / 5.f) * 5.f;
-				SteppedPosition.Z = FMath::RoundToFloat(HitLocation.Z / 5.f) * 5.f;
-				SteppedPosition.Y = -11.f;
-
-				// Z만 클램핑 (X는 벽 길이에 따라 자유롭게 이동)
-				SteppedPosition.Z = FMath::Clamp(SteppedPosition.Z, MinBounds.Z, MaxBounds.Z);
-			}
-			else
-			{
-				// Right 벽: Y, Z만 이동, X=4 고정
-				SteppedPosition.Y = FMath::RoundToFloat(HitLocation.Y / 5.f) * 5.f;
-				SteppedPosition.Z = FMath::RoundToFloat(HitLocation.Z / 5.f) * 5.f;
-				SteppedPosition.X = 4.f;
-
-				// Z만 클램핑 (Y는 벽 길이에 따라 자유롭게 이동)
-				SteppedPosition.Z = FMath::Clamp(SteppedPosition.Z, MinBounds.Z, MaxBounds.Z);
-			}
-
-			FVector OldActorLocation = TargetActor->GetActorLocation();
-			UE_LOG(LogTemp, Warning, TEXT("[TrackMovePlacement] OldLocation: %s, NewLocation: %s"),
-				*OldActorLocation.ToString(), *SteppedPosition.ToString());
-
-			if (!FVector::PointsAreSame(SteppedPosition, OldActorLocation))
-			{
-				TargetActor->SetActorLocation(SteppedPosition);
-				UE_LOG(LogTemp, Warning, TEXT("[TrackMovePlacement] Actor MOVED to: %s"), *SteppedPosition.ToString());
-				UpdateBuildAsset();
-			}
+			TrackMovePlacement(HitLocation);
 		}
 		return;
 	}
@@ -2031,6 +2359,14 @@ void UPlacementHandler::TrackMovePlacement()
 					SteppedPosition = PlotSnapped;
 					bPlotPlacementValid = bValidCell;
 					PendingPlotId = ResolvedPlotId; // 현재 호버 부지로 갱신(부지밖이면 None)
+					// 칸 안에서 손가락만 움직여도 끄는 중이다 — 도로 미리보기 재생성은 손가락이 멈춘 뒤로 미룬다
+					if (USpawnManager* DragSpawnMgr = GetWorld()->GetSubsystem<USpawnManager>())
+					{
+						if (ACityPlotWalkwayManager* DragWalkwayManager = DragSpawnMgr->GetPlotWalkwayManager())
+						{
+							DragWalkwayManager->NotePreviewDragActivity(FVector2D(IntersectionPos.X, IntersectionPos.Y));
+						}
+					}
 				}
 				else
 				{
@@ -2069,6 +2405,20 @@ void UPlacementHandler::TrackMovePlacement(const FVector& WorldPosition)
 {
 	AActor* TargetActor = GetPlacementTargetActor();
 	if (!TargetActor) return;
+
+	if (CurrentPlacementMode == EPlacementMode::WallDecoration)
+	{
+		const AOfficeInterior* Interior = Cast<AOfficeInterior>(
+			UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass()));
+		if (!Interior) return;
+		const FVector WallPosition = Interior->ConstrainWallDecorationLocation(CurrentWallSide, WorldPosition);
+		if (!TargetActor->GetActorLocation().Equals(WallPosition))
+		{
+			TargetActor->SetActorLocation(WallPosition);
+			UpdateBuildAsset();
+		}
+		return;
+	}
 
 	FVector SteppedPosition;
 	switch (CurrentPlacementMode)
@@ -2122,13 +2472,77 @@ void UPlacementHandler::TrackMovePlacement(const FVector& WorldPosition)
 	}
 }
 
+// TODO: [Perf] 드래그 중 매 프레임 복합(bTraceComplex) 트레이스가 2 + 기존건물수 회 돈다
+// (UpdatePlotFootprintPreview 의 footprint 1회 + 점유 마커마다 1회, UpdateBuildAsset 1회).
+// 같은 파일 IsPlacementGrounded 의 9-트레이스 memoize 와 같은 이유로 캐시 대상이다 —
+// 대상이 정적 지오메트리라 (양자화 XY, SeedZ) 키로 재사용 가능. 단, 캐시는 빌드 모드 진입의
+// ACityPlotActor::PrepareCityGroundQueries(채널 응답을 런타임에 켬) 직후 비워야 stale 이 안 된다.
+// 캐시가 늦게 비면 프리뷰 Z 가 바닥에 묻혀 조용히 사라지므로, 무효화 지점을 실기 드래그로 확인한 뒤 적용할 것.
+float UPlacementHandler::TraceGroundZAt(const FVector2D& WorldXY, float SeedZ) const
+{
+	// 오버레이 평면을 얹을 **실제 바닥 높이**를 잰다. 부지 액터 Z 는 사람이 눈으로 놓은 값이라 바닥과
+	// 몇 미터씩 다를 수 있고(실측: 한 부지가 이웃보다 5m 높음), 그 값에 고정 오프셋만 더하면
+	// 부지가 바닥보다 낮은 곳에서는 평면이 묻혀 깜빡이고 높은 곳에서는 공중에 뜬다.
+	UWorld* RuntimeWorld = GetWorld();
+	if (!RuntimeWorld)
+	{
+		return SeedZ;
+	}
+
+	// StreetSurface(ECC_GameTraceChannel3) = 건축 가능 지면 채널. 보도 opt-in 과 같은 채널을 쓴다.
+	const FVector Start(WorldXY.X, WorldXY.Y, SeedZ + GroundProbeUpCm);
+	const FVector End(WorldXY.X, WorldXY.Y, SeedZ - GroundProbeDownCm);
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlacementGroundProbe), /*bTraceComplex=*/true);
+	if (RuntimeWorld->LineTraceSingleByChannel(Hit, Start, End, ECC_GameTraceChannel3, Params))
+	{
+		return Hit.ImpactPoint.Z;
+	}
+
+	// 채널 무응답(콜리전 미설정)이면 씨드값 유지 — 조용히 0 으로 떨어뜨리지 않는다.
+	return SeedZ;
+}
+
+float UPlacementHandler::GetPlotSurfaceZ(FName PlotId, float FallbackZ, bool* bOutFound) const
+{
+	// 지면 Z 의 권위는 **부지 액터**다. 상수(0 / 1cm)로 가정하면 지면이 Z=0 이 아닌 도시에서
+	// 건물과 프리뷰 평면이 통째로 지하에 깔린다(City_Pack 본체 10,900 / 테라스 다단 9,700·8,600·…).
+	// DT 의 Center.Z 도 안 된다 — 레벨 배치 부지는 그 값을 쓰지 않아 비어 있다.
+	UWorld* RuntimeWorld = GetWorld();
+	if (USpawnManager* SpawnMgr = RuntimeWorld ? RuntimeWorld->GetSubsystem<USpawnManager>() : nullptr)
+	{
+		if (const ACityPlotActor* Plot = SpawnMgr->GetSpawnedPlotById(PlotId))
+		{
+			if (bOutFound) { *bOutFound = true; }
+			return Plot->GetCenter().Z;
+		}
+	}
+	if (bOutFound) { *bOutFound = false; }
+	return FallbackZ;
+}
+
+float UPlacementHandler::ResolveLandingGroundZ(FName PlotId, float FallbackZ) const
+{
+	bool bFound = false;
+	const float SurfaceZ = GetPlotSurfaceZ(PlotId, FallbackZ, &bFound);
+	if (!bFound)
+	{
+		// 조용히 0 으로 깎지 않고 현재 높이를 유지하며 소리내어 알린다 — 0 으로 깎는 게 바로 그 결함이었다.
+		// 확정 시 1회만 불리므로 로그가 쌓이지 않는다(매 프레임 경로는 GetPlotSurfaceZ 를 직접 쓴다).
+		UE_LOG(LogTemp, Warning,
+			TEXT("[PlacementHandler] 착지 지면 Z 를 부지에서 못 구했다 (PlotId=%s) — 현재 Z %.0f 유지"),
+			*PlotId.ToString(), FallbackZ);
+	}
+	return SurfaceZ;
+}
+
 void UPlacementHandler::BeginPlacementZoom()
 {
 	// 건물 배치 시작 시 기존 "배치용 건물 포커스+줌" 재사용 (오피스 업무공간/장식 모드는 제외)
 	if (CurrentPlacementMode != EPlacementMode::Building || !Owner) return;
 	if (ABuildingBaseActor* Building = Cast<ABuildingBaseActor>(GetPlacementTargetActor()))
 	{
-		Owner->FocusOnBuildingForPlacement(Building, 50.f, 500.f, PlacementZoomRatioScale);
+		Owner->FocusOnBuildingForPlacement(Building, PlacementCameraDistanceCm);
 	}
 }
 
@@ -2176,53 +2590,21 @@ void UPlacementHandler::TrackMovePlacement(const FVector2D& ScreenPosition)
 		if (HitComponent)
 		{
 			FString CompName = HitComponent->GetName();
-			if (CompName.Contains(TEXT("WallLeft")) && CurrentWallSide != EWallSide::Left)
+			// 출입구 조각(DoorWall*)은 왼쪽 벽을 대신하므로 이름에 Right 가 들어 있어도 왼쪽 벽이다.
+			const bool bLeftWallPiece = CompName.Contains(TEXT("WallLeft")) || CompName.StartsWith(TEXT("DoorWall"));
+			if (bLeftWallPiece && CurrentWallSide != EWallSide::Left)
 			{
 				SwitchToWall(EWallSide::Left, HitLocation);
 				return;
 			}
-			else if (CompName.Contains(TEXT("WallRight")) && CurrentWallSide != EWallSide::Right)
+			else if (!bLeftWallPiece && CompName.Contains(TEXT("WallRight")) && CurrentWallSide != EWallSide::Right)
 			{
 				SwitchToWall(EWallSide::Right, HitLocation);
 				return;
 			}
 		}
 
-		// 벽 범위 가져오기
-		FVector MinBounds = FVector::ZeroVector;
-		FVector MaxBounds = FVector(0.f, 0.f, 300.f);
-
-		AOfficeInterior* OfficeInterior = Cast<AOfficeInterior>(
-			UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass()));
-		if (OfficeInterior)
-		{
-			OfficeInterior->GetWallPlacementBounds(CurrentWallSide, MinBounds, MaxBounds);
-		}
-
-		// 그리드 스냅 및 고정 축 설정
-		FVector SteppedPosition = HitLocation;
-
-		if (CurrentWallSide == EWallSide::Left)
-		{
-			SteppedPosition.X = FMath::RoundToFloat(HitLocation.X / 5.f) * 5.f;
-			SteppedPosition.Z = FMath::RoundToFloat(HitLocation.Z / 5.f) * 5.f;
-			SteppedPosition.Y = -11.f;
-			SteppedPosition.Z = FMath::Clamp(SteppedPosition.Z, MinBounds.Z, MaxBounds.Z);
-		}
-		else
-		{
-			SteppedPosition.Y = FMath::RoundToFloat(HitLocation.Y / 5.f) * 5.f;
-			SteppedPosition.Z = FMath::RoundToFloat(HitLocation.Z / 5.f) * 5.f;
-			SteppedPosition.X = 4.f;
-			SteppedPosition.Z = FMath::Clamp(SteppedPosition.Z, MinBounds.Z, MaxBounds.Z);
-		}
-
-		FVector OldActorLocation = TargetActor->GetActorLocation();
-		if (!FVector::PointsAreSame(SteppedPosition, OldActorLocation))
-		{
-			TargetActor->SetActorLocation(SteppedPosition);
-			UpdateBuildAsset();
-		}
+		TrackMovePlacement(HitLocation);
 	}
 }
 
@@ -2272,12 +2654,23 @@ void UPlacementHandler::SetExistingBuildingAsTarget(AInteractableBaseActor* Exis
 		}
 		SetPendingPlotId(MovingBuilding->GetOwningPlotId(), FootW, FootD);
 	}
+	else if (ABrickFactory* MovingFactory = Cast<ABrickFactory>(ExistingBuilding))
+	{
+		OriginalBuildingPlotId = MovingFactory->GetOwningPlotId();
+		SetPendingPlotId(OriginalBuildingPlotId, 2, 2);
+	}
 
 	// 태그 변경
 	ExistingBuilding->Tags.Remove("Building");
 	ExistingBuilding->Tags.Add("PlacementMode");
 	// NavBlocker를 원래 위치에 고정시키기용
 	ExistingBuilding->DetachNavBlockerForMove();
+	if (bPlotBuildSession)
+	{
+		FVector ResolvedPosition;
+		ComputePlotPlacement(ExistingBuilding->GetActorLocation(), ResolvedPosition, bPlotPlacementValid, PendingPlotId);
+		ExistingBuilding->SetActorLocation(ResolvedPosition);
+	}
 
 	PostPlacementTargetRecalcBoxExtent();
 }
@@ -2299,6 +2692,15 @@ bool UPlacementHandler::ConfirmBuildingMove()
 
 	const FName SourcePlotId = OriginalBuildingPlotId;
 	const FName DestinationPlotId = PendingPlotId;
+	if (ABrickFactory* MovingFactory = Cast<ABrickFactory>(PlacementTargetEntity))
+	{
+		FVector GroundLocation = MovingFactory->GetActorLocation();
+		const FVector FootprintCenter = MovingFactory->GetPlacementFootprintCenter();
+		GroundLocation.Z = TraceGroundZAt(FVector2D(FootprintCenter.X, FootprintCenter.Y),
+			ResolveLandingGroundZ(DestinationPlotId, GroundLocation.Z));
+		MovingFactory->SetActorLocation(GroundLocation);
+		MovingFactory->FinishRelocation(true, DestinationPlotId);
+	}
 
 	// 건물 착지 (내려오는 애니메이션 + VFX)
 	if (ABuildingBaseActor* Building = Cast<ABuildingBaseActor>(PlacementTargetEntity))
@@ -2307,7 +2709,7 @@ bool UPlacementHandler::ConfirmBuildingMove()
 		{
 			// 바닥 위치로 설정 후 착지 애니메이션
 			FVector CurrentLoc = Building->GetActorLocation();
-			CurrentLoc.Z = 0.0f;
+			CurrentLoc.Z = ResolveLandingGroundZ(PendingPlotId, CurrentLoc.Z);
 			Building->SetActorLocation(CurrentLoc);
 			Building->StartFloating(500.0f, true);
 			Building->LandBuilding();  // 내려오면서 VFX 재생
@@ -2328,8 +2730,19 @@ bool UPlacementHandler::ConfirmBuildingMove()
 
 	UpdateBuildAsset();
 	PlacementTargetEntity->AttachNavBlockerToNewLocation();
+	if (ABrickFactory* Factory = Cast<ABrickFactory>(PlacementTargetEntity)) Factory->ReCalcBoxExtent();
 	CompleteBuildingPlacement(PlacementTargetEntity);
 	EndPlacementFeedback();
+	if (UWorld* RuntimeWorld = GetWorld())
+	{
+		if (USpawnManager* SpawnMgr = RuntimeWorld->GetSubsystem<USpawnManager>())
+		{
+			if (ACityPlotWalkwayManager* WalkwayManager = SpawnMgr->GetPlotWalkwayManager())
+			{
+				WalkwayManager->RefreshPlots(SourcePlotId, DestinationPlotId, PlacementTargetEntity);
+			}
+		}
+	}
 	RefreshVacantPlotDressingPlots(SourcePlotId, DestinationPlotId);
 
 	// UI 정리
@@ -2368,10 +2781,10 @@ void UPlacementHandler::CancelBuildingMove()
 			Building->SetOwningPlotId(SourcePlotId);
 			if (Building->IsFloating())
 			{
-				// 원래 위치(바닥)로 설정 후 내려오는 애니메이션
-				FVector OriginalLoc = OriginalBuildingPosition;
-				OriginalLoc.Z = 0.0f;
-				Building->SetActorLocation(OriginalLoc);
+				// 원래 위치(바닥)로 설정 후 내려오는 애니메이션.
+				// OriginalBuildingPosition 은 띄우기 전에 캡처한 실제 바닥 위치다 — Z 를 0 으로 깎으면
+				// 지면이 Z=0 이 아닌 도시에서 취소할 때마다 건물이 지하로 내려간다.
+				Building->SetActorLocation(OriginalBuildingPosition);
 				Building->StartFloating(500.0f, true);
 				Building->StopFloating();  // VFX 없이 내려오기만
 			}
@@ -2384,21 +2797,34 @@ void UPlacementHandler::CancelBuildingMove()
 		else
 		{
 			// 건물 아니면 바로 원래 위치로
-			PlacementTargetEntity->SetActorLocation(OriginalBuildingPosition);
+			if (ABrickFactory* MovingFactory = Cast<ABrickFactory>(PlacementTargetEntity))
+			{
+				MovingFactory->FinishRelocation(false);
+			}
+			else PlacementTargetEntity->SetActorLocation(OriginalBuildingPosition);
 		}
 
 		// 태그 복원
 		PlacementTargetEntity->Tags.Remove("PlacementMode");
-		PlacementTargetEntity->Tags.Add("Building");
+		if (!Cast<ABrickFactory>(PlacementTargetEntity)) PlacementTargetEntity->Tags.AddUnique("Building");
 
 		// NavBlocker 원위치 재부착 — SetExistingBuildingAsTarget 의 DetachNavBlockerForMove 와 대칭.
 		// (확정은 AttachNavBlockerToNewLocation 으로 복원하나 취소엔 없어 원위치 NavMesh 구멍이 남던 버그.)
 		PlacementTargetEntity->AttachNavBlockerToNewLocation();
+		if (ABrickFactory* Factory = Cast<ABrickFactory>(PlacementTargetEntity)) Factory->ReCalcBoxExtent();
 
 		PlacementSMC->SetVisibility(false);
 		PlacementSMC->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
 	}
-	RefreshVacantPlotDressingPlots(SourcePlotId, CancelledDestinationPlotId);
+	UWorld* RuntimeWorld = GetWorld();
+	USpawnManager* SpawnMgr = RuntimeWorld ? RuntimeWorld->GetSubsystem<USpawnManager>() : nullptr;
+	if (AVacantPlotDressingManager* DressingManager = SpawnMgr
+		? SpawnMgr->GetVacantPlotDressingManager()
+		: nullptr)
+	{
+		DressingManager->RefreshPreviewVisibilityPlots(
+			SourcePlotId, CancelledDestinationPlotId);
+	}
 
 	HidePlotFootprintPreview();
 
@@ -2423,6 +2849,7 @@ void UPlacementHandler::CompleteBuildingPlacement(AInteractableBaseActor* Buildi
 	{
 		// 태그 설정 (PlacementMode 제거, Build 추가)
 		Building->Tags.Remove("PlacementMode");
+		if (Cast<ABrickFactory>(Building)) return;
 		Building->Tags.Add("Build");
 
 		// 건물 즉시 완성 처리
@@ -2473,7 +2900,12 @@ void UPlacementHandler::SetWorkstationPlacementTarget(TSubclassOf<AWorkstationAc
 
 	if (PlacementWorkstation)
 	{
+		if (CachedOfficeInterior)
+		{
+			PlacementWorkstation->SetActorScale3D(PlacementWorkstation->GetActorScale3D() * CachedOfficeInterior->GetActorScale3D());
+		}
 		PlacementWorkstation->Tags.Add(FName("PlacementMode"));
+		PlacementWorkstation->WorkstationTypeID = WorkstationTypeID;
 
 		// 배치 모드 전용 콜리전 채널 설정 (ECC_GameTraceChannel2)
 		if (PlacementWorkstation->DeskMesh)
@@ -2483,19 +2915,14 @@ void UPlacementHandler::SetWorkstationPlacementTarget(TSubclassOf<AWorkstationAc
 
 		// BoxComponent 크기 계산
 		PlacementWorkstation->RecalcBoxExtent();
+		PositionWorkstationPreview(SpawnLocation);
 
-		// 배치 표시 메시 설정
-		FVector BoundOrigin, BoundExtent;
-		PlacementWorkstation->GetActorBounds(false, BoundOrigin, BoundExtent);
-
-		PlacementSMC->AttachToComponent(PlacementWorkstation->GetRootComponent(),
-			FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-		PlacementSMC->SetRelativeScale3D((BoundExtent / 50.0f) * 1.05f);
-		PlacementSMC->SetRelativeLocation(FVector(0.f, 0.f, BoundExtent.Z));
-		PlacementSMC->SetVisibility(true);
+		// 배치 피드백은 바닥 점유 사각형과 낮은 CanDrop 표시가 함께 담당한다.
+		PlacementSMC->SetVisibility(false);
 
 		// 스폰 직후 배치 가능 여부 업데이트
 		UpdateBuildAsset();
+		BeginPlacementFeedback();
 
 		UE_LOG(LogTemp, Log, TEXT("[PlacementHandler] Workstation spawned for placement: %s"), *WorkstationClass->GetName());
 	}
@@ -2503,6 +2930,9 @@ void UPlacementHandler::SetWorkstationPlacementTarget(TSubclassOf<AWorkstationAc
 
 void UPlacementHandler::ReleaseWorkstationPlacementTarget()
 {
+	if (OfficeMoveActor.IsValid()) { FinishExistingOfficeMove(false); return; }
+	EndPlacementFeedback();
+	HideOfficeGridPreview();
 	PlacementSMC->SetVisibility(false);
 	PlacementSMC->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
 
@@ -2519,12 +2949,13 @@ void UPlacementHandler::ReleaseWorkstationPlacementTarget()
 
 bool UPlacementHandler::PlacingWorkstation(bool* bOutCapacityReached)
 {
+	if (OfficeMoveActor.IsValid()) return false;
 	if (bOutCapacityReached)
 	{
 		*bOutCapacityReached = false;
 	}
 
-	if (!IsValid(PlacementWorkstation) || !CanDrop)
+	if (!IsValid(PlacementWorkstation))
 	{
 		return false;
 	}
@@ -2534,6 +2965,23 @@ bool UPlacementHandler::PlacingWorkstation(bool* bOutCapacityReached)
 	UEmployeeManager* EmployeeMgr = GameInstance ? GameInstance->GetSubsystem<UEmployeeManager>() : nullptr;
 	if (!OfficeMgr || !GameInstance || !EmployeeMgr)
 	{
+		return false;
+	}
+
+	UUIManagerSubsystem* UIManager = GameInstance->GetSubsystem<UUIManagerSubsystem>();
+	if (!CanDrop || !IsOfficeEntrancePlacementValid())
+	{
+		FBox2D Footprint;
+		const bool bBlocksEntrance = CachedOfficeInterior
+			&& GetOfficeWorkstationFootprint(PlacementWorkstation, Footprint)
+			&& CachedOfficeInterior->IsRecruitmentEntranceFloorBlocked(Footprint);
+		if (UIManager)
+		{
+			UIManager->ShowNotification(bBlocksEntrance
+				? NSLOCTEXT("OfficePlacement", "WorkstationEntranceBlocked", "출입문 앞에는 책상을 배치할 수 없습니다. 위치를 옮겨 주세요.")
+				: NSLOCTEXT("OfficePlacement", "WorkstationInvalidPosition", "책상을 배치할 수 없는 위치입니다. 빈 공간으로 옮겨 주세요."),
+				3.0f, ENotificationType::Failed);
+		}
 		return false;
 	}
 
@@ -2553,6 +3001,12 @@ bool UPlacementHandler::PlacingWorkstation(bool* bOutCapacityReached)
 		CurrentSeats, CandidateSeats, EmployeeCapacity);
 	if (!CapacityDecision.bCanPlace)
 	{
+		if (UIManager)
+		{
+			UIManager->ShowNotification(
+				NSLOCTEXT("OfficePlacement", "WorkstationCapacityExceeded", "건물 최대 인원이 부족합니다. 층수를 올려 주세요."),
+				3.0f, ENotificationType::Failed);
+		}
 		return false;
 	}
 
@@ -2561,6 +3015,7 @@ bool UPlacementHandler::PlacingWorkstation(bool* bOutCapacityReached)
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
 
 	AWorkstationActorBase* NewWorkstation = GetWorld()->SpawnActor<AWorkstationActorBase>(
 		PlacementWorkstation->GetClass(), PlacementTransform, SpawnParams);
@@ -2610,15 +3065,19 @@ bool UPlacementHandler::PlacingWorkstation(bool* bOutCapacityReached)
 		// 배치 완료 후 미리보기 액터를 옆으로 이동 (겹침 방지, 연속 배치 편의)
 		if (IsValid(PlacementWorkstation))
 		{
-			FVector BoundOrigin, BoundExtent;
-			PlacementWorkstation->GetActorBounds(false, BoundOrigin, BoundExtent);
-
-			// 회전 방향에 따라 다음 미리보기 위치 계산
 			FVector CurrentLocation = PlacementWorkstation->GetActorLocation();
-			FVector MoveDirection = -PlacementWorkstation->GetActorRightVector();
-			float MoveDistance = BoundExtent.Y * 2.f + PlacementPadding;
-			CurrentLocation += MoveDirection * MoveDistance;
-			PlacementWorkstation->SetActorLocation(CurrentLocation);
+			FBox2D CurrentRect;
+			if (CachedOfficeInterior && GetOfficeWorkstationFootprint(PlacementWorkstation, CurrentRect))
+			{
+				const FTransform FloorTransform = CachedOfficeInterior->GetActorTransform();
+				const FVector LocalDirection = FloorTransform.InverseTransformVectorNoScale(-PlacementWorkstation->GetActorRightVector());
+				const FVector2D RectSize = CurrentRect.GetSize();
+				const FVector LocalStep = FMath::Abs(LocalDirection.X) > FMath::Abs(LocalDirection.Y)
+					? FVector(FMath::Sign(LocalDirection.X) * RectSize.X, 0, 0)
+					: FVector(0, FMath::Sign(LocalDirection.Y) * RectSize.Y, 0);
+				CurrentLocation += FloorTransform.TransformVector(LocalStep);
+			}
+			PositionWorkstationPreview(CurrentLocation);
 
 			// Overlap 정보 갱신 후 SMC 색상 업데이트
 			if (PlacementWorkstation->BoxComponent)
@@ -2760,6 +3219,10 @@ void UPlacementHandler::SetDecorationPlacementTarget(const FDecorationCardTable&
 
 	if (PlacementDecoration)
 	{
+		if (CachedOfficeInterior)
+		{
+			PlacementDecoration->SetActorScale3D(PlacementDecoration->GetActorScale3D() * CachedOfficeInterior->GetActorScale3D());
+		}
 		PlacementDecoration->Tags.Add(FName("PlacementMode"));
 		PlacementDecoration->DecorationCardTableRowName = DecorationInfo.RowName;
 		PlacementDecoration->Category = DecorationInfo.Category;
@@ -2801,6 +3264,7 @@ void UPlacementHandler::SetDecorationPlacementTarget(const FDecorationCardTable&
 		PlacementSMC->AttachToComponent(PlacementDecoration->GetRootComponent(),
 			FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 		PlacementSMC->SetRelativeScale3D((BoundExtent / 50.0f) * 1.05f);
+		ApplyPlacementIndicatorMaterial(false); // 오피스는 기존 꽉 찬 인디케이터 유지
 		PlacementSMC->SetRelativeLocation(FVector(0.f, 0.f, BoundExtent.Z));
 		PlacementSMC->SetVisibility(true);
 
@@ -2812,6 +3276,7 @@ void UPlacementHandler::SetDecorationPlacementTarget(const FDecorationCardTable&
 
 void UPlacementHandler::ReleaseDecorationPlacementTarget()
 {
+	if (OfficeMoveActor.IsValid()) { FinishExistingOfficeMove(false); return; }
 	PlacementSMC->SetVisibility(false);
 	PlacementSMC->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
 
@@ -2822,6 +3287,7 @@ void UPlacementHandler::ReleaseDecorationPlacementTarget()
 	}
 
 	PlacementDecorationInfo = FDecorationCardTable();
+	HideOfficeGridPreview();
 	CachedOfficeInterior = nullptr;
 	CurrentPlacementMode = EPlacementMode::None;
 	bHasPlacementTarget = false;
@@ -2829,7 +3295,8 @@ void UPlacementHandler::ReleaseDecorationPlacementTarget()
 
 bool UPlacementHandler::PlacingDecoration()
 {
-	if (!IsValid(PlacementDecoration) || !CanDrop)
+	if (OfficeMoveActor.IsValid()) return false;
+	if (!IsValid(PlacementDecoration) || !CanDrop || !IsOfficeEntrancePlacementValid())
 	{
 		return false;
 	}
@@ -2839,6 +3306,7 @@ bool UPlacementHandler::PlacingDecoration()
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
 
 	ADecorationActor* NewDecoration = GetWorld()->SpawnActor<ADecorationActor>(
 		ADecorationActor::StaticClass(), PlacementTransform, SpawnParams);
@@ -2899,6 +3367,7 @@ void UPlacementHandler::SetWallDecorationPlacementTarget(const FDecorationCardTa
 	// OfficeInterior에서 벽 정보 가져오기
 	AOfficeInterior* OfficeInterior = Cast<AOfficeInterior>(
 		UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass()));
+	CachedOfficeInterior = OfficeInterior;
 
 	// 벽에 따른 회전 설정: Left 벽 Yaw 180도, Right 벽 Yaw 270도
 	float SpawnYaw = (WallSide == EWallSide::Left) ? 180.f : 270.f;
@@ -2925,15 +3394,12 @@ void UPlacementHandler::SetWallDecorationPlacementTarget(const FDecorationCardTa
 		FVector MinBounds, MaxBounds;
 		OfficeInterior->GetWallPlacementBounds(WallSide, MinBounds, MaxBounds);
 
-		// 스폰 X/Y 위치를 벽 범위 중앙으로 조정
-		if (WallSide == EWallSide::Left)
-		{
-			SpawnLocation.X = (MinBounds.X + MaxBounds.X) * 0.5f;  // X 중앙
-		}
-		else
-		{
-			SpawnLocation.Y = (MinBounds.Y + MaxBounds.Y) * 0.5f;  // Y 중앙
-		}
+		FVector LocalMin, LocalMax;
+		OfficeInterior->GetWallPlacementBoundsLocal(WallSide, LocalMin, LocalMax);
+		FVector LocalCenter = (LocalMin + LocalMax) * 0.5;
+		LocalCenter.Z = OfficeInterior->GetStructuralFloorZLocal() + 200.f;
+		SpawnLocation = OfficeInterior->GetActorTransform().TransformPosition(LocalCenter);
+		SpawnYaw += OfficeInterior->GetActorRotation().Yaw;
 
 		UE_LOG(LogTemp, Log, TEXT("[PlacementHandler] Wall bounds - Min: %s, Max: %s"),
 			*MinBounds.ToString(), *MaxBounds.ToString());
@@ -2961,6 +3427,10 @@ void UPlacementHandler::SetWallDecorationPlacementTarget(const FDecorationCardTa
 
 	if (PlacementDecoration)
 	{
+		if (OfficeInterior)
+		{
+			PlacementDecoration->SetActorScale3D(PlacementDecoration->GetActorScale3D() * OfficeInterior->GetActorScale3D());
+		}
 		PlacementDecoration->Tags.Add(FName("PlacementMode"));
 		PlacementDecoration->DecorationCardTableRowName = DecorationInfo.RowName;
 		PlacementDecoration->Category = DecorationInfo.Category;
@@ -3014,6 +3484,7 @@ void UPlacementHandler::SetWallDecorationPlacementTarget(const FDecorationCardTa
 		PlacementSMC->AttachToComponent(PlacementDecoration->GetRootComponent(),
 			FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 		PlacementSMC->SetRelativeScale3D((LocalBoundExtent / 50.0f) * 1.05f);
+		ApplyPlacementIndicatorMaterial(false); // 오피스는 기존 꽉 찬 인디케이터 유지
 
 		// SMC 위치: 로컬 Y+ 방향으로 메시 두께(Y)만큼 튀어나감
 		PlacementSMC->SetRelativeLocation(FVector(0.f, LocalBoundExtent.Y, 0.f));
@@ -3030,6 +3501,7 @@ void UPlacementHandler::SetWallDecorationPlacementTarget(const FDecorationCardTa
 
 void UPlacementHandler::ReleaseWallDecorationPlacementTarget()
 {
+	if (OfficeMoveActor.IsValid()) { FinishExistingOfficeMove(false); return; }
 	PlacementSMC->SetVisibility(false);
 	PlacementSMC->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
 
@@ -3045,11 +3517,13 @@ void UPlacementHandler::ReleaseWallDecorationPlacementTarget()
 
 	// 배치 종료 시 회전 오프셋 초기화
 	WallDecorationRotationOffset = 0.f;
+	CachedOfficeInterior = nullptr;
 }
 
 bool UPlacementHandler::PlacingWallDecoration()
 {
-	if (!IsValid(PlacementDecoration) || !CanDrop)
+	if (OfficeMoveActor.IsValid()) return false;
+	if (!IsValid(PlacementDecoration) || !CanDrop || !IsOfficeEntrancePlacementValid())
 	{
 		return false;
 	}
@@ -3058,6 +3532,7 @@ bool UPlacementHandler::PlacingWallDecoration()
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
 
 	ADecorationActor* NewDecoration = GetWorld()->SpawnActor<ADecorationActor>(
 		ADecorationActor::StaticClass(), PlacementTransform, SpawnParams);
@@ -3091,7 +3566,7 @@ bool UPlacementHandler::PlacingWallDecoration()
 			OfficeMgr->RegisterPlacedDecoration(NewDecoration);
 		}
 
-		// M8 미션 가이드 — 벽 그림 배치 완료 (튜토리얼 외엔 no-op)
+		// 벽 그림 배치 완료 신호를 성장 목표에 전달한다.
 		if (UWorld* W = GetWorld())
 			if (UGameInstance* GI = W->GetGameInstance())
 				if (UMissionManagerSubsystem* M = GI->GetSubsystem<UMissionManagerSubsystem>())
@@ -3129,57 +3604,30 @@ void UPlacementHandler::SwitchToWall(EWallSide NewWallSide, const FVector& HitLo
 	AOfficeInterior* OfficeInterior = Cast<AOfficeInterior>(
 		UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass()));
 
-	FVector NewLocation;
-
-	// HitLocation이 지정되었으면 그 위치 사용, 아니면 벽 중앙
-	if (!HitLocation.IsZero())
-	{
-		NewLocation = HitLocation;
-		// 고정 축 설정
-		if (NewWallSide == EWallSide::Left)
-		{
-			NewLocation.Y = -11.f;
-		}
-		else
-		{
-			NewLocation.X = 4.f;
-		}
-	}
-	else
-	{
-		// 기본값: 벽 중앙
-		if (NewWallSide == EWallSide::Left)
-		{
-			NewLocation = FVector(0.f, -11.f, 200.f);
-		}
-		else
-		{
-			NewLocation = FVector(4.f, 0.f, 200.f);
-		}
-
-		if (OfficeInterior)
-		{
-			FVector MinBounds, MaxBounds;
-			OfficeInterior->GetWallPlacementBounds(NewWallSide, MinBounds, MaxBounds);
-
-			if (NewWallSide == EWallSide::Left)
-			{
-				NewLocation.X = (MinBounds.X + MaxBounds.X) * 0.5f;
-			}
-			else
-			{
-				NewLocation.Y = (MinBounds.Y + MaxBounds.Y) * 0.5f;
-			}
-		}
-	}
-
+	FVector NewLocation = HitLocation;
 	if (OfficeInterior)
 	{
 		CurrentWallPlane = OfficeInterior->GetWallPlane(NewWallSide);
+		if (HitLocation.IsZero())
+		{
+			FVector LocalMin, LocalMax;
+			OfficeInterior->GetWallPlacementBoundsLocal(NewWallSide, LocalMin, LocalMax);
+			FVector LocalCenter = (LocalMin + LocalMax) * 0.5;
+			LocalCenter.Z = OfficeInterior->GetStructuralFloorZLocal() + 200.f;
+			NewLocation = OfficeInterior->GetActorTransform().TransformPosition(LocalCenter);
+		}
+		NewLocation = OfficeInterior->ConstrainWallDecorationLocation(NewWallSide, NewLocation, !HitLocation.IsZero());
+	}
+	else
+	{
+		if (HitLocation.IsZero()) NewLocation.Z = 200.f;
+		if (NewWallSide == EWallSide::Left) NewLocation.Y = -11.f;
+		else NewLocation.X = 4.f;
 	}
 
 	// 회전 변경: Yaw는 벽 방향 고정, Pitch는 사용자 회전 오프셋 유지
 	float BaseYaw = (NewWallSide == EWallSide::Left) ? 180.f : 270.f;
+	if (OfficeInterior) BaseYaw += OfficeInterior->GetActorRotation().Yaw;
 
 	if (PlacementDecoration)
 	{

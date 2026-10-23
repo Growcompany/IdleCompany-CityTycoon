@@ -42,4 +42,11 @@ public:
 
 	// 건설/고용 비용 부족 여부 업데이트 (virtual — 파생이 2차 비용칩까지 토글)
 	virtual void UpdateCostAffordability(EResourceType ResourceType, bool bCanAfford);
+
+	// 카탈로그 카드 이름이 칸에 맞게 줄어도 폰에서 읽히는 하한 ― OfficeCatalogValidation 도 이 값으로 표 전체를 잰다.
+	static constexpr float MinShownNameSize = 28.f;
+
+private:
+	void QueueNameFitCheck();
+	void WarnIfNameShrinksTooSmall();
 };

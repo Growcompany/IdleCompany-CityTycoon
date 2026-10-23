@@ -30,6 +30,10 @@ public:
 	// M19 미션 가이드 — [인수] 확인 버튼 하이라이트 타겟 (프레임의 ConfirmButton 에 위임)
 	UWidget* GetAcquireButtonWidget() const;
 
+	// 인수 후에도 모달은 결과 리빌을 띄운 채 남고 같은 버튼이 [확인](→관리 패널)으로 바뀐다 — 가이드 문구 분기용
+	bool IsAwaitingResultConfirm() const { return bAwaitingResultConfirm; }
+	int32 GetCompanyKey() const { return CompanyKey; }
+
 protected:
 	virtual void NativePreConstruct() override;
 	virtual void NativeConstruct() override;
@@ -100,6 +104,10 @@ private:
 
 	// 금액을 숫자부/단위부 두 블록에 나눠 쓴다 (리빌 카운트업이 매 프레임 호출)
 	void ApplyReturnAmount(int64 Amount);
+	// 인수 뒤 「보유」 ― 결과를 보는 동안 들어오는 수익을 따라간다(상단 자금과 같은 값)
+	void ApplyOwnedMoney(int64 Amount);
+	void StopOwnedMoneyFollow();
+	FDelegateHandle OwnedMoneyHandle;
 	// 카운트업 착지 — 라벨/색 확정 + 펀치 + 착지음
 	void HandleRevealLanded();
 

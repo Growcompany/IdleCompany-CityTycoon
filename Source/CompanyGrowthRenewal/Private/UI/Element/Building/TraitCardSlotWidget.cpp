@@ -2,6 +2,8 @@
 
 #include "UI/Element/Building/TraitCardSlotWidget.h"
 #include "Components/TextBlock.h"
+#include "Components/Image.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "CommonButtonBase.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Table/BuildingTraitTable.h"
@@ -39,9 +41,6 @@ void UTraitCardSlotWidget::SetTraitData(FName InTraitID, int32 InQuantity, int32
 
 	// 장착 뱃지
 	SetEquippedCount(InEquippedCount);
-
-	// 전용 뱃지 — Row 를 이미 들고 있으므로 재조회 없음
-	ApplyRequirementBadge(Row.RequiredType);
 }
 
 void UTraitCardSlotWidget::SetRarity(ELootBoxRarity InRarity)
@@ -74,28 +73,6 @@ void UTraitCardSlotWidget::SetEquippedCount(int32 InCount)
 	}
 }
 
-void UTraitCardSlotWidget::ApplyRequirementBadge(EBuildingTraitRequirement InRequirement)
-{
-	CurrentRequirement = InRequirement;
-
-	// 카드는 좁아서 축약 문안. None 은 60/95 행이라 표시하지 않는다(노이즈)
-	FText BadgeText;
-	switch (InRequirement)
-	{
-	case EBuildingTraitRequirement::Manufacturing: BadgeText = FText::FromString(TEXT("제조"));     break;
-	case EBuildingTraitRequirement::Project:       BadgeText = FText::FromString(TEXT("프로젝트")); break;
-	default:                                       break;
-	}
-
-	const bool bShow = !BadgeText.IsEmpty();
-	if (RequirementBadgeText && bShow) { RequirementBadgeText->SetText(BadgeText); }
-
-	// 카드 본체가 UCommonButtonBase 라 뱃지가 클릭을 먹으면 카드가 안 눌린다
-	const ESlateVisibility BadgeVis = bShow ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed;
-	if (RequirementBadgeBorder)    { RequirementBadgeBorder->SetVisibility(BadgeVis); }
-	else if (RequirementBadgeText) { RequirementBadgeText->SetVisibility(BadgeVis); }
-}
-
 void UTraitCardSlotWidget::NativePreConstruct()
 {
 	Super::NativePreConstruct();
@@ -124,7 +101,39 @@ void UTraitCardSlotWidget::NativeConstruct()
 
 	// SetTraitData 는 AddChild(=NativeConstruct 유발) 보다 먼저 실행되므로 무조건 Collapsed 는 뱃지를 지운다 — 캐시값 재적용
 	SetEquippedCount(CurrentEquippedCount);
-	ApplyRequirementBadge(CurrentRequirement);
+	SetDetailSelected(bDetailSelected);
+}
+
+void UTraitCardSlotWidget::SetDetailSelected(bool bInSelected)
+{
+	bDetailSelected = bInSelected;
+	PulseTime = 0.f;
+	if (!SelectRing) return;
+	SelectRing->SetVisibility(bDetailSelected ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	ApplyRingPulse();
+}
+
+void UTraitCardSlotWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	if (bDetailSelected)
+	{
+		PulseTime += InDeltaTime;
+		ApplyRingPulse();
+	}
+}
+
+void UTraitCardSlotWidget::ApplyRingPulse()
+{
+	UMaterialInstanceDynamic* MID = SelectRing ? SelectRing->GetDynamicMaterial() : nullptr;
+	if (!MID) return;
+	if (RingPeakAlpha < 0.f)
+	{
+		RingPeakAlpha = MID->K2_GetScalarParameterValue(TEXT("BaseA"));
+	}
+	// UTraitSlotWidget::ApplySelectedRingPulse 와 같은 곡선 ― 최고점의 0.45~1.0 배, 고른 순간이 가장 밝다
+	MID->SetScalarParameterValue(TEXT("BaseA"), RingPeakAlpha * (0.725f + 0.275f * FMath::Cos(PulseTime * 4.5f)));
 }
 
 void UTraitCardSlotWidget::ApplyRarityVisual(ELootBoxRarity Rarity)

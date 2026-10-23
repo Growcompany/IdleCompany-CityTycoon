@@ -20,9 +20,6 @@ bool FCGRTraitLabelTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("HR 파워 -> 채용 잠재 등급 운"),
 		GetTraitTargetDisplayName(EBuildingTraitTarget::HRPower).ToString(),
 		FString(TEXT("채용 잠재 등급 운")));
-	TestEqual(TEXT("주변 오라 효과 -> 특수 빌딩 버프 흡수"),
-		GetTraitTargetDisplayName(EBuildingTraitTarget::AuraPower).ToString(),
-		FString(TEXT("특수 빌딩 버프 흡수")));
 	TestEqual(TEXT("손실 방어 -> 도박 실패 손실 감소"),
 		GetTraitTargetDisplayName(EBuildingTraitTarget::RiskLoss).ToString(),
 		FString(TEXT("도박 실패 손실 감소")));
@@ -81,10 +78,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCGRTraitDetailTextTest::RunTest(const FString& Parameters)
 {
-	// 조건이 문장에 드러나야 한다 — 라벨만으로는 전달 불가한 정보
+	// 당기는 방향(S등급 쪽)이 문장에 드러나야 한다 — 라벨만으로는 전달 불가한 정보
 	TestEqual(TEXT("낮은 평가 수익 보정 문장"),
 		GetTraitTargetDetailText(EBuildingTraitTarget::RevenueStability, 10.0f).ToString(),
-		FString(TEXT("품질 평가가 낮게 나와도 수익이 S등급 수익 쪽으로 10% 당겨집니다. S등급에서는 효과가 없습니다.")));
+		FString(TEXT("낮은 등급으로 출시해도 수익이 S등급 쪽으로 10% 당겨집니다.")));
 
 	// 감소 대상은 부호를 붙이지 않고 방향을 문장이 소유한다 ("-3.5% 줄어듭니다" 는 이중부정 버그)
 	TestEqual(TEXT("개발비 문장은 부호 없음"),
@@ -94,22 +91,17 @@ bool FCGRTraitDetailTextTest::RunTest(const FString& Parameters)
 	// %p 단위 — 이 문장이 %p 접미사 렌더링을 덮는 유일한 assertion 이다
 	TestEqual(TEXT("크리티컬 확률 %p"),
 		GetTraitTargetDetailText(EBuildingTraitTarget::CritChance, 1.2f).ToString(),
-		FString(TEXT("직원이 점수를 낼 때 크리티컬이 터질 확률이 1.2%p 늘어납니다. 크리티컬 확률은 스탯·버프·피버를 모두 합쳐 30%까지만 오릅니다.")));
+		FString(TEXT("크리티컬 확률이 1.2%p 오릅니다(전체 최대 30%).")));
 
 	// 개수 단위 — 접미사 없이 문장이 "개" 를 붙인다
 	TestEqual(TEXT("제조 산출 개수"),
 		GetTraitTargetDetailText(EBuildingTraitTarget::ProductionCount, 2.0f).ToString(),
 		FString(TEXT("제조 주문 수량이 2개 늘어납니다.")));
 
-	// 영향권 조건이 문장에 있어야 한다 — 이게 빠지면 실효과 0 인 상황을 플레이어가 알 수 없다
-	TestTrue(TEXT("특수 빌딩 문장에 영향권 조건"),
-		GetTraitTargetDetailText(EBuildingTraitTarget::AuraPower, 10.0f).ToString()
-			.Contains(TEXT("영향권 밖에서는 효과가 없습니다")));
-
 	// 리터럴 % 이스케이프 회귀 가드 — %% 를 % 하나로 쓰면 뒤 문자를 포맷 지정자로 먹어 30% 가 사라진다
 	TestTrue(TEXT("크리티컬 확률 문장에 30% 상한"),
 		GetTraitTargetDetailText(EBuildingTraitTarget::CritChance, 1.2f).ToString()
-			.Contains(TEXT("30%까지만")));
+			.Contains(TEXT("최대 30%)")));
 
 	// 도달 불가 상한 광고 제거 확인 — 이 절이 되살아나면 실패한다
 	TestFalse(TEXT("도박 실패 손실 문장에 70% 상한이 없다"),
@@ -138,6 +130,40 @@ bool FCGRTraitDetailTextTest::RunTest(const FString& Parameters)
 		const EBuildingTraitTarget T = static_cast<EBuildingTraitTarget>(i);
 		TestFalse(FString::Printf(TEXT("설명 문장 비어있지 않음 (enum %d)"), i),
 			GetTraitTargetDetailText(T, 5.0f).IsEmpty());
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRTraitEffectValueTextTest,
+	"CGR.Trait.EffectValueText",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRTraitEffectValueTextTest::RunTest(const FString& Parameters)
+{
+	// TestEqual(FString) 은 대소문자를 무시하므로 문자열은 대소문자 구분 비교로 단언한다
+	auto ExpectExact = [this](const TCHAR* What, const FText& Actual, const TCHAR* Expected)
+	{
+		TestTrue(FString::Printf(TEXT("%s: '%s' == '%s'"), What, *Actual.ToString(), Expected),
+			Actual.ToString().Equals(Expected, ESearchCase::CaseSensitive));
+	};
+
+	// 슬롯 캡션 둘째 줄 = 부호 + 수치 + 단위 (단위는 축이 소유)
+	ExpectExact(TEXT("퍼센트 증가"), FormatTraitEffectValueText(EBuildingTraitTarget::OperationRevenue, 10.0f), TEXT("+10%"));
+	ExpectExact(TEXT("감소 축 부호"), FormatTraitEffectValueText(EBuildingTraitTarget::DevCost, 3.5f), TEXT("-3.5%"));
+	ExpectExact(TEXT("퍼센트포인트"), FormatTraitEffectValueText(EBuildingTraitTarget::CritChance, 1.2f), TEXT("+1.2%p"));
+	ExpectExact(TEXT("개수 단위 없음"), FormatTraitEffectValueText(EBuildingTraitTarget::HRPower, 2.0f), TEXT("+2"));
+
+	TestTrue(TEXT("None 은 빈 문자열"), FormatTraitEffectValueText(EBuildingTraitTarget::None, 10.0f).IsEmpty());
+	TestTrue(TEXT("0 은 빈 문자열"), FormatTraitEffectValueText(EBuildingTraitTarget::OperationRevenue, 0.0f).IsEmpty());
+
+	// 한 줄 라벨은 이름 + 공백 + 수치 부분이어야 한다 ― 두 표기가 갈라지면 슬롯과 상세 창 수치가 달라진다
+	for (int32 i = 1; i <= static_cast<int32>(EBuildingTraitTarget::GambleSuccess); ++i)
+	{
+		const EBuildingTraitTarget T = static_cast<EBuildingTraitTarget>(i);
+		const FString Joined = GetTraitTargetDisplayName(T).ToString() + TEXT(" ") + FormatTraitEffectValueText(T, 7.5f).ToString();
+		ExpectExact(*FString::Printf(TEXT("한 줄 = 이름 + 수치 (enum %d)"), i), FormatTraitEffectText(T, 7.5f), *Joined);
 	}
 
 	return true;

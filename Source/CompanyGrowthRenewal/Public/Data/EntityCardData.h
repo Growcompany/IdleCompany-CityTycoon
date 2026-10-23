@@ -58,4 +58,12 @@ public:
 	// 신축(증축 0층) 시점 인원. 층을 올리면 늘어나므로 "최대"가 아니다 — 카드도 "기본 N명"으로 쓴다.
 	UPROPERTY(BlueprintReadWrite, Category = "Entity")
 	int32 NewBuildEmployees = 0;
+
+	// 같은 칸수 안에서 종을 가르는 수익 보너스(%). 칸수가 올라가면 0 으로 리셋되므로 카드도 그대로 읽는다.
+	UPROPERTY(BlueprintReadWrite, Category = "Entity")
+	float IncomeBonusPercent = 0.f;
+
+	// 로스터 띠의 빈자리("채용") 타일 — 직원 데이터 없이 채용 패널 진입만 한다
+	UPROPERTY(BlueprintReadWrite, Category = "Entity")
+	bool bIsHireSlot = false;
 };

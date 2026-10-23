@@ -6,6 +6,11 @@
 #include "Manager/ItemInventoryManager.h"
 #include "Table/TestResourceScenarioTable.h"
 #include "Engine/DataTable.h"
+#include "Core/CGGameInstance.h"
+#include "Data/AmbientAircraftBonusRules.h"
+#include "Manager/GameClockSubsystem.h"
+#include "Manager/ProjectOperationManager.h"
+#include "Manager/QuestSubsystem.h"
 
 void UResourceItemManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -162,6 +167,61 @@ void UResourceItemManager::StoreResource(
     }
 }
 
+void UResourceItemManager::CollectFactoryBricks(int32 Amount)
+{
+    if (Amount <= 0) return;
+
+    StoreResource(EResourceType::Brick, Amount, /*bShouldSave=*/false);
+    if (UQuestSubsystem* QuestManager = GetGameInstance()->GetSubsystem<UQuestSubsystem>())
+    {
+        QuestManager->ReportCounter(EQuestCounter::BrickCollect, Amount);
+    }
+    if (USaveLoadManager* SaveManager = GetGameInstance()->GetSubsystem<USaveLoadManager>())
+    {
+        SaveManager->RequestDeferredSave();
+    }
+}
+
+int64 UResourceItemManager::CollectAmbientAircraftBonus(FName SourceKey)
+{
+    UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
+    if (!GameInstance || GameInstance->IsVisitMode())
+    {
+        return 0;
+    }
+    UGameClockSubsystem* GameClock = GameInstance->GetSubsystem<UGameClockSubsystem>();
+    USaveLoadManager* SaveManager = GameInstance->GetSubsystem<USaveLoadManager>();
+    UProjectOperationManager* ProjectManager = GameInstance->GetSubsystem<UProjectOperationManager>();
+    USaveGame_GameData* SaveData = SaveManager ? SaveManager->GetCurrentSaveData() : nullptr;
+    if (!GameClock || !GameClock->IsServerTimeValid() || !ProjectManager || !SaveData)
+    {
+        return 0;
+    }
+
+    double ReferenceRate = 0.0;
+    for (const FBuildingEntitySaveData& BuildingData : SaveData->GameData.Buildings)
+    {
+        const double BuildingRate = ProjectManager->GetVaultReferenceRatePerSecond(BuildingData.BuildingIndex);
+        if (FMath::IsFinite(BuildingRate))
+        {
+            ReferenceRate = FMath::Max(ReferenceRate, BuildingRate);
+        }
+    }
+    if (SaveData->GameData.Buildings.IsEmpty())
+    {
+        ReferenceRate = ProjectManager->CalculateBaseRevenueForProjectNumber(1);
+    }
+
+    const int64 Reward = FAmbientAircraftBonusRules::TryClaim(
+        SaveData->GameData.AmbientAircraftBonusLastClaimUnix, SourceKey, GameClock->GetServerNowUnix(),
+        ReferenceRate, GetResourceAmount(EResourceType::Money), SaveData->GameData.TotalRevenueEarned);
+    if (Reward > 0)
+    {
+        StoreResource(EResourceType::Money, Reward);
+    }
+    return Reward;
+}
+
 void UResourceItemManager::SpendResource(EResourceType Type, int64 Amount, bool bShouldSave)
 {
     if (!HasResource(Type, Amount))
@@ -217,6 +277,16 @@ void UResourceItemManager::SetAllResources(
 
 bool UResourceItemManager::GrantTestResources(FName ScenarioRowName)
 {
+	return ApplyTestResourceScenario(ScenarioRowName, /*bIncludeDiamond=*/true);
+}
+
+bool UResourceItemManager::GrantTestResourcesExceptDiamond(FName ScenarioRowName)
+{
+	return ApplyTestResourceScenario(ScenarioRowName, /*bIncludeDiamond=*/false);
+}
+
+bool UResourceItemManager::ApplyTestResourceScenario(FName ScenarioRowName, bool bIncludeDiamond)
+{
 	UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
 	if (!TableMgr) return false;
 
@@ -237,8 +307,16 @@ bool UResourceItemManager::GrantTestResources(FName ScenarioRowName)
 	TMap<EResourceType, int64> NewBank;
 	NewBank.Add(EResourceType::Money,      Row->Money);
 	NewBank.Add(EResourceType::Brick,      Row->Brick);
-	NewBank.Add(EResourceType::Diamond,    Row->Diamond);
 	NewBank.Add(EResourceType::MarketCap,  Row->MarketCap);
+	if (bIncludeDiamond)
+	{
+		NewBank.Add(EResourceType::Diamond, Row->Diamond);
+	}
+	else
+	{
+		// 서버 권위 재화다 ― 자동 적용이 매 실행 덮으면 마이그레이션 성공/실패를 판별할 수 없다(§7.6 R3)
+		NewBank.Add(EResourceType::Diamond, GetResourceAmount(EResourceType::Diamond));
+	}
 	NewBank.Add(EResourceType::IronOre,    Row->IronOre);
 	NewBank.Add(EResourceType::Aluminum,   Row->Aluminum);
 	NewBank.Add(EResourceType::Copper,     Row->Copper);
@@ -255,7 +333,7 @@ bool UResourceItemManager::GrantTestResources(FName ScenarioRowName)
 	// 뽑기권은 EItemType 이라 ItemInventoryManager 로 별도 일괄 set (재화 bank 와 분리된 저장소)
 	if (UItemInventoryManager* ItemMgr = GetGameInstance()->GetSubsystem<UItemInventoryManager>())
 	{
-		TMap<EItemType, int32> NewItems;
+		TMap<EItemType, int32> NewItems = ItemMgr->GetAllItems();
 		NewItems.Add(EItemType::RecruitTicketNormal,         Row->RecruitTicketNormal);
 		NewItems.Add(EItemType::RecruitTicketAdvanced,       Row->RecruitTicketAdvanced);
 		NewItems.Add(EItemType::RecruitTicketPremium,        Row->RecruitTicketPremium);
@@ -268,7 +346,8 @@ bool UResourceItemManager::GrantTestResources(FName ScenarioRowName)
 		ItemMgr->SetAllItems(NewItems);
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[ResourceItemManager] GrantTestResources: scenario=%s applied"), *ScenarioRowName.ToString());
+	UE_LOG(LogTemp, Log, TEXT("[ResourceItemManager] GrantTestResources: scenario=%s applied (diamond=%s)"),
+		*ScenarioRowName.ToString(), bIncludeDiamond ? TEXT("set") : TEXT("kept"));
 	return true;
 }
 

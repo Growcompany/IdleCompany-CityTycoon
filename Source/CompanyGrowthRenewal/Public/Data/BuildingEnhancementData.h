@@ -10,8 +10,8 @@
 #include "BuildingEnhancementData.generated.h"
 
 /**
- * 건물 강화 타입 (11종)
- * 공통 7 + 프로젝트형 전용 3 + 키스톤 전용 1.
+ * 건물 강화 타입 (9종)
+ * 공통 7 + 프로젝트형 전용 2.
  * 제조업 전용 슬롯은 세계지도 업그레이드 시스템으로 분리 (공장/채광소/무역항별 별도 강화).
  * 빌딩(오피스)에서 하는 일은 직원 배치 + 설계 스테이지 + Operation(프로젝트형) or 생산주문서 발행(제조업) 까지.
  */
@@ -27,14 +27,9 @@ enum class EBuildingEnhancementType : uint8
 	ProjectYield         = 5  UMETA(DisplayName = "프로젝트 산출량"),
 	ProjectGrade         = 6  UMETA(DisplayName = "프로젝트 등급"),
 
-	// === 프로젝트형 전용 (7~9) — Operation 페이즈 있는 빌딩 ===
+	// === 프로젝트형 전용 (7, 9) — Operation 페이즈 있는 빌딩 ===
 	ProjectLifespan      = 7  UMETA(DisplayName = "히트작수명"),
-	EventResistance      = 8  UMETA(DisplayName = "이벤트내성"),
-	ViralBoost           = 9  UMETA(DisplayName = "바이럴가속"),
-
-	// === 키스톤 모뉴먼트 전용 ===
-	// 영향권(돔) 반경은 층수(BuildingFloor)에서 파생, 버프 효과(%)는 이 별도 업그레이드에서 파생
-	KeystoneAuraPower    = 10 UMETA(DisplayName = "영향력")
+	ViralBoost           = 9  UMETA(DisplayName = "바이럴가속")
 };
 
 /**
@@ -117,7 +112,7 @@ struct FBuildingEnhancementDefinition : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enhancement")
 	EResourceType CostResourceType = EResourceType::Money;
 
-	// Lv 0 비용 (곡선 시작값). Money 강화 10종은 10, BuildingFloor 는 Brick 1000
+	// Lv 0 비용 (곡선 시작값). Money 강화 8종은 10, BuildingFloor 는 Brick 1000
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Balance")
 	int64 BaseCost = 1000;
 
@@ -141,11 +136,10 @@ struct FBuildingEnhancementDefinition : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Balance")
 	float EffectPerLevel = 0.0008f;
 
-	// true 면 비용에 빌딩 footprint 칸수를 곱한다 (2x2 = x4, 3x3 = x9).
-	// 증축(BuildingFloor)은 층당 인원이 칸수에 비례해 늘어나므로, 비용도 같이 비례해야
-	// "벽돌당 인원" 효율이 건물 크기와 무관해진다. 켜지 않으면 큰 건물이 공짜로 4~9배 이득이다.
+	// true 면 BaseCost 를 그 빌딩 기본 건설비(벽돌)의 배수로 읽는다 (증축 = 건설비 × 5 부터).
+	// 좋은 빌딩일수록 층 하나의 값어치가 크므로 증축도 그 빌딩 값에 맞춰 비싸진다.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Balance")
-	bool bScaleCostByFootprint = false;
+	bool bScaleCostByBuildCost = false;
 
 	// 강화 최대 레벨 (0 = 무제한)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Balance")
@@ -161,13 +155,13 @@ class COMPANYGROWTHRENEWAL_API UBuildingEnhancementHelper : public UBlueprintFun
 	GENERATED_BODY()
 
 public:
-	// FootprintCells = 빌딩 칸수(가로x세로). DT 의 bScaleCostByFootprint 가 켜진 슬롯에서만 비용에 곱해진다.
-	// ⚠ 표시와 청구가 같은 값을 넘겨야 한다 — 액터(ABuildingBaseActor::GetFootprintCells)가 단일 출처다.
+	// BaseBuildCost = 그 빌딩 기본 건설비(벽돌). DT 의 bScaleCostByBuildCost 가 켜진 슬롯에서만 비용에 곱해진다.
+	// ⚠ 표시와 청구가 같은 값을 넘겨야 한다 — 액터(ABuildingBaseActor::GetBaseBuildCostBricks)가 단일 출처다.
 	UFUNCTION(BlueprintCallable, Category = "Building Enhancement")
-	static int64 CalculateUpgradeCost(EBuildingEnhancementType EnhancementType, int32 CurrentLevel, int32 FootprintCells = 1);
+	static int64 CalculateUpgradeCost(EBuildingEnhancementType EnhancementType, int32 CurrentLevel, int64 BaseBuildCost = 1);
 
 	UFUNCTION(BlueprintCallable, Category = "Building Enhancement")
-	static int64 CalculateBulkUpgradeCost(EBuildingEnhancementType EnhancementType, int32 CurrentLevel, int32 UpgradeCount, int32 FootprintCells = 1);
+	static int64 CalculateBulkUpgradeCost(EBuildingEnhancementType EnhancementType, int32 CurrentLevel, int32 UpgradeCount, int64 BaseBuildCost = 1);
 
 	UFUNCTION(BlueprintCallable, Category = "Building Enhancement")
 	static float CalculateEffectMultiplier(EBuildingEnhancementType EnhancementType, int32 Level);

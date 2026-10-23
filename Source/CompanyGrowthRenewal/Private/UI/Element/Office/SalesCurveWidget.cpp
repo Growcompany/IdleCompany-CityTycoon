@@ -70,7 +70,7 @@ void USalesCurveWidget::PushSample(const FOperationData& Op)
 	{
 		const FText PeakTxt = UGlobalUtilFunctions::AbbreviateNumber(
 			static_cast<int64>(PeakSeen), ENumberAbbrevStyle::Auto, ENumberRoundMode::Floor);
-		PeakLabel->SetText(FText::FromString(FString::Printf(TEXT("Max %s원/s"), *PeakTxt.ToString())));
+		PeakLabel->SetText(FText::Format(NSLOCTEXT("Office", "SalesCurvePeak", "최대 {0}/s"), PeakTxt));
 	}
 
 	Samples.Add(FVector2D(Op.ElapsedTime, Op.ActualRevenuePerSecond));
@@ -101,17 +101,24 @@ int32 USalesCurveWidget::NativePaint(const FPaintArgs& Args, const FGeometry& Al
 		return Ret;
 	}
 
-	// 배경판/그리드/축은 디자이너 크롬(UIE_SalesCurve 트리)이 담당 → Super::NativePaint 가 이미 그림(Ret 이하 레이어).
-	// 여기선 데이터 종속(면적채움/곡선/점선/현재점)만 위에 얹는다.
-	const float Pad = 6.0f;   // 디자이너 축 여백과 맞춤
+	// 바탕(오목한 칸)은 호스트인 운영 카드가 그린다. 여기선 데이터 종속(면적채움/곡선/점선/현재점)만 얹는다.
+	const float Pad = 6.0f;   // 카드 칸 안쪽 여백(12)과 더해 곡선이 칸 가장자리에서 18 떨어진다
+	// 수익은 시작이 최고점이라 곡선이 늘 왼쪽 위 피크 라벨 자리를 지난다 — 라벨 아래 끝까지 위를 비운다.
+	float TopPad = Pad;
+	if (PeakLabel && PeakLabel->IsVisible())
+	{
+		const FGeometry& LabelGeo = PeakLabel->GetCachedGeometry();
+		const float LabelBottom = AllottedGeometry.AbsoluteToLocal(LabelGeo.LocalToAbsolute(FVector2D(0.0f, LabelGeo.GetLocalSize().Y))).Y;
+		TopPad = FMath::Max(Pad + PeakLabel->GetDesiredSize().Y, LabelBottom) + 2.0f;
+	}
 	const float T0 = Samples[0].X;   // 첫 샘플 시각 — 운영 도중부터 관측 시작해도 왼쪽 끝부터 그리게 정규화
 	const float MaxT = FMath::Max(TotalTime * 1.02f, Samples.Last().X * 1.2f);
 	const float SpanT = FMath::Max(MaxT - T0, 1.0f);
 	const float MaxY = PeakSeen * 1.15f;
 	auto SX = [&](float T) { return Pad + ((T - T0) / SpanT) * (Size.X - 2.0f * Pad); };
-	auto SY = [&](float V) { return Size.Y - Pad - FMath::Clamp(V / MaxY, 0.0f, 1.0f) * (Size.Y - 2.0f * Pad); };
+	auto SY = [&](float V) { return Size.Y - Pad - FMath::Clamp(V / MaxY, 0.0f, 1.0f) * FMath::Max(1.0f, Size.Y - Pad - TopPad); };
 
-	const FLinearColor CurveColor = FLinearColor::FromSRGBColor(FColor(0x3D, 0x9B, 0xE0));
+	const FLinearColor CurveColor = FLinearColor::FromSRGBColor(FColor(0x5F, 0xD3, 0xA8));   // 수익 = 카드의 초록 계열
 
 	// 곡선 스크린 좌표
 	TArray<FVector2D> RealPts;
@@ -133,11 +140,9 @@ int32 USalesCurveWidget::NativePaint(const FPaintArgs& Args, const FGeometry& Al
 			ESlateDrawEffect::None, FillColor, false, 2.0f);
 	}
 
-	// 실현선 — 글로우(두꺼운 저알파) + 선명선 2중
+	// 실현선
 	FSlateDrawElement::MakeLines(OutDrawElements, Ret + 2, AllottedGeometry.ToPaintGeometry(), RealPts,
-		ESlateDrawEffect::None, CurveColor.CopyWithNewOpacity(0.20f), true, 6.0f);
-	FSlateDrawElement::MakeLines(OutDrawElements, Ret + 2, AllottedGeometry.ToPaintGeometry(), RealPts,
-		ESlateDrawEffect::None, CurveColor, true, 2.6f);
+		ESlateDrawEffect::None, CurveColor, true, 4.0f);
 
 	// 투영 점선 — 마지막 샘플에서 감쇠 외삽. 점선 = 짧은 세그먼트 나열
 	const FVector2D LastSample = Samples.Last();
@@ -153,46 +158,26 @@ int32 USalesCurveWidget::NativePaint(const FPaintArgs& Args, const FGeometry& Al
 		DashPts.Add(FVector2D(SX(T), SY(V0)));
 		DashPts.Add(FVector2D(SX(T + StepT), SY(V1)));
 		FSlateDrawElement::MakeLines(OutDrawElements, Ret + 3, AllottedGeometry.ToPaintGeometry(), DashPts,
-			ESlateDrawEffect::None, CurveColor.CopyWithNewOpacity(0.45f), true, 1.4f);
+			ESlateDrawEffect::None, CurveColor.CopyWithNewOpacity(0.45f), true, 3.0f);
 	}
 
-	// 현재점 — 흰 12각 링
+	// 현재점 — 밝은 속 + 곡선색 테(남은 운영 시간은 카드의 「남은 시간」 칸이 보여 준다)
 	{
 		const FVector2D Center(SX(LastSample.X), SY(LastSample.Y));
-		TArray<FVector2D> RingPts;
-		const float Radius = 3.8f;
-		for (int32 VertIndex = 0; VertIndex <= 12; ++VertIndex)
+		auto Ring = [&](float Radius, const FLinearColor& Color, float Thickness, int32 Layer)
 		{
-			const float Angle = 2.0f * PI * VertIndex / 12.0f;
-			RingPts.Add(Center + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Radius);
-		}
-		FSlateDrawElement::MakeLines(OutDrawElements, Ret + 4, AllottedGeometry.ToPaintGeometry(), RingPts,
-			ESlateDrawEffect::None, FLinearColor::White, true, 2.0f);
+			TArray<FVector2D> RingPts;
+			for (int32 VertIndex = 0; VertIndex <= 16; ++VertIndex)
+			{
+				const float Angle = 2.0f * PI * VertIndex / 16.0f;
+				RingPts.Add(Center + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Radius);
+			}
+			FSlateDrawElement::MakeLines(OutDrawElements, Layer, AllottedGeometry.ToPaintGeometry(), RingPts,
+				ESlateDrawEffect::None, Color, true, Thickness);
+		};
+		Ring(2.75f, FLinearColor::FromSRGBColor(FColor(0xE9, 0xFF, 0xF6)), 5.5f, Ret + 4);
+		Ring(7.0f, CurveColor, 3.0f, Ret + 5);
 	}
 
-	// 수명 바 — 그래프 하단 얇은 바, 남은시간/총시간 소진형 (곡선=수익 감쇠, 이 바=남은 운영시간. 한 시야에)
-	if (TotalTime > 0.0f)
-	{
-		const float RemFrac = FMath::Clamp((TotalTime - LastSample.X) / TotalTime, 0.0f, 1.0f);
-		const float LifeY = Size.Y - 3.0f;
-		const float LifeL = Pad;
-		const float LifeR = Size.X - Pad;
-
-		TArray<FVector2D> Track;
-		Track.Add(FVector2D(LifeL, LifeY));
-		Track.Add(FVector2D(LifeR, LifeY));
-		FSlateDrawElement::MakeLines(OutDrawElements, Ret + 5, AllottedGeometry.ToPaintGeometry(), Track,
-			ESlateDrawEffect::None, FLinearColor(1.0f, 1.0f, 1.0f, 0.10f), false, 3.0f);
-
-		const FLinearColor LifeCol = (RemFrac < 0.2f)
-			? FLinearColor(0.921582f, 0.679542f, 0.270498f, 1.0f)    // 임박 = 골드
-			: FLinearColor(0.327778f, 0.806952f, 0.508881f, 0.9f);   // 정상 = 그린
-		TArray<FVector2D> Life;
-		Life.Add(FVector2D(LifeL, LifeY));
-		Life.Add(FVector2D(LifeL + (LifeR - LifeL) * RemFrac, LifeY));
-		FSlateDrawElement::MakeLines(OutDrawElements, Ret + 6, AllottedGeometry.ToPaintGeometry(), Life,
-			ESlateDrawEffect::None, LifeCol, false, 3.0f);
-	}
-
-	return Ret + 7;
+	return Ret + 6;
 }

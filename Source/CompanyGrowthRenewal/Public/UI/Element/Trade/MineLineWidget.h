@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/ResourceType.h"
 #include "Manager/MineManager.h"
 #include "MineLineWidget.generated.h"
@@ -14,12 +14,13 @@ class UCommonTextBlock;
 class UProgressBar;
 class UWidgetSwitcher;
 class UCostActionButtonWidget;
+class UTextBlock;
 class UTexture2D;
 
 /**
- * 라인 표시 상태. BtnSwitcher 인덱스와 매핑.
- *  - Producing (0): 누적 중. InstantFinishButton 노출.
- *  - Saturated (1): 한도 도달. RecieveButton 노출.
+ * 라인의 실제 채광 상태. 한도 도달 시 수령, 진행 중에는 즉시 완료를 노출한다.
+ *  - Producing: 한도 미도달.
+ *  - Saturated: 한도 도달.
  */
 UENUM(BlueprintType)
 enum class EMineLineState : uint8
@@ -30,7 +31,7 @@ enum class EMineLineState : uint8
 
 /**
  * UMineLineWidget — UIE_MineLine.
- * WorldFactoryLine 패턴 차용: self-clocking NativeTick 으로 ProgressBar 가 1개당 0->100% 사이클.
+ * WorldFactoryLine 패턴 차용: NativeTick 에서 매니저 채광량으로 ProgressBar 와 수량을 갱신.
  * 매니저 broadcast 는 `UpdateStorage`/`UpdateRate` 로 elapsed 재동기화 용 (catchup, claim, instantfinish).
  */
 UCLASS()
@@ -41,12 +42,16 @@ class COMPANYGROWTHRENEWAL_API UMineLineWidget : public UUserWidget
 public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMineClaimRequested, UMineLineWidget*, Line);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMineInstantFinishRequested, UMineLineWidget*, Line);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMineQuantityChanged, UMineLineWidget*, Line);
 
 	UPROPERTY(BlueprintAssignable, Category = "MineLine|Events")
 	FOnMineClaimRequested OnClaimRequested;
 
 	UPROPERTY(BlueprintAssignable, Category = "MineLine|Events")
 	FOnMineInstantFinishRequested OnInstantFinishRequested;
+
+	UPROPERTY(BlueprintAssignable, Category = "MineLine|Events")
+	FOnMineQuantityChanged OnQuantityChanged;
 
 	// 초기 1회 세팅. RatePerMinute 분당 채광 속도 — 내부에서 per-sec 변환.
 	UFUNCTION(BlueprintCallable, Category = "MineLine")
@@ -63,6 +68,8 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "MineLine")
 	EResourceType GetResource() const { return CachedResource; }
+
+	void SetLineNumber(int32 InNumber);
 
 	UFUNCTION(BlueprintPure, Category = "MineLine")
 	EMineLineState GetState() const
@@ -82,6 +89,10 @@ protected:
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UCommonTextBlock> ProductText;
+
+	// 그림 칸 왼쪽 위 라인 번호 원(공장 줄과 같은 문법)
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UCommonTextBlock> LineNumberText;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UCommonTextBlock> LevelText;
@@ -110,13 +121,45 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UCostActionButtonWidget> RecieveButton;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MineLine|Visual")
-	FLinearColor GaugeColorNormal = FLinearColor(0.1f, 0.6f, 0.1f);
+	// 막대 안 가운데 `현재 / 한도개`
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UCommonTextBlock> BarText;
+
+	// 1행 오른쪽 상태 — `가득까지 1분 12초` / `가득 참`
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UCommonTextBlock> StatusText;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MineLine|Visual")
-	FLinearColor GaugeColorSaturated = FLinearColor(0.5f, 0.5f, 0.5f);
+	FLinearColor GaugeColorNormal = FLinearColor(0.263f, 0.788f, 0.369f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MineLine|Visual")
+	FLinearColor GaugeColorSaturated = FLinearColor(0.94f, 0.75f, 0.25f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MineLine|Visual")
+	FSlateColor StatusInk = FSlateColor(FLinearColor(FColor(0xA8, 0xB4, 0xC2)));
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MineLine|Visual")
+	FSlateColor StatusDoneInk = FSlateColor(FLinearColor(FColor(0xFF, 0xD4, 0x5C)));
+
+	// 잠긴 버튼(회색 판) 위 라벨. 열린 버튼은 버튼 인스턴스의 저작 잉크(BtnTextColor)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "MineLine|Visual")
+	FSlateColor DisabledLabelInk = FSlateColor(FLinearColor(FColor(0x1B, 0x23, 0x30)));
+
+	virtual void NativePreConstruct() override;
 
 private:
+	bool bInstantFinishLocked = false;
+	bool bReceiveLocked = false;
+	void ApplyButtonLabelInks();
+	// 1초마다 부르므로 안쪽 라벨은 한 번만 찾아 둔다
+	void PaintButtonLabel(UCostActionButtonWidget* Button, TObjectPtr<UTextBlock>& LabelCache, bool bLocked);
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> InstantFinishLabel;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> ReceiveLabel;
+
 	ECountryType CachedCountry = ECountryType::None;
 	EResourceType CachedResource = EResourceType::None;
 
@@ -135,9 +178,13 @@ private:
 	// 매니저 polling 결과 캐시. NativeTick 진입 시 매니저 CurrentQty 가 이 값과 다르면
 	// 위젯이 hidden 상태에서 매니저가 진행한 것 → elapsed 재싱크.
 	int64 LastSeenManagerQty = -1;
+	float InstantFinishRefreshElapsed = 0.f;
+	void RefreshInstantFinishCost();
 
-	void ApplyState();              // BtnSwitcher 인덱스 결정
-	void ApplyVisualState();        // ProgressBar 색상
+	void ApplyState();              // 한도 도달 여부로 BtnSwitcher 인덱스 결정
+	// 상태 글자 + 막대 채움색 — 가득 참 = 금색, 채광 중 = 초록
+	void ApplyStatus(const FText& Status, bool bFull);
+	void ApplyProducingStatus(double ExpectedTotal);
 	// RecieveButton 박스에 수령할 자원 수 표시 (UpgradeBtnWidget 의 비용 슬롯 재활용).
 	void RefreshRecieveButtonCount(int64 CurrentQty);
 	void ApplyResourceMeta(EResourceType Resource);
@@ -146,6 +193,7 @@ private:
 
 	void SetQuantityTexts(int64 Current, int64 Target);
 	void SetProgressBarPercent(float Percent01);
+	void SetLineProgress(int64 WholeCount, double UnitFraction01);
 	void SetRemainingTimeText(double RemainingSec);
 
 	// elapsed 재계산 헬퍼 — CurrentQty 기준으로 cycle 시작점에 맞춤.

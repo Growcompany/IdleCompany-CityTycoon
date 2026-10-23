@@ -12,6 +12,7 @@
 #include "CommonTextBlock.h"
 #include "Engine/GameInstance.h"
 #include "Manager/UIManagerSubsystem.h"
+#include "Utils/FWidgetAnimationUtils.h"
 
 void UButtonWidget::NativePreConstruct()
 {
@@ -117,7 +118,10 @@ void UButtonWidget::NativeOnClicked()
 	// Interface의 기본 구현 사용
 	IButtonSoundInterface::PlayClickSound(this);
 
-	PressPunchElapsed = 0.f;
+	if (bPressPunchEnabled)
+	{
+		PressPunchElapsed = 0.f;
+	}
 }
 
 void UButtonWidget::NativeOnHovered()
@@ -278,12 +282,13 @@ void UButtonWidget::UpdateRejectShake(float DeltaTime)
 
 void UButtonWidget::SetPulseEnabled(bool bEnabled)
 {
-	if (bPulseEnabled == bEnabled) return;
+	const bool bWantPulse = bEnabled && !FMotionGate::IsReduced();
+	if (bPulseEnabled == bWantPulse) return;
 
-	bPulseEnabled = bEnabled;
+	bPulseEnabled = bWantPulse;
 	PulseElapsed = 0.f;
 
-	if (!bEnabled && PressPunchElapsed < 0.f)
+	if (!bWantPulse && PressPunchElapsed < 0.f)
 	{
 		SetRenderTransform(FWidgetTransform());
 	}
@@ -295,8 +300,9 @@ void UButtonWidget::UpdatePulse(float DeltaTime)
 
 	PulseElapsed += DeltaTime;
 	const float Phase = FMath::Fmod(PulseElapsed, PulsePeriod) / PulsePeriod;
-	// 1 → 1+Amp → 1 코사인 브리딩 (1 아래로 수축하지 않음)
-	const float Scale = 1.f + PulseScaleAmp * 0.5f * (1.f - FMath::Cos(Phase * 2.f * PI));
+	// 원 크기(1.0) 위로 커지면 클립 부모(ClipToBounds/스택)에서 순간 잘리고 확대 래스터가 깨진다(R29 개정) ― 아래로만 1 → 0.97 → 1 코사인 숨쉬기
+	static constexpr float PulseDip = 0.03f;
+	const float Scale = 1.f - PulseDip * 0.5f * (1.f - FMath::Cos(Phase * 2.f * PI));
 
 	FWidgetTransform Xform;
 	Xform.Scale = FVector2D(Scale, Scale);

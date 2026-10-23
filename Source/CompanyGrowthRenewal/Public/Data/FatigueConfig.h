@@ -93,4 +93,14 @@ public:
 	// 뛰쳐나간(배회) 직원이 스스로 자리로 돌아오기까지의 시간(초). 그 동안 기여 0 — 탭으로 잡으면 즉시 복귀해 손해 단축.
 	UPROPERTY(EditAnywhere, Category = "Bolt")
 	float BoltDuration = 8.0f;
+
+	// 제조업 자동 근무의 내부 주기와 실제 근무 시간당 개인 경험치.
+	UPROPERTY(EditAnywhere, Category = "Manufacturing")
+	float ManufacturingPeriodSeconds = 60.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Manufacturing")
+	float ManufacturingExperiencePerSecond = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category = "Manufacturing")
+	float ManufacturingConcentrationInterval = 20.0f;
 };

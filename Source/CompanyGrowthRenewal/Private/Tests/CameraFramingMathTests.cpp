@@ -19,6 +19,33 @@ namespace
 		return P;
 	}
 	float IdentityCurve(float Zoom) { return Zoom; }
+
+	FZoomRigParams MainMapRig()
+	{
+		FZoomRigParams P;
+		P.MinArmLength = 3000.f;
+		P.MaxArmLength = 20000.f;
+		P.PitchInDeg = -40.f;
+		P.PitchOutDeg = -48.f;
+		P.FOVInDeg = 52.f;
+		P.FOVOutDeg = 58.f;
+		P.CameraAspectRatio = 1.777778f;
+		P.CameraPullBackCm = 1200.f;
+		return P;
+	}
+
+	// 카메라의 forward/up 기저에 월드 수직축의 끝점을 투영한다.
+	float ProjectWorldHeight(float EndpointHeight, float PivotHeight, float Distance, float PitchDeg, float HorizontalFOVDeg, float AspectRatio)
+	{
+		const float PitchRad = FMath::DegreesToRadians(FMath::Abs(PitchDeg));
+		const FVector CameraForward(FMath::Cos(PitchRad), 0.f, -FMath::Sin(PitchRad));
+		const FVector CameraUp(FMath::Sin(PitchRad), 0.f, FMath::Cos(PitchRad));
+		const FVector CameraPosition = -CameraForward * Distance;
+		const FVector ToEndpoint = FVector(0.f, 0.f, EndpointHeight - PivotHeight) - CameraPosition;
+		const float VerticalHalfTan = FMath::Tan(FMath::DegreesToRadians(HorizontalFOVDeg * 0.5f)) / AspectRatio;
+		return 0.5f + 0.5f * FVector::DotProduct(ToEndpoint, CameraUp)
+			/ (FVector::DotProduct(ToEndpoint, CameraForward) * VerticalHalfTan);
+	}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -76,14 +103,14 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FCGRCameraFramingRequiredArmLengthTest::RunTest(const FString& Parameters)
 {
-	// H=1000, 피치 -40°(cos=0.766044), hFOV 30° @16:9, 화면 50% → 766.044 / (2·0.150721·0.5) = 5082.5
-	TestEqual(TEXT("H1000 피치-40 FOV30 50%"), CameraFramingMath::RequiredArmLengthForHeight(1000.f, -40.f, 30.f, 1.777778f, 0.5f), 5082.5f, 1.f);
+	// 원근 투영에서는 위쪽 끝이 카메라에 더 가까워 같은 점유율의 필요 거리가 근삿값과 다르다.
+	TestEqual(TEXT("H1000 피치-40 FOV30 50%"), CameraFramingMath::RequiredArmLengthForHeight(1000.f, -40.f, 30.f, 1.777778f, 0.5f), 5062.2f, 1.f);
 	// 피치 0(보정 없음), 100% → 1000 / (2·0.150721) = 3317.4
 	TestEqual(TEXT("피치 0 100%"), CameraFramingMath::RequiredArmLengthForHeight(1000.f, 0.f, 30.f, 1.777778f, 1.f), 3317.4f, 1.f);
-	// 점유율 2배 → 거리 절반
+	// 원근 효과 때문에 점유율을 두 배로 키워도 거리는 정확히 절반이 아니다.
 	const float Half = CameraFramingMath::RequiredArmLengthForHeight(1000.f, -40.f, 30.f, 1.777778f, 0.25f);
 	const float Full = CameraFramingMath::RequiredArmLengthForHeight(1000.f, -40.f, 30.f, 1.777778f, 0.5f);
-	TestEqual(TEXT("점유율 반 → 거리 2배"), Half, Full * 2.f, 0.5f);
+	TestTrue(TEXT("점유율 반 → 거리는 두 배보다 약간 멀다"), Half > Full * 2.f);
 	// 피치 부호는 무시(내려다보는 각도의 절댓값)
 	TestEqual(TEXT("피치 +40 == -40"),
 		CameraFramingMath::RequiredArmLengthForHeight(1000.f, 40.f, 30.f, 1.777778f, 0.5f),
@@ -163,8 +190,119 @@ bool FCGRCameraFramingSolveClampsTest::RunTest(const FString& Parameters)
 	// 1e9cm 건물: 필요 거리가 Max(320000)보다 커 양 끝 잔차 모두 음수 → z=1
 	TestEqual(TEXT("H 1e9cm → z 1"), CameraFramingMath::SolveZoomForHeight(P, &IdentityCurve, 1000000000.f, 0.5f), 1.f, 0.0001f);
 	// 반복 0회면 끝점 판정만으로 중간값 반환(발산 아님)
-	const float Z0 = CameraFramingMath::SolveZoomForHeight(P, &IdentityCurve, 1000.f, 0.5f, 0, 1.f);
+	const float Z0 = CameraFramingMath::SolveZoomForHeight(P, &IdentityCurve, 1000.f, 0.5f, 0.5f, 0, 1.f);
 	TestTrue(TEXT("반복 0회 → 0.5"), FMath::IsNearlyEqual(Z0, 0.5f, 0.0001f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRCameraFramingPerspectiveTest,
+	"CGR.CameraFraming.PerspectiveProjection",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRCameraFramingPerspectiveTest::RunTest(const FString& Parameters)
+{
+	const FZoomRigParams P = MainMapRig();
+	const float Heights[] = { 5000.f, 10000.f, 15000.f };
+	for (const float Height : Heights)
+	{
+		const float Zoom = CameraFramingMath::SolveZoomForHeight(P, &IdentityCurve, Height, 0.94f);
+		const FZoomRigSample Sample = CameraFramingMath::EvaluateRig(P, Zoom);
+		const float Distance = Sample.ArmLength + P.CameraPullBackCm;
+		const FVerticalFramingResult Framing = CameraFramingMath::SolveVerticalFraming(
+			Height, Distance, Sample.PitchDeg, Sample.HorizontalFOVDeg, P.CameraAspectRatio, 0.94f);
+		const float Bottom = ProjectWorldHeight(0.f, Framing.PivotHeight, Distance, Sample.PitchDeg, Sample.HorizontalFOVDeg, P.CameraAspectRatio);
+		const float Top = ProjectWorldHeight(Height, Framing.PivotHeight, Distance, Sample.PitchDeg, Sample.HorizontalFOVDeg, P.CameraAspectRatio);
+		TestTrue(TEXT("중간 높이의 건물은 목표 프레임에 들어온다"), Framing.bFitsInFrame);
+		TestEqual(TEXT("바닥 투영은 화면 3%"), Bottom, 0.03f, 0.001f);
+		TestEqual(TEXT("옥상 투영은 화면 97%"), Top, 0.97f, 0.001f);
+		TestEqual(TEXT("반환 화면 좌표는 실제 투영과 일치"), Framing.TopScreenPosition, Top, 0.0001f);
+		TestEqual(TEXT("반환 바닥 좌표는 실제 투영과 일치"), Framing.BottomScreenPosition, Bottom, 0.0001f);
+	}
+
+	const float ShortHeight = 1200.f;
+	const float ShortZoom = CameraFramingMath::SolveZoomForHeight(P, &IdentityCurve, ShortHeight, 0.94f);
+	TestEqual(TEXT("저층 건물은 최근접 줌"), ShortZoom, 0.f, 0.0001f);
+	const FZoomRigSample Near = CameraFramingMath::EvaluateRig(P, ShortZoom);
+	const float NearDistance = Near.ArmLength + P.CameraPullBackCm;
+	const FVerticalFramingResult ShortFraming = CameraFramingMath::SolveVerticalFraming(
+		ShortHeight, NearDistance, Near.PitchDeg, Near.HorizontalFOVDeg, P.CameraAspectRatio, 0.94f);
+	const float ShortBottom = ProjectWorldHeight(0.f, ShortFraming.PivotHeight, NearDistance, Near.PitchDeg, Near.HorizontalFOVDeg, P.CameraAspectRatio);
+	const float ShortTop = ProjectWorldHeight(ShortHeight, ShortFraming.PivotHeight, NearDistance, Near.PitchDeg, Near.HorizontalFOVDeg, P.CameraAspectRatio);
+	TestTrue(TEXT("저층 건물도 중앙에 둔다"), ShortFraming.bFitsInFrame);
+	TestEqual(TEXT("저층 상하 여백 대칭"), ShortTop + ShortBottom, 1.f, 0.001f);
+	TestTrue(TEXT("최근접 줌의 저층 점유율은 목표보다 작다"), ShortTop - ShortBottom < 0.94f);
+
+	const float TallHeight = 25000.f;
+	const float TallZoom = CameraFramingMath::SolveZoomForHeight(P, &IdentityCurve, TallHeight, 0.94f);
+	TestEqual(TEXT("초고층은 최대 줌"), TallZoom, 1.f, 0.0001f);
+	const FZoomRigSample Far = CameraFramingMath::EvaluateRig(P, TallZoom);
+	const float FarDistance = Far.ArmLength + P.CameraPullBackCm;
+	const FVerticalFramingResult TallFraming = CameraFramingMath::SolveVerticalFraming(
+		TallHeight, FarDistance, Far.PitchDeg, Far.HorizontalFOVDeg, P.CameraAspectRatio, 0.94f);
+	const float TallBottom = ProjectWorldHeight(0.f, TallFraming.PivotHeight, FarDistance, Far.PitchDeg, Far.HorizontalFOVDeg, P.CameraAspectRatio);
+	const float TallTop = ProjectWorldHeight(TallHeight, TallFraming.PivotHeight, FarDistance, Far.PitchDeg, Far.HorizontalFOVDeg, P.CameraAspectRatio);
+	TestFalse(TEXT("초고층은 프레임을 넘친다"), TallFraming.bFitsInFrame);
+	TestEqual(TEXT("초고층 옥상은 97%에 고정"), TallTop, 0.97f, 0.001f);
+	TestTrue(TEXT("초고층 바닥은 화면 아래로 흐른다"), TallBottom < 0.f);
+
+	const float Height = 10000.f;
+	const float WithPullBack = CameraFramingMath::SolveZoomForHeight(P, &IdentityCurve, Height, 0.94f);
+	FZoomRigParams NoPullBackRig = P;
+	NoPullBackRig.CameraPullBackCm = 0.f;
+	const float WithoutPullBack = CameraFramingMath::SolveZoomForHeight(NoPullBackRig, &IdentityCurve, Height, 0.94f);
+	TestTrue(TEXT("소켓 후퇴가 있으면 팔길이를 더 짧게 잡는다"), WithPullBack < WithoutPullBack);
+
+	const FVerticalFramingResult FixedDistanceFraming = CameraFramingMath::SolveVerticalFraming(
+		5000.f, 10000.f, -40.f, 52.f, P.CameraAspectRatio, 0.2f, 0.6f, false);
+	const float FixedBottom = ProjectWorldHeight(0.f, FixedDistanceFraming.PivotHeight, 10000.f, -40.f, 52.f, P.CameraAspectRatio);
+	const float FixedTop = ProjectWorldHeight(5000.f, FixedDistanceFraming.PivotHeight, 10000.f, -40.f, 52.f, P.CameraAspectRatio);
+	TestFalse(TEXT("고정 거리에서는 목표 점유율을 넘을 수 있다"), FixedDistanceFraming.bFitsInFrame);
+	TestTrue(TEXT("목표 점유율을 넘겨도 전체는 화면 안에 있다"), FixedBottom > 0.f && FixedTop < 1.f);
+	TestEqual(TEXT("범용 Actor는 고정 거리에서 상하 중심을 유지한다"), FixedTop + FixedBottom, 1.f, 0.001f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRCameraFramingAsymmetricMarginsTest,
+	"CGR.CameraFraming.AsymmetricMargins",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRCameraFramingAsymmetricMarginsTest::RunTest(const FString& Parameters)
+{
+	const FZoomRigParams P = MainMapRig();
+	for (const float Height : {1200.f, 5000.f, 10000.f, 25000.f})
+	{
+		const float Zoom = CameraFramingMath::SolveZoomForHeight(P, &IdentityCurve, Height, 0.7f, 0.45f);
+		const FZoomRigSample Sample = CameraFramingMath::EvaluateRig(P, Zoom);
+		const float Distance = Sample.ArmLength + P.CameraPullBackCm;
+		const FVerticalFramingResult Framing = CameraFramingMath::SolveVerticalFraming(
+			Height, Distance, Sample.PitchDeg, Sample.HorizontalFOVDeg, P.CameraAspectRatio, 0.7f, 0.8f, true, 0.45f);
+		const float Bottom = ProjectWorldHeight(0.f, Framing.PivotHeight, Distance, Sample.PitchDeg, Sample.HorizontalFOVDeg, P.CameraAspectRatio);
+		const float Top = ProjectWorldHeight(Height, Framing.PivotHeight, Distance, Sample.PitchDeg, Sample.HorizontalFOVDeg, P.CameraAspectRatio);
+		TestEqual(TEXT("asymmetric roof result matches independent projection"), Framing.TopScreenPosition, Top, 0.0001f);
+		TestEqual(TEXT("asymmetric base result matches independent projection"), Framing.BottomScreenPosition, Bottom, 0.0001f);
+		if (Height == 1200.f)
+		{
+			TestEqual(TEXT("short building stops at minimum zoom"), Zoom, 0.f, 0.0001f);
+			TestTrue(TEXT("short building fits the asymmetric frame"), Framing.bFitsInFrame);
+			TestTrue(TEXT("short building leaves extra space inside both margins"), Top < 0.8f && Bottom > 0.1f);
+			TestEqual(TEXT("short building centers in the requested frame"), (Top + Bottom) * 0.5f, 0.45f, 0.001f);
+		}
+		else if (Height == 25000.f)
+		{
+			TestEqual(TEXT("tall building stops at maximum zoom"), Zoom, 1.f, 0.0001f);
+			TestFalse(TEXT("tall building exceeds the asymmetric frame"), Framing.bFitsInFrame);
+			TestEqual(TEXT("overflow preserves the 20 percent top margin"), Top, 0.8f, 0.001f);
+			TestTrue(TEXT("overflow lets the base leave the screen"), Bottom < 0.f);
+		}
+		else
+		{
+			TestTrue(TEXT("mid-height building fits the asymmetric frame"), Framing.bFitsInFrame);
+			TestEqual(TEXT("roof leaves 20 percent top margin"), Top, 0.8f, 0.001f);
+			TestEqual(TEXT("base leaves 10 percent bottom margin"), Bottom, 0.1f, 0.001f);
+		}
+	}
 	return true;
 }
 

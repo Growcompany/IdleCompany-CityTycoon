@@ -15,6 +15,7 @@
 #include "Data/BuildingEnhancementData.h"
 #include "Data/BuildingTraitSaveData.h"
 #include "Data/BacklogProductData.h"
+#include "Data/ManufacturingWorkData.h"
 #include "BuildingSaveData.generated.h"
 
 /**
@@ -29,7 +30,7 @@ struct FDecorationSaveData
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Decoration")
 	FName RowName;
 
-	// 배치 위치 및 회전
+	// OfficeInterior 기준 로컬 위치·회전·크기. 월드 표시 배율은 저장하지 않는다.
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Decoration")
 	FTransform Transform;
 
@@ -80,15 +81,67 @@ struct FOfficeSaveData
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Office|Decoration")
 	TArray<FDecorationSaveData> PlacedDecorations;
 
-	// 오피스 내 배치된 업무공간 목록
+	// 각 Transform은 OfficeInterior 로컬 공간이며 복원 시에만 월드 표시 배율을 합성한다.
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Office|Workstation")
 	TArray<FWorkstationSaveData> OfficeWorkstations;
 
 	// ========== 수익 저장 (오프라인 누적) ==========
 
+	// 제조업의 분야별 개발 포인트. 건물별 잔고이며 수량 확보 시 소비한다.
+	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Office|Manufacturing")
+	TArray<double> ManufacturingDevelopmentPoints = {0., 0., 0.};
+
+	UPROPERTY(SaveGame)
+	FManufacturingWorkState ManufacturingWork;
+
+	UPROPERTY(SaveGame, BlueprintReadOnly, Category = "Office|Manufacturing")
+	FManufacturingResearchState ManufacturingResearch;
+
+	UPROPERTY(SaveGame, BlueprintReadOnly, Category = "Office|Manufacturing")
+	TArray<int32> PendingManufacturingResearchResults;
+
 	// 저장된 수익 (오프라인/다른 맵에서 누적된 금액)
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Office|Revenue")
 	float StoredRevenue = 0.0f;
+
+	// 실제 금고 적립/즉시 지급된 건물 수익. 수거와 프로젝트 교체로 감소하지 않는다.
+	UPROPERTY(SaveGame, BlueprintReadOnly, Category = "Office|Revenue")
+	double LifetimeRevenueEarned = 0.0;
+
+	// 발생 지점에서만 호출하며 금고 초과 손실·수거·예상 수익은 포함하지 않는다.
+	void RecordEarnedRevenue(double Amount)
+	{
+		if (FMath::IsFinite(Amount) && Amount > 0.0 && FMath::IsFinite(LifetimeRevenueEarned + Amount))
+		{
+			LifetimeRevenueEarned += Amount;
+		}
+	}
+
+
+	// 용량 제한은 호출부가 적용한다. float 금고에 실제 반영된 차액만 누적한다.
+	void AccrueStoredRevenue(float Amount)
+	{
+		const double PreviousRevenue = static_cast<double>(StoredRevenue);
+		StoredRevenue += Amount;
+		RecordEarnedRevenue(static_cast<double>(StoredRevenue) - PreviousRevenue);
+	}
+
+	// 합산 지급을 각 건물의 산출 비중으로 귀속하며 지급 총액 자체는 변경하지 않는다.
+	void RecordProportionalEarnedRevenue(double PaidAmount, double OwnOutput, double TotalOutput)
+	{
+		if (FMath::IsFinite(OwnOutput) && FMath::IsFinite(TotalOutput) && OwnOutput > 0.0 && TotalOutput >= OwnOutput)
+		{
+			RecordEarnedRevenue(PaidAmount * (OwnOutput / TotalOutput));
+		}
+	}
+
+	// 이미 기록한 발생 수익을 이동만 하므로 누적값을 가산하지 않는다.
+	float TakeStoredRevenue()
+	{
+		const float Amount = StoredRevenue;
+		StoredRevenue = 0.f;
+		return Amount;
+	}
 
 	// ========== 스테이지 진행 시스템 ==========
 
@@ -111,10 +164,6 @@ struct FOfficeSaveData
 	// 이 건물에 배정된 직원 목록
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Office|Employee")
 	TArray<FEmployeeInstance> EmployeeList;
-
-	// 직원 외모 데이터 (EmployeeID -> Appearance)
-	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Office|Employee")
-	TMap<int32, FCharacterAppearance> EmployeeAppearances;
 
 	// ========== 프로젝트 결산서 (Pending) ==========
 

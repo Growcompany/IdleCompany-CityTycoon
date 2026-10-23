@@ -1,7 +1,8 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Gacha/GachaCaptureStage.h"
-#include "Entity/Officeworker/StickOfficeworker.h"
+
+#include "Entity/Officeworker/FunnyOfficeworker.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
 #include "Data/EmployeeTypes.h"
 #include "Enum/GachaTier.h"
@@ -17,6 +18,39 @@
 #include "Kismet/KismetRenderingLibrary.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "UObject/ConstructorHelpers.h"
+
+bool AGachaCaptureStage::PreviewEquipmentAppearance(EEmployeeEquipmentSlot EquipmentSlot, EEquipmentAppearanceMode Mode, FName AppearanceId)
+{
+	return CurrentWorkers.Num() == 1 && IsValid(CurrentWorkers[0])
+		&& CurrentWorkers[0]->PreviewEquipmentAppearance(EquipmentSlot, Mode, AppearanceId);
+}
+
+void AGachaCaptureStage::ClearEquipmentAppearancePreview()
+{
+	for (AFunnyOfficeworker* Worker : CurrentWorkers)
+	{
+		if (IsValid(Worker)) { Worker->ClearEquipmentAppearancePreview(); }
+	}
+}
+
+bool AGachaCaptureStage::RotatePreview(const UObject* Holder, float DeltaYaw)
+{
+	if (!Holder || !HolderWeak.IsValid() || HolderWeak.Get() != Holder
+		|| CurrentWorkers.Num() != 1 || !IsValid(CurrentWorkers[0]) || !FMath::IsFinite(DeltaYaw))
+	{
+		return false;
+	}
+
+	AFunnyOfficeworker* Worker = CurrentWorkers[0];
+	FRotator WorkerRotation = Worker->GetActorRotation();
+	const float NewYaw = WorkerRotation.Yaw + DeltaYaw;
+	if (!FMath::IsFinite(NewYaw))
+	{
+		return false;
+	}
+	WorkerRotation.Yaw = FRotator::NormalizeAxis(NewYaw);
+	return Worker->SetActorRotation(WorkerRotation);
+}
 
 AGachaCaptureStage::AGachaCaptureStage()
 {
@@ -88,18 +122,18 @@ AGachaCaptureStage::AGachaCaptureStage()
 	// 에디터 전용 프리뷰 직원 — 뷰포트에서 카메라/라이트 프레이밍 잡는 기준. 실제 직원과 동일 메시/스케일/오프셋/정면.
 	PreviewWorker = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("PreviewWorker"));
 	PreviewWorker->SetupAttachment(WorkerAnchor);
-	static ConstructorHelpers::FObjectFinder<USkeletalMesh> BodyF(TEXT("/Game/CompanyGrowth/Characters/StickmanCG/SK_StickmanCG"));
+	static ConstructorHelpers::FObjectFinder<USkeletalMesh> BodyF(TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Body/SK_Body_White_001"));
 	if (BodyF.Succeeded()) { PreviewWorker->SetSkeletalMeshAsset(BodyF.Object); }
 	PreviewWorker->SetRelativeLocation(FVector(0.f, 0.f, -88.f));   // ACharacter 캡슐 오프셋(발이 anchor 아래)
 	PreviewWorker->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));  // ACharacter 메시 표준 yaw 보정
-	PreviewWorker->SetRelativeScale3D(FVector(0.09f));             // 원본 FBX ~11배 보정
+	PreviewWorker->SetRelativeScale3D(FVector(1.0f));              // Funny 팩은 UE 표준 스케일 임포트라 보정 불필요(구 스틱의 0.09 는 FBX 원본 단위 보정값)
 	// bHiddenInGame 안 줌 — SceneCapture(게임뷰)가 그걸 숨겨 캡처에 안 잡힘. 런타임 제외는 ShowOnly 로.
 	PreviewWorker->SetCastShadow(false);
 	PreviewWorker->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	PreviewWorker->bIsEditorOnly = true;
 
 	// 스폰할 직원 BP 자동 지정 (게임이 쓰는 그 BP) → 수동 설정/BP 제작 불필요
-	static ConstructorHelpers::FClassFinder<AStickOfficeworker> WorkerF(TEXT("/Game/CompanyGrowth/Characters/StickmanCG/BP_StickOfficeworker"));
+	static ConstructorHelpers::FClassFinder<AFunnyOfficeworker> WorkerF(TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/BP_FunnyOfficeworker"));
 	if (WorkerF.Succeeded()) { WorkerClass = WorkerF.Class; }
 }
 
@@ -366,7 +400,7 @@ void AGachaCaptureStage::EndReveal()
 	Destroy();
 }
 
-AStickOfficeworker* AGachaCaptureStage::SpawnAndDress(const FEmployeeInstance& Employee, EStageAnimMode AnimMode,
+AFunnyOfficeworker* AGachaCaptureStage::SpawnAndDress(const FEmployeeInstance& Employee, EStageAnimMode AnimMode,
 	const FVector& LocalOffset, float ActorScale)
 {
 	UWorld* World = GetWorld();
@@ -379,7 +413,7 @@ AStickOfficeworker* AGachaCaptureStage::SpawnAndDress(const FEmployeeInstance& E
 	// 사이드 배치는 앵커 로컬축 기준(앵커가 yaw 180 이라 로컬 Y 가 월드 -Y)
 	Xform.AddToTranslation(Xform.TransformVectorNoScale(LocalOffset));
 	Xform.SetScale3D(FVector(ActorScale));
-	AStickOfficeworker* Worker = World->SpawnActorDeferred<AStickOfficeworker>(
+	AFunnyOfficeworker* Worker = World->SpawnActorDeferred<AFunnyOfficeworker>(
 		Cls, Xform, this, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 	if (!Worker) { return nullptr; }
 
@@ -389,14 +423,14 @@ AStickOfficeworker* AGachaCaptureStage::SpawnAndDress(const FEmployeeInstance& E
 	Worker->FinishSpawning(Xform);
 
 	// 스폰 트랜스폼의 스케일은 여기서 반드시 되쓴다 — FinishSpawning 안의 ExecuteConstruction 이
-	// AStickOfficeworker::OnConstruction 을 돌리고, 거기서 SetActorScale3D(BodyScale) 이 무조건 덮기 때문.
+	// AFunnyOfficeworker::OnConstruction 을 돌리고, 거기서 SetActorScale3D(BodyScale) 이 무조건 덮기 때문.
 	// (BodyScale CDO=1.0 이라 센터는 우연히 맞고 사이드 0.58 만 원본 크기로 튀어 이웃 열까지 침범했다.)
 	Worker->SetActorScale3D(FVector(ActorScale));
 
 	// 코스메틱은 FinishSpawning(PostInitializeComponents=LeaderPose 바인딩) 이후에 적용해야 정합
 	const EEmployeeRank Rank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee.EnhancementLevel);
-	const EGachaTier Tier = AStickOfficeworker::ResolveGachaTier(Employee);
-	Worker->ApplyWorkerCosmetics(Employee.Department, Rank, Tier, Employee.EmployeeID,
+	const EGachaTier Tier = AFunnyOfficeworker::ResolveGachaTier(Employee);
+	Worker->ApplyWorkerCosmetics(Employee.Department, Rank, Tier, Employee.EmployeeID, Employee.Gender,
 		/*bIsGachaReveal=*/true);
 	// 가챠(댄스)=축하 표정, 라이브 뷰(걷기/아이들)=중립(결정적)
 	Worker->SetFaceExpression(AnimMode == EStageAnimMode::Dance
@@ -430,7 +464,7 @@ void AGachaCaptureStage::RefreshShowOnly()
 {
 	if (!Capture) { return; }
 	Capture->ShowOnlyActors.Empty();
-	for (AStickOfficeworker* W : CurrentWorkers) // 런타임 = 진짜 워커만(프리뷰는 제외)
+	for (AFunnyOfficeworker* W : CurrentWorkers) // 런타임 = 진짜 워커만(프리뷰는 제외)
 	{
 		if (W) { Capture->ShowOnlyActors.Add(W); }
 	}
@@ -438,7 +472,7 @@ void AGachaCaptureStage::RefreshShowOnly()
 
 void AGachaCaptureStage::DestroyCurrentWorkers()
 {
-	for (AStickOfficeworker* W : CurrentWorkers)
+	for (AFunnyOfficeworker* W : CurrentWorkers)
 	{
 		if (W) { W->Destroy(); }
 	}

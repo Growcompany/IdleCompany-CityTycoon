@@ -5,6 +5,7 @@
 
 #include "Components/ProgressBar.h"
 #include "Components/Image.h"
+#include "Components/CanvasPanelSlot.h"
 #include "CommonTextBlock.h"
 #include "Kismet/GameplayStatics.h"
 #include "Core/CGGameInstance.h"
@@ -54,16 +55,31 @@ void ULoadingWidget::NativeConstruct()
 	}
 
 	Birds.SetNum(3);
-	for (FAmbientBird& Bird : Birds)
+	for (int32 BirdIndex = 0; BirdIndex < Birds.Num(); ++BirdIndex)
 	{
-		ResetBird(Bird, /*bInitialScatter=*/true);
+		Birds[BirdIndex].bSea = BirdIndex < 2;
+		ResetBird(Birds[BirdIndex], /*bInitialScatter=*/true);
 	}
+
+	Sailboat = FAmbientBoat{};
+	Sailboat.PosX = 0.20f;
+	Sailboat.BaseY = 0.845f;
+	Sailboat.SpeedX = SailboatSpeedUV;
+	Sailboat.WidthUV = FMath::Max(0.001f, SailboatWidthUV);
+	// 시작 화면에서도 항로가 읽히도록 최근 3초의 포말만 미리 배치한다.
+	for (int32 Index = 12; Index >= 1; --Index)
+	{
+		const float Age = Index * 0.25f;
+		Sailboat.Wake.Add({ FVector2D(Sailboat.PosX - Sailboat.SpeedX * Age - FMath::Sign(Sailboat.SpeedX) * Sailboat.WidthUV * 0.4f, Sailboat.BaseY), Age });
+	}
+	SmokeTime = 0.f;
+	CloudTime = 0.f;
 
 	// 첫 스트릭은 시작부터 화면 중앙에 떠 있게 (진입 대기 없이 즉시 체감)
 	Streaks.SetNum(2);
 	Streaks[0].bActive = true;
 	Streaks[0].HeadX = 1500.f;
-	Streaks[0].BaseY = 400.f;
+	Streaks[0].BaseY = 400.f + WindBandOffsetY;
 	Streaks[0].Speed = 470.f;
 	Streaks[0].Length = 420.f;
 	Streaks[0].WaveAmp = 9.f;
@@ -77,8 +93,9 @@ void ULoadingWidget::NativeConstruct()
 void ULoadingWidget::ResetBird(FAmbientBird& Bird, bool bInitialScatter)
 {
 	// 최초엔 화면 안에 흩뿌리고, 이후엔 오른쪽 밖에서 재진입
-	Bird.PosX = bInitialScatter ? FMath::FRandRange(0.40f, 1.00f) : FMath::FRandRange(1.03f, 1.12f);
-	Bird.BaseY = FMath::FRandRange(0.09f, 0.24f);
+	Bird.PosX = bInitialScatter ? FMath::FRandRange(Bird.bSea ? 0.15f : 0.48f, Bird.bSea ? 0.65f : 1.00f) : FMath::FRandRange(1.03f, 1.12f);
+	Bird.BaseY = Bird.bSea ? FMath::FRandRange(0.72f, 0.80f)
+		: static_cast<float>(FMath::FRandRange(SkyBirdBandY.X, SkyBirdBandY.Y));
 	Bird.SpeedX = -FMath::FRandRange(0.016f, 0.030f);
 	Bird.WingSpan = FMath::FRandRange(6.f, 13.f);
 	Bird.FlapPhase = FMath::FRandRange(0.f, 6.28f);
@@ -93,34 +110,84 @@ void ULoadingWidget::TickAmbientBirds(float InDeltaTime)
 		Bird.PosX += Bird.SpeedX * InDeltaTime;
 		Bird.FlapPhase += Bird.FlapSpeed * InDeltaTime;
 		Bird.DriftPhase += 0.8f * InDeltaTime;
-		if (Bird.PosX < 0.30f)   // 좌상단 로고 영역 침범 전에 재활용
+		if (Bird.PosX < (Bird.bSea ? -0.05f : SkyBirdExitX))
 		{
 			ResetBird(Bird, false);
 		}
 	}
 }
 
+void ULoadingWidget::TickAmbientBoat(FAmbientBoat& Boat, float InDeltaTime)
+{
+	const float Delta = FMath::Max(0.f, InDeltaTime);
+	for (FWakeMark& Mark : Boat.Wake)
+	{
+		Mark.Age += Delta;
+	}
+	Boat.Wake.RemoveAll([](const FWakeMark& Mark) { return Mark.Age >= 5.5f; });
+
+	Boat.PosX += Boat.SpeedX * Delta;
+	Boat.BobPhase += Delta * 1.5f;
+	if ((Boat.SpeedX > 0.f && Boat.PosX > 1.f + Boat.WidthUV)
+		|| (Boat.SpeedX < 0.f && Boat.PosX < -Boat.WidthUV))
+	{
+		Boat.PosX = Boat.SpeedX > 0.f ? -Boat.WidthUV : 1.f + Boat.WidthUV;
+		Boat.Wake.Reset();
+		Boat.WakeClock = 0.f;
+		return;
+	}
+
+	// 긴 프레임에서도 새 포말 수를 제한하고, 남은 시간으로 실제 항로 위 위치를 복원한다.
+	Boat.WakeClock += FMath::Min(Delta, 0.75f);
+	int32 Emitted = 0;
+	while (Boat.WakeClock >= 0.25f && Emitted < 3)
+	{
+		Boat.WakeClock -= 0.25f;
+		const float SternX = Boat.PosX - Boat.SpeedX * Boat.WakeClock - FMath::Sign(Boat.SpeedX) * Boat.WidthUV * 0.4f;
+		Boat.Wake.Add({ FVector2D(SternX, Boat.BaseY), Boat.WakeClock });
+		++Emitted;
+	}
+	if (Boat.Wake.Num() > 32)
+	{
+		Boat.Wake.RemoveAt(0, Boat.Wake.Num() - 32);
+	}
+}
+
 void ULoadingWidget::TickClouds(float InDeltaTime)
 {
-	CloudTime += InDeltaTime;
-	// ⚠ 2026-07-29 이후 **현재 미사용** — 낱개 구름(CloudA/B)을 가로 타일링 '구름 띠'
-	//   (M_UI_CloudBand + MI_UI_CloudBand_A/B, Panner 스크롤)로 대체했다.
-	//   WBP 에 CloudA/B 위젯이 없으므로 BindWidgetOptional 이 null 이라 아래 루프는 no-op.
-	//   띠 방식이 ① 더 풍성하고 ② 화면비가 넓어져도 빈 곳이 안 생기고 ③ 속도가 머티리얼 파라미터라 튜닝이 쉽다.
-	//   되돌릴 일이 없으면 이 함수 + CloudA/CloudB/CloudTime/TickClouds 선언까지 정리 대상.
-	// 슬롯 기준점 x=2600(화면 밖 우측) — 오프셋이 Span 을 넘으면 자동 랩(오른쪽 재진입)
-	struct FCloudDrift { UImage* Img; float Speed; float InitOffset; float Span; };
+	CloudTime += FMath::Max(0.f, InDeltaTime) * FMath::Max(0.f, CloudDriftScale);
+	const double ArtWidth = BackgroundImage ? BackgroundImage->GetCachedGeometry().GetLocalSize().X : 0.0;
+	if (ArtWidth <= 1.0)
+	{
+		return;
+	}
+	struct FCloudDrift { UImage* Img; float SpeedUV; };
 	const FCloudDrift Drifts[] = {
-		{ CloudA, 95.f, 1700.f, 3120.f },
-		{ CloudB, 62.f, 1000.f, 2960.f },   // 시작 위상 주의 — 2600이면 좌측 끝+로고 뒤에서 시작해 안 보임
+		{ CloudA, 0.0018f },
+		{ CloudB, 0.0011f },
 	};
 	for (const FCloudDrift& D : Drifts)
 	{
-		if (D.Img)
+		if (!D.Img)
 		{
-			const float Offset = FMath::Fmod(D.InitOffset + D.Speed * CloudTime, D.Span);
-			D.Img->SetRenderTranslation(FVector2D(-Offset, 0.f));
+			continue;
 		}
+		const UCanvasPanelSlot* CloudSlot = Cast<UCanvasPanelSlot>(D.Img->Slot);
+		const double CloudWidth = D.Img->GetCachedGeometry().GetLocalSize().X;
+		if (!CloudSlot || CloudWidth <= 1.0)
+		{
+			continue;
+		}
+		const double InitialUV = 0.5 + CloudSlot->GetOffsets().Left / ArtWidth;
+		const double CloudPadding = CloudWidth * 0.5 / ArtWidth + 0.02;
+		const double Span = 1.0 + CloudPadding * 2.0;
+		double PositionUV = FMath::Fmod(InitialUV + CloudPadding - CloudTime * D.SpeedUV, Span);
+		if (PositionUV < 0.0)
+		{
+			PositionUV += Span;
+		}
+		// 구름 전체가 화면 밖으로 빠진 뒤 반대편 바깥에서 재진입한다.
+		D.Img->SetRenderTranslation(FVector2D((PositionUV - CloudPadding - InitialUV) * ArtWidth, 0.0));
 	}
 }
 
@@ -135,7 +202,7 @@ void ULoadingWidget::TickWindStreaks(float InDeltaTime)
 			{
 				Streak.bActive = true;
 				Streak.HeadX = 2620.f;   // 우측 밖에서 진입
-				Streak.BaseY = FMath::FRandRange(340.f, 470.f);
+				Streak.BaseY = FMath::FRandRange(340.f, 470.f) + WindBandOffsetY;
 				Streak.Speed = FMath::FRandRange(380.f, 560.f);
 				Streak.Length = FMath::FRandRange(320.f, 480.f);
 				Streak.WavePhase = FMath::FRandRange(0.f, 6.28f);
@@ -158,6 +225,95 @@ int32 ULoadingWidget::NativePaint(const FPaintArgs& Args, const FGeometry& Allot
 {
 	const int32 MaxLayer = Super::NativePaint(Args, AllottedGeometry, MyCullingRect,
 		OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+	const FLinearColor ParentTint = InWidgetStyle.GetColorAndOpacityTint();
+	// Slate가 RenderOpacity를 부모 스타일에 이미 합성해 NativePaint로 전달한다.
+	const float AmbientAlpha = ParentTint.A;
+	int32 AmbientLayer = MaxLayer;
+	FVector2D BirdOrigin = FVector2D::ZeroVector;
+	FVector2D BirdExtent = AllottedGeometry.GetLocalSize();
+
+	if (BackgroundImage && AmbientAlpha > KINDA_SMALL_NUMBER)
+	{
+		const FGeometry& ImageGeometry = BackgroundImage->GetPaintSpaceGeometry();
+		const FVector2D ImageSize = ImageGeometry.GetLocalSize();
+		if (ImageSize.X > 1.f && ImageSize.Y > 1.f)
+		{
+			const FVector2D ImageOrigin = AllottedGeometry.AbsoluteToLocal(ImageGeometry.LocalToAbsolute(FVector2D::ZeroVector));
+			const FVector2D ImageFar = AllottedGeometry.AbsoluteToLocal(ImageGeometry.LocalToAbsolute(ImageSize));
+			const FVector2D DrawSize = ImageFar - ImageOrigin;
+			if (DrawSize.X > 1.f && DrawSize.Y > 1.f)
+			{
+				BirdOrigin = ImageOrigin;
+				BirdExtent = DrawSize;
+				const auto DrawBrush = [&](const FSlateBrush& Brush, const FVector2D& Center, const FVector2D& Size, const FLinearColor& Tint, int32 DrawLayer)
+				{
+					if (Brush.GetResourceObject() && Brush.DrawAs != ESlateBrushDrawType::NoDrawType && Size.X > 0.f && Size.Y > 0.f)
+					{
+						FSlateDrawElement::MakeBox(OutDrawElements, DrawLayer,
+							AllottedGeometry.ToPaintGeometry(Size, FSlateLayoutTransform(Center - Size * 0.5f)),
+							&Brush, ESlateDrawEffect::None, Tint);
+					}
+				};
+				const auto DrawBoat = [&](const FAmbientBoat& Boat, const FSlateBrush& Brush)
+				{
+					const float Width = DrawSize.X * Boat.WidthUV;
+					const float Aspect = Brush.ImageSize.X > 0.f ? Brush.ImageSize.Y / Brush.ImageSize.X : 0.f;
+					if (Aspect <= 0.f)
+					{
+						return;
+					}
+					const FVector2D SpriteSize(Width, Width * Aspect);
+					const FVector2D Center(ImageOrigin.X + DrawSize.X * Boat.PosX,
+						ImageOrigin.Y + DrawSize.Y * (Boat.BaseY + 0.0015f * FMath::Sin(Boat.BobPhase)) - SpriteSize.Y * 0.5f);
+					DrawBrush(Brush, Center, SpriteSize, FLinearColor(ParentTint.R, ParentTint.G, ParentTint.B, AmbientAlpha), MaxLayer + 2);
+				};
+				if (FactorySmokeBrush.GetResourceObject())
+				{
+					constexpr float PuffLifetime = 6.0f;
+					constexpr int32 PuffCount = 14;
+					for (int32 ChimneyIndex = 0; ChimneyIndex < FactoryChimneyUVs.Num(); ++ChimneyIndex)
+					{
+						const FVector2D MouthUV = FactoryChimneyUVs[ChimneyIndex];
+						const FVector2D Mouth = ImageOrigin + MouthUV * DrawSize;
+						for (int32 PuffIndex = 0; PuffIndex < PuffCount; ++PuffIndex)
+						{
+							const float Age = FMath::Fmod(SmokeTime + PuffIndex * PuffLifetime / PuffCount
+								+ ChimneyIndex * 0.31f, PuffLifetime);
+							const float Progress = Age / PuffLifetime;
+							const float Width = DrawSize.X * (0.0048f + 0.023f * Progress);
+							const FVector2D PuffSize(Width, Width * 0.86f);
+							const float Drift = DrawSize.X * (0.012f * Progress * Progress
+								+ 0.0020f * Progress * FMath::Sin(Age * 1.7f + ChimneyIndex));
+							const FVector2D Center = Mouth + FVector2D(Drift,
+								-DrawSize.Y * 0.115f * Progress - PuffSize.Y * 0.25f);
+							const float PuffAlpha = 0.78f * FMath::Sin(Progress * PI) * AmbientAlpha;
+							DrawBrush(FactorySmokeBrush, Center, PuffSize,
+								FLinearColor(0.90f * ParentTint.R, 0.94f * ParentTint.G, ParentTint.B, PuffAlpha), MaxLayer + 1);
+						}
+					}
+				}
+				const auto DrawWake = [&](const FAmbientBoat& Boat)
+				{
+					for (const FWakeMark& Mark : Boat.Wake)
+					{
+						if (Mark.UV.X < -0.04f || Mark.UV.X > 1.04f)
+						{
+							continue;
+						}
+						const float Life = FMath::Clamp(1.f - Mark.Age / 5.5f, 0.f, 1.f);
+						const FVector2D WakeSize(DrawSize.X * (0.017f + 0.010f * (1.f - Life)),
+							DrawSize.Y * (0.006f + 0.003f * (1.f - Life)));
+						const FVector2D Center = ImageOrigin + FVector2D(Mark.UV.X * DrawSize.X, (Mark.UV.Y + 0.003f) * DrawSize.Y);
+						DrawBrush(WakeBrush, Center, WakeSize,
+							FLinearColor(0.90f * ParentTint.R, 0.97f * ParentTint.G, ParentTint.B, WakeOpacity * Life * AmbientAlpha), MaxLayer + 1);
+					}
+				};
+				DrawWake(Sailboat);
+				DrawBoat(Sailboat, SailboatBrush);
+				AmbientLayer = MaxLayer + 2;
+			}
+		}
+	}
 
 	// 바람 스트릭 — 사인 궤적을 65px 간격으로 샘플한 "약간 각진" 흰 획, 꼬리로 갈수록 옅게
 	for (const FWindStreak& Streak : Streaks)
@@ -190,31 +346,39 @@ int32 ULoadingWidget::NativePaint(const FPaintArgs& Args, const FGeometry& Allot
 			TArray<FVector2D> SegPts(Pts.GetData() + Begin, End - Begin + 1);
 			FSlateDrawElement::MakeLines(OutDrawElements, MaxLayer + 1,
 				AllottedGeometry.ToPaintGeometry(), SegPts, ESlateDrawEffect::None,
-				FLinearColor(1.f, 1.f, 1.f, SegAlpha[SegIdx] * LifeAlpha), true, 4.0f);
+				FLinearColor(ParentTint.R, ParentTint.G, ParentTint.B, SegAlpha[SegIdx] * LifeAlpha * AmbientAlpha), true, 4.0f);
 		}
 	}
 
 	// 앰비언트 새 — 갈매기 실루엣을 날개 2획으로 (획 분리 = MakeLines 미터 한계 회피)
-	const FVector2D Size = AllottedGeometry.GetLocalSize();
-	const FLinearColor BirdColor(0.08f, 0.13f, 0.22f, 0.75f);
 	for (const FAmbientBird& Bird : Birds)
 	{
 		if (Bird.PosX > 1.0f)
 		{
 			continue;   // 아직 화면 밖(재진입 대기)
 		}
-		const FVector2D Center(Bird.PosX * Size.X,
-			(Bird.BaseY + 0.006f * FMath::Sin(Bird.DriftPhase)) * Size.Y);
+		const FVector2D Center = BirdOrigin + FVector2D(Bird.PosX * BirdExtent.X,
+			(Bird.BaseY + 0.006f * FMath::Sin(Bird.DriftPhase)) * BirdExtent.Y);
 		const float TipY = FMath::Sin(Bird.FlapPhase) * Bird.WingSpan * 0.5f;
 		const float Thickness = FMath::Max(1.5f, Bird.WingSpan * 0.18f);
-		const TArray<FVector2D> LeftWing{ Center, Center + FVector2D(-Bird.WingSpan, -TipY) };
-		const TArray<FVector2D> RightWing{ Center, Center + FVector2D(Bird.WingSpan, -TipY) };
+		const float EntryAlpha = FMath::Clamp((1.05f - Bird.PosX) / 0.08f, 0.f, 1.f);
+		const float ExitAlpha = FMath::Clamp((Bird.PosX - (Bird.bSea ? -0.05f : SkyBirdExitX)) / 0.08f, 0.f, 1.f);
+		const float BirdAlpha = AmbientAlpha * EntryAlpha * ExitAlpha;
+		const FLinearColor BirdColor(Bird.bSea ? 0.94f * ParentTint.R : 0.88f * ParentTint.R,
+			Bird.bSea ? 0.96f * ParentTint.G : 0.91f * ParentTint.G, ParentTint.B, 0.82f * BirdAlpha);
+		const TArray<FVector2D> LeftWing{ Center, Center + FVector2D(-Bird.WingSpan * 0.50f, -TipY * 0.78f), Center + FVector2D(-Bird.WingSpan, -TipY) };
+		const TArray<FVector2D> RightWing{ Center, Center + FVector2D(Bird.WingSpan * 0.50f, -TipY * 0.78f), Center + FVector2D(Bird.WingSpan, -TipY) };
 		FSlateDrawElement::MakeLines(OutDrawElements, MaxLayer + 1,
 			AllottedGeometry.ToPaintGeometry(), LeftWing, ESlateDrawEffect::None, BirdColor, true, Thickness);
 		FSlateDrawElement::MakeLines(OutDrawElements, MaxLayer + 1,
 			AllottedGeometry.ToPaintGeometry(), RightWing, ESlateDrawEffect::None, BirdColor, true, Thickness);
+		const FLinearColor Underside(0.30f * ParentTint.R, 0.42f * ParentTint.G, 0.55f * ParentTint.B, 0.30f * BirdAlpha);
+		FSlateDrawElement::MakeLines(OutDrawElements, MaxLayer + 2,
+			AllottedGeometry.ToPaintGeometry(), LeftWing, ESlateDrawEffect::None, Underside, true, 0.8f);
+		FSlateDrawElement::MakeLines(OutDrawElements, MaxLayer + 2,
+			AllottedGeometry.ToPaintGeometry(), RightWing, ESlateDrawEffect::None, Underside, true, 0.8f);
 	}
-	return MaxLayer + 1;
+	return FMath::Max(AmbientLayer, MaxLayer + 2);
 }
 
 void ULoadingWidget::BeginBootSequence()
@@ -261,6 +425,8 @@ void ULoadingWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	}
 
 	TickAmbientBirds(InDeltaTime);   // 페이드 중에도 계속 (배경 생동감)
+	TickAmbientBoat(Sailboat, InDeltaTime);
+	SmokeTime = FMath::Fmod(SmokeTime + FMath::Max(0.f, InDeltaTime), 120.f);
 	TickClouds(InDeltaTime);
 	TickWindStreaks(InDeltaTime);
 

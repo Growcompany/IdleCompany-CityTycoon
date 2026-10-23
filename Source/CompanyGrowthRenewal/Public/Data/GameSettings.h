@@ -28,4 +28,7 @@ struct FGameSettings
 
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Settings")
 	bool bReduceMotion = false;
+
+	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Settings")
+	bool bHandOpenBox = false;
 };

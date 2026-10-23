@@ -65,6 +65,41 @@ namespace CGRewardChip
 		return Entries;
 	}
 
+	UObject* ResolveIcon(UGameInstance* GameInstance, const FDisplayEntry& Entry)
+	{
+		UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+		if (!TableMgr)
+		{
+			return nullptr;
+		}
+
+		if (Entry.ResourceType != EResourceType::None)
+		{
+			bool bFound = false;
+			const FResourceInfo Info = TableMgr->GetResourceInfo(Entry.ResourceType, bFound);
+			return bFound && !Info.Icon.IsNull() ? Info.Icon.LoadSynchronous() : nullptr;
+		}
+		if (Entry.ItemType != EItemType::None)
+		{
+			bool bFound = false;
+			return TableMgr->GetItemIconResource(Entry.ItemType, bFound);
+		}
+		return nullptr;
+	}
+
+	UObject* ResolveIcon(UGameInstance* GameInstance, const FMissionReward& Reward)
+	{
+		const TArray<FDisplayEntry> Entries = BuildDisplayEntries({ Reward });
+		return Entries.Num() > 0 ? ResolveIcon(GameInstance, Entries[0]) : nullptr;
+	}
+
+	FText FormatQuantity(const FDisplayEntry& Entry)
+	{
+		return Entry.ItemType != EItemType::None
+			? FText::Format(NSLOCTEXT("Reward", "Qty", "x{0}"), FText::AsNumber(Entry.Quantity))
+			: UGlobalUtilFunctions::AbbreviateNumber(Entry.Quantity);
+	}
+
 	bool RenderIcons(UWidgetTree& InWidgetTree, UGameInstance* GameInstance,
 		UHorizontalBox& InRewardBox, const TArray<FMissionReward>& Rewards)
 	{
@@ -99,31 +134,12 @@ namespace CGRewardChip
 			return false;
 		}
 
-		UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
-
 		bool bAny = false;
 
 		for (const FDisplayEntry& Entry : Entries)
 		{
 			// 아이콘 — Icon 소프트 참조가 있고 로드되면 표시. 없거나 실패하면 그 항목은 수치만(아이콘이 정체성이라 표시명 생략).
-			UTexture2D* IconTex = nullptr;
-			if (TableMgr)
-			{
-				if (Entry.ResourceType != EResourceType::None)
-				{
-					bool bFound = false;
-					const FResourceInfo Info = TableMgr->GetResourceInfo(Entry.ResourceType, bFound);
-					if (bFound && !Info.Icon.IsNull())
-					{
-						IconTex = Info.Icon.LoadSynchronous();
-					}
-				}
-				else if (Entry.ItemType != EItemType::None)
-				{
-					bool bFound = false;
-					IconTex = TableMgr->GetItemIcon(Entry.ItemType, bFound);
-				}
-			}
+			UObject* IconTex = ResolveIcon(GameInstance, Entry);
 
 			if (IconTex)
 			{
@@ -143,9 +159,7 @@ namespace CGRewardChip
 
 			UCommonTextBlock* ValueText = InWidgetTree.ConstructWidget<UCommonTextBlock>(UCommonTextBlock::StaticClass());
 			StyleRewardValueText(ValueText);
-			ValueText->SetText(Entry.ItemType != EItemType::None
-				? FText::Format(NSLOCTEXT("Reward", "Qty", "x{0}"), FText::AsNumber(Entry.Quantity))
-				: UGlobalUtilFunctions::AbbreviateNumber(Entry.Quantity));
+			ValueText->SetText(FormatQuantity(Entry));
 			// WBP 샘플 값 텍스트의 폰트(크기 포함)가 있으면 존중 — 에디터에서 키운 폰트 반영
 			if (bHasSampleFont)
 			{

@@ -1,7 +1,9 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+// Fill out your copyright notice in the Description page of Project Settings.
 
 
 #include "Entity/Officeworker/Officeworker.h"
+#include "Global/CGDevSettings.h"
+#include "GameMode/OfficeGameMode.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
 #include "Office/WorkstationActorBase.h"
 #include "Components/WidgetComponent.h"
@@ -17,6 +19,7 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Core/CGGameInstance.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
@@ -37,10 +40,39 @@
 #include "Components/SceneCaptureComponent2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "ImageUtils.h"
+#include "Entity/Officeworker/PortraitOutline.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Engine/DirectionalLight.h"
+#include "Components/MeshComponent.h"
 #include "EngineUtils.h"
+#include "Async/Async.h"
+#include "RHIGPUReadback.h"
+#include "RHISurfaceDataConversion.h"
+#include "RenderingThread.h"
+#include "Modules/ModuleManager.h"
+
+struct FOfficeworkerPortraitCaptureState
+{
+    TSharedPtr<FRHIGPUTextureReadback, ESPMode::ThreadSafe> Readback;
+    TAtomic<bool> bCopyEnqueued{false};
+    TAtomic<bool> bCancelled{false};
+    FString EmployeeID;
+    FString FilePath;
+    FString TemporaryPath;
+    int32 Width = 0;
+    int32 Height = 0;
+    EPixelFormat Format = PF_Unknown;
+};
+
+namespace
+{
+    constexpr int32 PortraitOutputWidth = 288;
+    constexpr int32 PortraitOutputHeight = 384;
+    constexpr float OfficeworkerTapReactionSeconds = 1.5f;
+    // 폰 터치 오차를 흡수하려고 이동 캡슐(반지름 30)보다 넓게 잡는다
+    constexpr float OfficeworkerClickRadius = 40.f;
+}
 
 // Sets default values
 AOfficeworker::AOfficeworker()
@@ -50,6 +82,18 @@ AOfficeworker::AOfficeworker()
     GetCapsuleComponent()->InitCapsuleSize(30.f, 92.04f);
 
     GetMesh()->SetRelativeLocationAndRotation(FVector(0.f, 0.f, -92.04f), FRotator(0.f, -90.f, 0.f));
+
+    // 책상 BoxComponent 와 같은 전용 클릭 볼륨 — 이동 캡슐의 Pawn 프로필은 건드리지 않는다
+    ClickVolume = CreateDefaultSubobject<UCapsuleComponent>(TEXT("ClickVolume"));
+    ClickVolume->SetupAttachment(GetCapsuleComponent());
+    ClickVolume->InitCapsuleSize(OfficeworkerClickRadius, 92.04f);
+    ClickVolume->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+    ClickVolume->SetCollisionObjectType(ECC_WorldDynamic);
+    ClickVolume->SetCollisionResponseToAllChannels(ECR_Ignore);
+    ClickVolume->SetCollisionResponseToChannel(ECC_GameTraceChannel1, ECR_Block);
+    ClickVolume->SetGenerateOverlapEvents(false);
+    ClickVolume->SetCanEverAffectNavigation(false);
+    ClickVolume->CanCharacterStepUpOn = ECB_No;
 
     // 머리 위 상태 버블 (3D Widget Screen-space)
     BubbleWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("BubbleWidget"));
@@ -82,8 +126,10 @@ AOfficeworker::AOfficeworker()
     }
     // BubbleWidget Class는 BeginPlay에서 TableManager로 로드 (프로젝트 컨벤션)
 
-    // 모바일 최적화: 화면 밖 직원은 pose 갱신 스킵 (모듈러 파츠는 AModularOfficeworker 가 처리)
+    // 모바일 최적화: 화면 밖 직원은 pose 갱신 스킵
     GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+    // 화면 안 직원도 거리/화면크기에 따라 애님 평가를 건너뛴다. 코스메틱 10슬롯은 LeaderPose 라 바디만 제어하면 된다
+    GetMesh()->bEnableUpdateRateOptimizations = true;
 
     GetCharacterMovement()->MaxWalkSpeed = 125.f;  // 걷기 애님 대비 이동속도 매칭(발 미끄러짐 완화)
     GetCharacterMovement()->bOrientRotationToMovement = true;
@@ -96,6 +142,9 @@ AOfficeworker::AOfficeworker()
     // Portrait 캡처 카메라 - 생성만, 설정은 블루프린트에서
     FaceCaptureCamera = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("FaceCaptureCamera"));
     FaceCaptureCamera->SetupAttachment(GetMesh());
+    // 1컷 정지 촬영 전용 리그 — CaptureScene() 으로만 찍는다. 엔진 기본값(둘 다 true)이면 활성화된 순간부터 씬이 매 프레임 한 번 더 렌더된다
+    FaceCaptureCamera->bCaptureEveryFrame = false;
+    FaceCaptureCamera->bCaptureOnMovement = false;
 
     // Selection Overlay Material 로드
     static ConstructorHelpers::FObjectFinder<UMaterialInterface> OverlayMaterialFinder(
@@ -113,6 +162,7 @@ AOfficeworker::AOfficeworker()
 void AOfficeworker::OnConstruction(const FTransform& Transform)
 {
     Super::OnConstruction(Transform);
+    ApplyOfficeLightingChannels();
 
     // 피로 바 크기/높이는 BP 디테일 값 권위 — 디폴트 변경이 뷰포트/스폰에 즉시 반영되게 여기서 재적용.
     if (FatigueBarComponent)
@@ -124,8 +174,26 @@ void AOfficeworker::OnConstruction(const FTransform& Transform)
     }
 }
 
+void AOfficeworker::ApplyOfficeLightingChannels(bool bGachaReveal)
+{
+    if (!GetWorld() || !GetWorld()->GetAuthGameMode<AOfficeGameMode>()) return;
+    const bool bInteriorFill = !bIsPortraitMode && !bGachaReveal;
+    TInlineComponentArray<UMeshComponent*> WorkerMeshes(this);
+    for (UMeshComponent* WorkerMesh : WorkerMeshes)
+    {
+        WorkerMesh->SetLightingChannels(!bInteriorFill, bInteriorFill, false);
+    }
+}
+
 void AOfficeworker::BeginPlay()
 {
+    ApplyOfficeLightingChannels();
+    // 컴포넌트 BeginPlay의 지연 Idle 초기화가 촬영 리그 배회를 다시 켜지 않도록 먼저 차단한다.
+    if (bIsPortraitMode && BehaviorComponent)
+    {
+        BehaviorComponent->bSkipAutoInit = true;
+    }
+
     Super::BeginPlay();
 
     // 머리 위 버블 위젯 클래스 — TableManager에서 로드 (프로젝트 컨벤션)
@@ -161,6 +229,20 @@ void AOfficeworker::BeginPlay()
     // Portrait 모드면 애니메이션/이동/중력 비활성화
     if (bIsPortraitMode)
     {
+        // BeginPlay 전에 이미 무장된 배회 상태와 액터 타이머도 함께 정리한다.
+        StopRandomRoaming();
+
+        // 촬영 리그는 SceneCapture에는 남기되 플레이어 카메라에는 노출하지 않는다.
+        TInlineComponentArray<UPrimitiveComponent*> PrimitiveComponents;
+        GetComponents(PrimitiveComponents);
+        for (UPrimitiveComponent* PrimitiveComponent : PrimitiveComponents)
+        {
+            if (PrimitiveComponent)
+            {
+                PrimitiveComponent->SetVisibleInSceneCaptureOnly(true);
+            }
+        }
+
         // 촬영용 캐릭터에는 머리 위 피로 바 불필요 (혹시 모를 캡처 혼입 방지)
         if (FatigueBarComponent)
         {
@@ -205,13 +287,26 @@ void AOfficeworker::BeginPlay()
 }
 
 // Called every frame
+void AOfficeworker::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    GetWorldTimerManager().ClearTimer(PortraitReadbackTimer);
+    if (PendingPortraitCapture)
+    {
+        PendingPortraitCapture->bCancelled = true;
+        PendingPortraitCapture.Reset();
+    }
+    OnPortraitCaptured.Unbind();
+    CanCommitPortrait.Unbind();
+    Super::EndPlay(EndPlayReason);
+}
+
 void AOfficeworker::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
     UpdateFatigueBarHeight(DeltaTime);
 
-    // 1초 주기로 머리 위 버블 + Glow 평가 + 이모트 변형 (성능 절약)
+    // 1초 주기로 머리 위 상태 버블과 Glow를 평가한다.
     BubbleCheckAccum += DeltaTime;
     if (BubbleCheckAccum >= 1.0f)
     {
@@ -238,28 +333,19 @@ void AOfficeworker::Tick(float DeltaTime)
                     Desired = EWorkerBubbleType::Boosted;
                 }
             }
-            else if (BehaviorComponent->EmployeeState == EEmployeeState::Sitting)
+            // 졸음 연출(Z 글자·콧방울)이 이미 같은 뜻을 보여 주면 피로 버블은 겹치지 않게 뺀다
+            else if (BehaviorComponent->EmployeeState == EEmployeeState::Sitting && !IsDozeVisualActive())
             {
                 // Sitting(휴식) 상태 = 피로한 상태 — 체력 기반 사이클로 자연스럽게 진입
                 Desired = EWorkerBubbleType::Tired;
             }
-            else if (BehaviorComponent->CurrentBehaviorMode == EEmployeeBehaviorMode::Stage)
+            else if (BehaviorComponent->CurrentBehaviorMode == EEmployeeBehaviorMode::Stage
+                && BehaviorComponent->EmployeeState == EEmployeeState::Typing)
             {
                 Desired = EWorkerBubbleType::Working;
             }
 
-            // 같은 타입이어도 1초마다 이모트 변형 (다채로움)
-            if (Desired == CurrentBubbleType && Desired != EWorkerBubbleType::None)
-            {
-                // 강제 재선택 — CurrentBubbleType을 None으로 잠깐 바꿔 캐시 무효화
-                EWorkerBubbleType Same = CurrentBubbleType;
-                CurrentBubbleType = EWorkerBubbleType::None;
-                SetWorkerBubbleType(Same);
-            }
-            else
-            {
-                SetWorkerBubbleType(Desired);
-            }
+            SetWorkerBubbleType(Desired);
 
             SetGlowOverlay(bBuffActive);
 
@@ -335,6 +421,8 @@ FVector AOfficeworker::GetCenterLocation() const
 
 void AOfficeworker::StartRandomRoaming(float InRoamRadius, float InMinWaitTime, float InMaxWaitTime)
 {
+    StandUpFromWorkstation();
+
     // 이미 배회 중이면 무시가 아니라 재무장 — early-return 이던 시절, 잘못된 위치에서 걸린 첫 호출이
     // 뒤이은 올바른 호출(새 원점)을 통째로 삼켜 워커가 제자리에 갇혔다(2026-08-05 채용 직원 정지).
     if (bIsRoaming)
@@ -393,6 +481,11 @@ void AOfficeworker::StopRandomRoaming()
     }
 
     UE_LOG(LogTemp, Log, TEXT("[Officeworker %d] Stopped roaming"), EmployeeID);
+}
+
+void AOfficeworker::ResumeRandomRoaming()
+{
+    StartRandomRoaming(RoamRadius, MinWaitTime, MaxWaitTime);
 }
 
 void AOfficeworker::MoveToRandomLocation()
@@ -466,6 +559,13 @@ void AOfficeworker::SetupFaceCapture()
     UE_LOG(LogTemp, Log, TEXT("[Portrait] SetupFaceCapture OK - Actor: %s, TextureTarget: %s"),
         *GetName(), *FaceCaptureCamera->TextureTarget->GetName());
 
+    // 2배 해상도에서 촬영·외곽선을 계산한 뒤 축소해 작은 머리카락과 안경의 계단을 줄인다.
+    UTextureRenderTarget2D* PortraitTarget = FaceCaptureCamera->TextureTarget;
+    if (PortraitTarget->SizeX != PortraitOutputWidth * 2 || PortraitTarget->SizeY != PortraitOutputHeight * 2)
+    {
+        PortraitTarget->ResizeTarget(PortraitOutputWidth * 2, PortraitOutputHeight * 2);
+    }
+
     // 이 캐릭터만 캡처 (배경 제외) — 구 모듈러 워커에서 검증된 원래 동작
     FaceCaptureCamera->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
     FaceCaptureCamera->ShowOnlyActors.Empty();
@@ -508,12 +608,14 @@ void AOfficeworker::SetupFaceCapture()
     Flash->SetIntensity(15000.f);                             // ⚠ 밝기 노브 (6000=어두움 실측 → 2.5배)
     Flash->SetAttenuationRadius(2000.f);
     Flash->SetCastShadows(false);
+    Flash->SetVisibility(true);
 
     // 바디(애니 정지)가 캡처에서 컬링되지 않도록 본/바운드 강제 갱신.
     if (USkeletalMeshComponent* Body = GetMesh())
     {
         Body->bHiddenInSceneCapture = false;
         Body->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+        Body->bEnableUpdateRateOptimizations = false;  // 평가 스킵 프레임에 촬영되면 포즈가 어긋난다
         Body->RefreshBoneTransforms();
         Body->UpdateBounds();
         Body->MarkRenderStateDirty();
@@ -539,129 +641,219 @@ void AOfficeworker::SetupFaceCapture()
 
 void AOfficeworker::CaptureAndSaveFacePortrait()
 {
-    FString EmployeeIDStr = FString::FromInt(this->EmployeeID);
-    UE_LOG(LogTemp, Warning, TEXT("[Portrait] CaptureAndSaveFacePortrait called with EmployeeID: %d"), this->EmployeeID);
-
-    if (!FaceCaptureCamera || !FaceCaptureCamera->TextureTarget)
+    const FString CapturedID = FString::FromInt(EmployeeID);
+    if (PendingPortraitCapture)
     {
-        UE_LOG(LogTemp, Error, TEXT("CaptureAndSaveFacePortrait: Capture system not initialized!"));
+        UE_LOG(LogTemp, Warning, TEXT("[Portrait] Capture already in progress: %s"), *PendingPortraitCapture->EmployeeID);
+        return;
+    }
+    UTextureRenderTarget2D* Target = FaceCaptureCamera ? FaceCaptureCamera->TextureTarget : nullptr;
+    if (!Target || !Target->GameThread_GetRenderTargetResource())
+    {
+        if (FaceCaptureCamera) { FaceCaptureCamera->SetActive(false); }
+        OnPortraitCaptured.ExecuteIfBound(CapturedID, false);
+        return;
+    }
+    const EPixelFormat TargetFormat = Target->GetFormat();
+    if (TargetFormat != PF_FloatRGBA && TargetFormat != PF_B8G8R8A8 && TargetFormat != PF_R8G8B8A8)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[Portrait] Unsupported render target format: %s"), GetPixelFormatString(TargetFormat));
+        FaceCaptureCamera->SetActive(false);
+        OnPortraitCaptured.ExecuteIfBound(CapturedID, false);
+        return;
+    }
+    // ImageUtils cannot load ImageWrapper from its worker-thread compression path.
+    if (!FModuleManager::Get().LoadModule(FName(TEXT("ImageWrapper"))))
+    {
+        FaceCaptureCamera->SetActive(false);
+        OnPortraitCaptured.ExecuteIfBound(CapturedID, false);
         return;
     }
 
-    // 1. 캡처
+    TSharedPtr<FOfficeworkerPortraitCaptureState, ESPMode::ThreadSafe> State =
+        MakeShared<FOfficeworkerPortraitCaptureState, ESPMode::ThreadSafe>();
+    State->Readback = MakeShared<FRHIGPUTextureReadback, ESPMode::ThreadSafe>(TEXT("OfficeworkerPortrait"));
+    State->EmployeeID = CapturedID;
+    State->FilePath = GetPortraitFilePathForEmployee(EmployeeID);
+    State->TemporaryPath = State->FilePath + TEXT(".") + FGuid::NewGuid().ToString(EGuidFormats::Digits) + TEXT(".tmp");
+    State->Width = Target->SizeX;
+    State->Height = Target->SizeY;
+    State->Format = TargetFormat;
+    PendingPortraitCapture = State;
+
     FaceCaptureCamera->CaptureScene();
-
-    // 2. RenderTarget에서 픽셀 읽기
-    UTextureRenderTarget2D* RT = FaceCaptureCamera->TextureTarget;
-    FTextureRenderTargetResource* RTResource = RT->GameThread_GetRenderTargetResource();
-
-    TArray<FColor> Pixels;
-    if (!RTResource->ReadPixels(Pixels))
+    // 캡처는 위에서 렌더 명령으로 이미 큐에 들어갔다 — 이후 끄면 촬영엔 남고 본 씬의 동적 광원 비용만 사라진다
+    TInlineComponentArray<UPointLightComponent*> RigLights(this);
+    for (UPointLightComponent* RigLight : RigLights)
     {
-        UE_LOG(LogTemp, Error, TEXT("Failed to read pixels!"));
-        return;
+        if (RigLight->GetFName() == TEXT("PortraitFlash")) { RigLight->SetVisibility(false); }
     }
-
-    // 알파 채널을 먼저 처리 (OneMinus)
-    for (FColor& Pixel : Pixels)
-    {
-        Pixel.A = 255 - Pixel.A;
-    }
-
-    // RGB와 알파를 분리해서 리사이즈
-    TArray<FColor> RGBPixels;
-    TArray<FColor> AlphaAsColor;  // uint8 배열 대신 FColor 사용
-    RGBPixels.Reserve(Pixels.Num());
-    AlphaAsColor.Reserve(Pixels.Num());
-
-    for (const FColor& Pixel : Pixels)
-    {
-        RGBPixels.Add(FColor(Pixel.R, Pixel.G, Pixel.B, 255));
-        AlphaAsColor.Add(FColor(Pixel.A, Pixel.A, Pixel.A, 255)); // 알파값을 RGB에 복사
-    }
-
-    // RGB 리사이즈 (3:4 비율)
-    TArray<FColor> ResizedRGB;
-    FImageUtils::ImageResize(
-        RT->SizeX,
-        RT->SizeY,
-        RGBPixels,
-        144,
-        192,
-        ResizedRGB,
-        false
-    );
-
-    // 알파 채널도 Bilinear 보간으로 리사이즈
-    TArray<FColor> ResizedAlphaColor;
-    FImageUtils::ImageResize(
-        RT->SizeX,
-        RT->SizeY,
-        AlphaAsColor,
-        144,
-        192,
-        ResizedAlphaColor,
-        false
-    );
-
-    // RGB와 알파 합치기
-    TArray<FColor> ResizedPixels;
-    ResizedPixels.SetNum(144 * 192);
-
-    for (int32 i = 0; i < ResizedPixels.Num(); i++)
-    {
-        ResizedPixels[i] = FColor(
-            ResizedRGB[i].R,
-            ResizedRGB[i].G,
-            ResizedRGB[i].B,
-            ResizedAlphaColor[i].R  // 알파값을 R 채널에서 가져옴
-        );
-    }
-
-    // 3. PNG로 저장
-    FString FilePath = GetPortraitFilePath();
-    FString Directory = FPaths::GetPath(FilePath);
-    if (!FPaths::DirectoryExists(Directory))
-    {
-        IFileManager::Get().MakeDirectory(*Directory, true);
-    }
-
-    TArray<uint8, FDefaultAllocator64> CompressedData;
-    FImageUtils::PNGCompressImageArray(144, 192, ResizedPixels, CompressedData);
-
-    if (FFileHelper::SaveArrayToFile(CompressedData, *FilePath))
-    {
-        UE_LOG(LogTemp, Log, TEXT("Portrait saved: %s (%d bytes)"), *FilePath, CompressedData.Num());
-    }
-
-    FaceCaptureCamera->SetActive(false);
-
-    // 캡처완료 알림
-    OnPortraitCaptured.ExecuteIfBound(EmployeeIDStr);
+    FTextureRenderTargetResource* TargetResource = Target->GameThread_GetRenderTargetResource();
+    ENQUEUE_RENDER_COMMAND(EnqueueOfficeworkerPortraitReadback)(
+        [TargetResource, State](FRHICommandListImmediate& RHICmdList)
+        {
+            FRHITexture* SourceTexture = TargetResource->GetShaderResourceTexture();
+            if (SourceTexture && SourceTexture->GetFormat() == State->Format && !SourceTexture->IsMultisampled())
+            {
+                State->Readback->EnqueueCopy(RHICmdList, SourceTexture);
+            }
+            else
+            {
+                State->bCancelled = true;
+            }
+            State->bCopyEnqueued = true;
+        });
+    GetWorldTimerManager().SetTimer(PortraitReadbackTimer, this, &AOfficeworker::PollPortraitReadback, 0.01f, true);
 }
 
+void AOfficeworker::PollPortraitReadback()
+{
+    TSharedPtr<FOfficeworkerPortraitCaptureState, ESPMode::ThreadSafe> State = PendingPortraitCapture;
+    if (!State || !State->bCopyEnqueued) { return; }
+    if (State->bCancelled)
+    {
+        FinishPortraitCapture(State, false);
+        return;
+    }
+    if (!State->Readback->IsReady()) { return; }
+    GetWorldTimerManager().ClearTimer(PortraitReadbackTimer);
+
+    const TWeakObjectPtr<AOfficeworker> WeakWorker(this);
+    ENQUEUE_RENDER_COMMAND(CopyOfficeworkerPortraitReadback)(
+        [State, WeakWorker](FRHICommandListImmediate&)
+        {
+            int32 RowPitchInPixels = 0;
+            int32 BufferHeight = 0;
+            void* MappedData = State->Readback->Lock(RowPitchInPixels, &BufferHeight);
+            const int32 BytesPerPixel = State->Format == PF_FloatRGBA ? 8 : 4;
+            const bool bValid = MappedData && RowPitchInPixels >= State->Width && BufferHeight >= State->Height;
+            TArray<uint8> RawPixels;
+            if (bValid)
+            {
+                RawPixels.SetNumUninitialized(State->Width * State->Height * BytesPerPixel);
+                for (int32 Y = 0; Y < State->Height; ++Y)
+                {
+                    FMemory::Memcpy(RawPixels.GetData() + Y * State->Width * BytesPerPixel,
+                        static_cast<const uint8*>(MappedData) + Y * RowPitchInPixels * BytesPerPixel,
+                        State->Width * BytesPerPixel);
+                }
+            }
+            if (MappedData) { State->Readback->Unlock(); }
+            if (!bValid || State->bCancelled)
+            {
+                AsyncTask(ENamedThreads::GameThread, [State, WeakWorker]()
+                {
+                    if (WeakWorker.IsValid()) { WeakWorker->FinishPortraitCapture(State, false); }
+                });
+                return;
+            }
+
+            Async(EAsyncExecution::ThreadPool, [State, WeakWorker, RawPixels = MoveTemp(RawPixels)]() mutable
+            {
+                TArray<FColor> Pixels;
+                Pixels.SetNumUninitialized(State->Width * State->Height);
+                const uint32 SourcePitch = State->Width * (State->Format == PF_FloatRGBA ? 8 : 4);
+                if (State->Format == PF_FloatRGBA)
+                {
+                    // ReadPixels uses RCM_UNorm and gamma conversion for half-float targets.
+                    ConvertRawR16G16B16A16FDataToFColor(State->Width, State->Height,
+                        RawPixels.GetData(), SourcePitch, Pixels.GetData(), true);
+                }
+                else if (State->Format == PF_B8G8R8A8)
+                {
+                    ConvertRawB8G8R8A8DataToFColor(State->Width, State->Height,
+                        RawPixels.GetData(), SourcePitch, Pixels.GetData());
+                }
+                else
+                {
+                    ConvertRawR8G8B8A8DataToFColor(State->Width, State->Height,
+                        RawPixels.GetData(), SourcePitch, Pixels.GetData());
+                }
+
+                for (FColor& Pixel : Pixels) { Pixel.A = 255 - Pixel.A; }
+                FPortraitOutlineParams Outline;
+                Outline.ThicknessPx = 3.f * static_cast<float>(State->Width) / PortraitOutputWidth;
+                PortraitOutline::Apply(Pixels, State->Width, State->Height, Outline);
+                TArray<FColor> RGBPixels;
+                TArray<FColor> AlphaPixels;
+                RGBPixels.Reserve(Pixels.Num());
+                AlphaPixels.Reserve(Pixels.Num());
+                for (const FColor& Pixel : Pixels)
+                {
+                    RGBPixels.Add(FColor(Pixel.R, Pixel.G, Pixel.B, 255));
+                    AlphaPixels.Add(FColor(Pixel.A, Pixel.A, Pixel.A, 255));
+                }
+                TArray<FColor> ResizedRGB;
+                TArray<FColor> ResizedAlpha;
+                FImageUtils::ImageResize(State->Width, State->Height, RGBPixels,
+                    PortraitOutputWidth, PortraitOutputHeight, ResizedRGB, false);
+                FImageUtils::ImageResize(State->Width, State->Height, AlphaPixels,
+                    PortraitOutputWidth, PortraitOutputHeight, ResizedAlpha, false);
+                TArray<FColor> OutputPixels;
+                OutputPixels.SetNumUninitialized(PortraitOutputWidth * PortraitOutputHeight);
+                for (int32 Index = 0; Index < OutputPixels.Num(); ++Index)
+                {
+                    OutputPixels[Index] = FColor(ResizedRGB[Index].R, ResizedRGB[Index].G,
+                        ResizedRGB[Index].B, ResizedAlpha[Index].R);
+                }
+
+                TArray<uint8, FDefaultAllocator64> CompressedData;
+                FImageUtils::PNGCompressImageArray(PortraitOutputWidth, PortraitOutputHeight,
+                    OutputPixels, CompressedData);
+                const FString Directory = FPaths::GetPath(State->FilePath);
+                const bool bTemporarySaved = !State->bCancelled && CompressedData.Num() > 0
+                    && IFileManager::Get().MakeDirectory(*Directory, true)
+                    && FFileHelper::SaveArrayToFile(CompressedData, *State->TemporaryPath);
+                AsyncTask(ENamedThreads::GameThread, [State, WeakWorker, bTemporarySaved]()
+                {
+                    if (WeakWorker.IsValid()) { WeakWorker->FinishPortraitCapture(State, bTemporarySaved); }
+                    else { IFileManager::Get().Delete(*State->TemporaryPath); }
+                });
+            });
+        });
+}
+
+void AOfficeworker::FinishPortraitCapture(
+    const TSharedPtr<FOfficeworkerPortraitCaptureState, ESPMode::ThreadSafe>& State, bool bTemporarySaved)
+{
+    if (PendingPortraitCapture != State)
+    {
+        IFileManager::Get().Delete(*State->TemporaryPath);
+        return;
+    }
+    GetWorldTimerManager().ClearTimer(PortraitReadbackTimer);
+    const bool bCanCommit = !State->bCancelled && EmployeeID == FCString::Atoi(*State->EmployeeID)
+        && (!CanCommitPortrait.IsBound() || CanCommitPortrait.Execute());
+    const bool bSaved = bTemporarySaved && bCanCommit
+        && IFileManager::Get().Move(*State->FilePath, *State->TemporaryPath, true, true);
+    if (!bSaved) { IFileManager::Get().Delete(*State->TemporaryPath); }
+    if (FaceCaptureCamera) { FaceCaptureCamera->SetActive(false); }
+    PendingPortraitCapture.Reset();
+    OnPortraitCaptured.ExecuteIfBound(State->EmployeeID, bSaved);
+}
 FString AOfficeworker::GetPortraitFilePath() const
 {
+    return GetPortraitFilePathForEmployee(EmployeeID);
+}
+
+FString AOfficeworker::GetPortraitFilePathForEmployee(int32 InEmployeeID)
+{
     FString BasePath;
-    FString EmployeeIDStr = FString::FromInt(this->EmployeeID);
+    FString EmployeeIDStr = FString::FromInt(InEmployeeID);
 
 #if PLATFORM_ANDROID
     // Android: External Storage 사용 (접근 가능)
     extern FString GExternalFilePath;
     BasePath = GExternalFilePath;
-    UE_LOG(LogTemp, Warning, TEXT("Android External Path: %s"), *GExternalFilePath);
 #elif PLATFORM_IOS
     // iOS: Documents 폴더
     BasePath = FPaths::ProjectSavedDir();
-    UE_LOG(LogTemp, Warning, TEXT("iOS Saved Path: %s"), *BasePath);
 #else
     // PC
     BasePath = FPaths::ProjectSavedDir();
-    UE_LOG(LogTemp, Warning, TEXT("PC Saved Path: %s"), *BasePath);
 #endif
 
-    FString FullPath = BasePath / TEXT("Portraits") / (EmployeeIDStr + TEXT(".png"));
-    UE_LOG(LogTemp, Warning, TEXT("Full Portrait Path: %s"), *FullPath);
+    FString FullPath = BasePath / UCGDevSettings::GetPortraitFolderName() / (EmployeeIDStr + TEXT(".png"));
 
     return FullPath;
 }
@@ -692,6 +884,11 @@ float AOfficeworker::GetSpeed() const
 
 void AOfficeworker::SetAssignedWorkstation(AWorkstationActorBase* Workstation, int32 SeatIndex)
 {
+    if (AssignedWorkstation.Get() != Workstation || AssignedSeatIndex != SeatIndex)
+    {
+        StandUpFromWorkstation();
+    }
+
     AssignedWorkstation = Workstation;
     AssignedSeatIndex = SeatIndex;
 
@@ -716,6 +913,25 @@ bool AOfficeworker::TeleportToWorkstationAndSit()
 
     AWorkstationActorBase* Workstation = AssignedWorkstation.Get();
 
+    const int32 OccupiedSeatIndex = Workstation->FindWorkerSeatIndex(this);
+    if ((OccupiedSeatIndex >= 0 && OccupiedSeatIndex != AssignedSeatIndex)
+        || (OccupiedSeatIndex < 0
+            && (!Workstation->CanSitAt(AssignedSeatIndex) || !Workstation->SitDownAt(AssignedSeatIndex, this))))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[Officeworker %d] Cannot sit at workstation seat %d"), EmployeeID, AssignedSeatIndex);
+        return false;
+    }
+
+    StopRandomRoaming();
+    if (AAIController* AIC = Cast<AAIController>(GetController()))
+    {
+        AIC->StopMovement();
+    }
+    if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+    {
+        Movement->StopMovementImmediately();
+    }
+
     // 좌석 위치와 회전값 가져오기
     FVector SeatLocation = Workstation->GetSeatLocation(AssignedSeatIndex);
     FRotator SeatRotation = Workstation->GetSeatRotation(AssignedSeatIndex);
@@ -724,8 +940,14 @@ bool AOfficeworker::TeleportToWorkstationAndSit()
     SetActorLocation(SeatLocation);
     SetActorRotation(SeatRotation);
 
-    // Workstation에 착석 등록
-    Workstation->SitDownAt(AssignedSeatIndex, this);
+    if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+    {
+        if (Movement->MovementMode != MOVE_None)
+        {
+            Movement->DisableMovement();
+            bMovementLockedBySeat = true;
+        }
+    }
 
     // BehaviorComponent 상태 업데이트
     if (BehaviorComponent)
@@ -742,25 +964,22 @@ bool AOfficeworker::TeleportToWorkstationAndSit()
 
 void AOfficeworker::MoveToWorkstationArea()
 {
+    StandUpFromWorkstation();
+
     if (!AssignedWorkstation.IsValid() || AssignedSeatIndex < 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[Officeworker %d] No assigned workstation for move"), EmployeeID);
         return;
     }
 
-    AWorkstationActorBase* Workstation = AssignedWorkstation.Get();
-
-    // 좌석 위치 가져오기
-    FVector SeatLocation = Workstation->GetSeatLocation(AssignedSeatIndex);
-
-    // 좌석 앞 1m 지점을 목표로 설정
-    FVector TargetLocation = SeatLocation + Workstation->GetActorForwardVector() * 100.f;
+    const FVector TargetLocation = GetWorkstationApproachLocation();
 
     AAIController* AIC = Cast<AAIController>(GetController());
     if (AIC)
     {
         // AI 이동 시작
-        AIC->MoveToLocation(TargetLocation, 50.f);
+        const bool bStopAtCapsuleEdge = !BehaviorComponent || !BehaviorComponent->IsRecruitmentArrivalActive();
+        AIC->MoveToLocation(TargetLocation, 50.f, bStopAtCapsuleEdge);
 
         // 이동 완료 감지를 위한 콜백 설정
         // Tick에서 이동 완료 시 텔레포트 처리
@@ -769,18 +988,45 @@ void AOfficeworker::MoveToWorkstationArea()
     }
 }
 
+FVector AOfficeworker::GetWorkstationApproachLocation() const
+{
+    const AWorkstationActorBase* Workstation = AssignedWorkstation.Get();
+    if (!Workstation || AssignedSeatIndex < 0) return GetActorLocation();
+    FVector Approach = Workstation->GetSeatLocation(AssignedSeatIndex)
+        + Workstation->GetActorForwardVector() * 100.f;
+    if (UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(GetWorld()))
+    {
+        FNavLocation ProjectedApproach;
+        if (NavSys->ProjectPointToNavigation(Approach, ProjectedApproach, FVector(180.f, 180.f, 250.f)))
+        {
+            Approach = ProjectedApproach.Location;
+        }
+    }
+    return Approach;
+}
+
 void AOfficeworker::StandUpFromWorkstation()
 {
-    if (!AssignedWorkstation.IsValid() || AssignedSeatIndex < 0)
+    AWorkstationActorBase* Workstation = AssignedWorkstation.Get();
+    const bool bOccupiedSeat = Workstation && Workstation->FindWorkerSeatIndex(this) >= 0;
+    if (!bOccupiedSeat && !bMovementLockedBySeat)
     {
-        UE_LOG(LogTemp, Warning, TEXT("[Officeworker %d] Not sitting at workstation"), EmployeeID);
         return;
     }
 
-    AWorkstationActorBase* Workstation = AssignedWorkstation.Get();
+    if (bOccupiedSeat)
+    {
+        Workstation->StandUp(this);
+    }
 
-    // Workstation에서 기립 등록
-    Workstation->StandUp(this);
+    if (bMovementLockedBySeat)
+    {
+        if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+        {
+            Movement->SetMovementMode(Movement->DefaultLandMovementMode);
+        }
+        bMovementLockedBySeat = false;
+    }
 
     // BehaviorComponent 상태 업데이트
     if (BehaviorComponent)
@@ -788,8 +1034,7 @@ void AOfficeworker::StandUpFromWorkstation()
         BehaviorComponent->bIsSeated = false;
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[Officeworker %d] Stood up from workstation seat %d"),
-        EmployeeID, AssignedSeatIndex);
+    UE_LOG(LogTemp, Log, TEXT("[Officeworker %d] Stood up from workstation seat %d"), EmployeeID, AssignedSeatIndex);
 }
 
 // ===== 머리 위 상태 버블 =====
@@ -799,49 +1044,149 @@ void AOfficeworker::SetWorkerBubbleType(EWorkerBubbleType NewType)
     if (CurrentBubbleType == NewType) return;
 
     CurrentBubbleType = NewType;
+    // 클릭 반응 중에는 상태만 기억해 두고 화면은 반응이 끝날 때 맞춘다
+    if (bTapReactionActive) return;
+
+    ApplyWorkerBubbleState();
+}
+
+void AOfficeworker::SetOverheadUISuppressed(bool bSuppressed)
+{
+    if (bOverheadUISuppressed == bSuppressed) return;
+    bOverheadUISuppressed = bSuppressed;
+
+    if (FatigueBarComponent && !bIsPortraitMode)
+    {
+        FatigueBarComponent->SetVisibility(!bSuppressed);
+    }
+    // 클릭 반응 중이면 EndTapReaction 이 상태 버블로 돌아갈 때 이 플래그를 따른다
+    if (!bTapReactionActive)
+    {
+        ApplyWorkerBubbleState();
+    }
+}
+
+void AOfficeworker::ApplyWorkerBubbleState()
+{
+    GetWorldTimerManager().ClearTimer(WorkingBubbleTimerHandle);
     if (!BubbleWidgetComponent) return;
 
-    if (NewType == EWorkerBubbleType::None)
+    if (bOverheadUISuppressed)
     {
         BubbleWidgetComponent->SetVisibility(false);
         return;
     }
 
-    BubbleWidgetComponent->SetVisibility(true);
+    // 작업 시작 시에도 직원마다 시차를 둬 모든 머리 위에 동시에 뜨지 않게 한다.
+    if (CurrentBubbleType == EWorkerBubbleType::Working)
+    {
+        BubbleWidgetComponent->SetVisibility(false);
+        GetWorldTimerManager().SetTimer(WorkingBubbleTimerHandle, this,
+            &AOfficeworker::ShowWorkingBubble, FMath::FRandRange(2.0f, 6.0f), false);
+        return;
+    }
+
+    if (CurrentBubbleType == EWorkerBubbleType::None)
+    {
+        BubbleWidgetComponent->SetVisibility(false);
+        return;
+    }
+
+    RefreshWorkerBubbleVisual();
+}
+
+void AOfficeworker::PlayTapReaction()
+{
+    UWorkerBubbleConfig* Config = BubbleConfig.IsNull() ? nullptr : BubbleConfig.LoadSynchronous();
+    PlayEmoteReaction(Config ? Config->PickEmoteForState(EWorkerBubbleType::Happy) : nullptr, OfficeworkerTapReactionSeconds);
+}
+
+bool AOfficeworker::PlayEmoteReaction(UTexture2D* Emote, float Seconds)
+{
+    if (!Emote) return false;
+
+    // 작업 중 버블 타이머가 반응 도중 이모트를 바꿔치기하지 않게 먼저 멈춘다
+    GetWorldTimerManager().ClearTimer(WorkingBubbleTimerHandle);
+    if (!ShowBubbleEmote(Emote))
+    {
+        ApplyWorkerBubbleState();
+        return false;
+    }
+
+    bTapReactionActive = true;
+    GetWorldTimerManager().SetTimer(TapReactionTimerHandle, this,
+        &AOfficeworker::EndTapReaction, FMath::Max(0.05f, Seconds), false);
+    return true;
+}
+
+void AOfficeworker::EndTapReaction()
+{
+    bTapReactionActive = false;
+    ApplyWorkerBubbleState();
+}
+
+void AOfficeworker::ShowWorkingBubble()
+{
+    if (CurrentBubbleType != EWorkerBubbleType::Working || bOverheadUISuppressed) return;
+
+    RefreshWorkerBubbleVisual();
+    GetWorldTimerManager().SetTimer(WorkingBubbleTimerHandle, this,
+        &AOfficeworker::HideWorkingBubble, 2.0f, false);
+}
+
+void AOfficeworker::HideWorkingBubble()
+{
+    if (CurrentBubbleType != EWorkerBubbleType::Working) return;
+
+    if (BubbleWidgetComponent)
+    {
+        BubbleWidgetComponent->SetVisibility(false);
+    }
+    GetWorldTimerManager().SetTimer(WorkingBubbleTimerHandle, this,
+        &AOfficeworker::ShowWorkingBubble, FMath::FRandRange(10.0f, 14.0f), false);
+}
+
+void AOfficeworker::RefreshWorkerBubbleVisual()
+{
+    if (!BubbleWidgetComponent) return;
+    BubbleWidgetComponent->SetVisibility(false);
 
     // Config에서 상태별 이모트 풀 → 랜덤 1장 → WBP의 EmoteImage에 적용
     UWorkerBubbleConfig* Config = BubbleConfig.IsNull() ? nullptr : BubbleConfig.LoadSynchronous();
     if (!Config) return;
 
-    UTexture2D* PickedEmote = Config->PickEmoteForState(NewType);
-    if (!PickedEmote) return;
+    ShowBubbleEmote(Config->PickEmoteForState(CurrentBubbleType));
+}
+
+bool AOfficeworker::ShowBubbleEmote(UTexture2D* Emote)
+{
+    if (!Emote || !BubbleWidgetComponent) return false;
 
     UUserWidget* BubbleUserWidget = BubbleWidgetComponent->GetUserWidgetObject();
-    if (!BubbleUserWidget) return;
+    if (!BubbleUserWidget) return false;
 
-    if (UImage* EmoteImage = Cast<UImage>(BubbleUserWidget->GetWidgetFromName(TEXT("EmoteImage"))))
+    UImage* EmoteImage = Cast<UImage>(BubbleUserWidget->GetWidgetFromName(TEXT("EmoteImage")));
+    if (!EmoteImage) return false;
+
+    // bMatchSize=true → 텍스처 원본 해상도(가로/세로비) 그대로 적용. 슬롯이 Center면 stretch 안 됨
+    EmoteImage->SetBrushFromTexture(Emote, true);
+    BubbleWidgetComponent->SetVisibility(true);
+
+    // 너무 크면 96px로 fit (긴 변 기준)
+    const float MaxDim = 96.0f;
+    const float W = static_cast<float>(Emote->GetSizeX());
+    const float H = static_cast<float>(Emote->GetSizeY());
+    const float Longer = FMath::Max(W, H);
+    if (Longer > MaxDim)
     {
-        // bMatchSize=true → 텍스처 원본 해상도(가로/세로비) 그대로 적용. 슬롯이 Center면 stretch 안 됨
-        EmoteImage->SetBrushFromTexture(PickedEmote, true);
-
-        // 너무 크면 96px로 fit (긴 변 기준)
-        if (PickedEmote)
-        {
-            const float MaxDim = 96.0f;
-            const float W = static_cast<float>(PickedEmote->GetSizeX());
-            const float H = static_cast<float>(PickedEmote->GetSizeY());
-            const float Longer = FMath::Max(W, H);
-            if (Longer > MaxDim)
-            {
-                const float Scale = MaxDim / Longer;
-                EmoteImage->SetDesiredSizeOverride(FVector2D(W * Scale, H * Scale));
-            }
-            else
-            {
-                EmoteImage->SetDesiredSizeOverride(FVector2D(W, H));
-            }
-        }
+        const float Scale = MaxDim / Longer;
+        EmoteImage->SetDesiredSizeOverride(FVector2D(W * Scale, H * Scale));
     }
+    else
+    {
+        EmoteImage->SetDesiredSizeOverride(FVector2D(W, H));
+    }
+    return true;
 }
 
 void AOfficeworker::SetGlowOverlay(bool bEnabled, FLinearColor Color)

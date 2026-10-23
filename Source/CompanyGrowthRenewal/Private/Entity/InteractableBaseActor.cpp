@@ -223,8 +223,15 @@ void AInteractableBaseActor::OnConstruction(const FTransform& Transform)
 
 void AInteractableBaseActor::PlayWobble()
 {
+	// 흔들림 방향 = 월드 원점에서 건물로 향하는 수평 방향. 높이를 반드시 빼야 한다 —
+	// 정규화 전 Z 를 남기면 지면이 Z=0 이 아닌 도시(City_Pack 10,900)에서 Z 성분이 0.2 를 넘어
+	// 좌우 흔들림이 위아래 눌림으로 섞인다. 리버워크는 지면이 Z=0 이라 이 결함이 드러나지 않았다.
 	FVector temVec = GetActorLocation();
-	temVec.Normalize();
+	temVec.Z = 0.f;
+	if (!temVec.Normalize())
+	{
+		temVec = FVector(1.f, 0.f, 0.f); // 원점 바로 위 — 방향이 정의되지 않으므로 고정축
+	}
 
 	FVector actorCenter = GetActorLocation();  // Actor 중심점
 

@@ -45,9 +45,8 @@ void AStreetLampManager::BeginPlay()
 	if (ATimeCycleManager* Clock = Cast<ATimeCycleManager>(UGameplayStatics::GetActorOfClass(GetWorld(), ATimeCycleManager::StaticClass())))
 	{
 		CachedTimeCycle = Clock;
-		Clock->OnSunRise.AddDynamic(this, &AStreetLampManager::HandleSunRise);
-		Clock->OnSunSet.AddDynamic(this, &AStreetLampManager::HandleSunSet);
-		const int32 Cur = Clock->GetCurrentTime().ToSeconds();
+		Clock->OnVisualTimeChanged.AddDynamic(this, &AStreetLampManager::HandleVisualTimeChanged);
+		const int32 Cur = Clock->GetVisualTime().ToSeconds();
 		const int32 Rise = Clock->GetSunRiseTime().ToSeconds();
 		const int32 Set = Clock->GetSunSetTime().ToSeconds();
 		bGlowVisible = (Cur >= Set) || (Cur < Rise);
@@ -58,10 +57,10 @@ void AStreetLampManager::BeginPlay()
 
 void AStreetLampManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	GetWorldTimerManager().ClearTimer(RetryTimer);
 	if (ATimeCycleManager* Clock = CachedTimeCycle.Get())
 	{
-		Clock->OnSunRise.RemoveDynamic(this, &AStreetLampManager::HandleSunRise);
-		Clock->OnSunSet.RemoveDynamic(this, &AStreetLampManager::HandleSunSet);
+		Clock->OnVisualTimeChanged.RemoveDynamic(this, &AStreetLampManager::HandleVisualTimeChanged);
 	}
 	Super::EndPlay(EndPlayReason);
 }
@@ -84,8 +83,13 @@ void AStreetLampManager::ApplyNightVisibility(bool bNight)
 	}
 }
 
-void AStreetLampManager::HandleSunRise() { ApplyNightVisibility(false); }
-void AStreetLampManager::HandleSunSet()  { ApplyNightVisibility(true); }
+void AStreetLampManager::HandleVisualTimeChanged()
+{
+	if (const ATimeCycleManager* Clock = CachedTimeCycle.Get())
+	{
+		ApplyNightVisibility(Clock->IsVisualNight());
+	}
+}
 
 UInstancedStaticMeshComponent* AStreetLampManager::MakeGlowISM()
 {
@@ -171,16 +175,15 @@ void AStreetLampManager::BuildStreetLamps()
 	LODBaseScales.Reset();
 	LampUnits.Reset();
 
-	// 모든 액터의 ISM 컴포넌트 중 메시가 가로등인 것만(폴리지 HISM = ISM 손자라 그대로 잡힘).
+	TArray<UInstancedStaticMeshComponent*> SourceComponents;
+	// MainMap의 폴리지(HISM 포함)에서 가로등 메시를 찾는다.
 	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
 	{
-		AActor* LampActor = *It;
-		if (!LampActor)
-			continue;
-
-		TArray<UInstancedStaticMeshComponent*> ISMComps;
-		LampActor->GetComponents<UInstancedStaticMeshComponent>(ISMComps);
-		for (UInstancedStaticMeshComponent* ISM : ISMComps)
+		TArray<UInstancedStaticMeshComponent*> Components;
+		It->GetComponents(Components);
+		SourceComponents.Append(Components);
+	}
+	for (UInstancedStaticMeshComponent* ISM : SourceComponents)
 		{
 			if (!ISM)
 				continue;
@@ -256,7 +259,6 @@ void AStreetLampManager::BuildStreetLamps()
 				}
 			}
 		}
-	}
 
 	if (DetailPositions.Num() == 0 && LODPositions.Num() == 0)
 	{

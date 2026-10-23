@@ -8,7 +8,7 @@
 // NativePaint 로 트랙(전체 원) + 필 아크(Percent * 360)를 MakeLines 로 드로잉.
 // WBP 트리에서 SizeBox 안에 배치하면 할당 크기 기준으로 반지름을 계산.
 // RebuildWidget: 디자이너가 루트를 안 넣으면 SizeBox(RingSize) 자동 생성 (프리뷰 지원).
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API URadialProgressWidget : public UUserWidget
 {
 	GENERATED_BODY()

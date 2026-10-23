@@ -96,6 +96,11 @@ public:
 	 */
 	void RecalcBoxExtent();
 
+	bool IsFloorCovering() const { return Category == EDecorationCategory::Carpet; }
+	// 카펫은 같은 바닥 덮개끼리만 배치 영역을 제한한다.
+	bool BlocksPlacementWith(const AActor* OtherActor) const;
+	FBox2D GetFloorFootprint(const FTransform& FloorTransform) const;
+
 	/**
 	 * 장식물이 특정 표면에 배치 가능한지 확인
 	 */

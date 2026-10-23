@@ -1,8 +1,11 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "Manager/ChatManagerSubsystem.h"
+#include "Global/CGDevSettings.h"
 #include "Manager/PlayFabManagerSubsystem.h"
+#include "Manager/FirebaseAuthSubsystem.h"
 #include "Manager/SaveLoadManager.h"
+#include "Utils/CloudHttp.h"
 #include "Data/GameSaveData.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -10,11 +13,15 @@
 #include "Http.h"
 #include "TimerManager.h"
 #include "Engine/GameInstance.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Paths.h"
+#include "Utils/CF1CaptureSavePolicy.h"
 
 void UChatManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
+	ShouldSuppressHttpRequests();
 	LoadFirebaseConfig();
 
 	// PlayFab 매니저 참조 캐싱
@@ -51,7 +58,7 @@ void UChatManagerSubsystem::LoadFirebaseConfig()
 	}
 	else
 	{
-		// 공개 포트폴리오에서는 실제 배포 주소 대신 문서용 placeholder를 사용한다.
+		// 폴백 (배포 URL 변경은 ini만 수정)
 		FirebaseBaseUrl = TEXT("https://YOUR_SERVICE_URL.example.com");
 		UE_LOG(LogTemp, Error,
 			TEXT("[ChatManager] ini FirebaseBaseUrl 이 유효하지 않아 폴백 사용 (읽은 값: '%s') — ini 값을 큰따옴표로 감쌌는지 확인할 것"),
@@ -74,6 +81,12 @@ void UChatManagerSubsystem::LoadFirebaseConfig()
 
 void UChatManagerSubsystem::SendMessage(const FString& Content, const FString& Channel)
 {
+	if (ShouldSuppressHttpRequests())
+	{
+		if (UCGDevSettings::IsOfflineMode()) OnSendResult.Broadcast(false);
+		return;
+	}
+
 	if (FirebaseBaseUrl.IsEmpty())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[ChatManager] Firebase URL이 설정되지 않음"));
@@ -81,6 +94,12 @@ void UChatManagerSubsystem::SendMessage(const FString& Content, const FString& C
 	}
 
 	if (Content.IsEmpty())
+	{
+		return;
+	}
+
+	// 서버가 Bearer 를 요구한다 — 미인증이면 요청 자체를 보내지 않는다(설계서 §3.5)
+	if (AcquireIdTokenOrLogOnce().IsEmpty())
 	{
 		return;
 	}
@@ -109,9 +128,8 @@ void UChatManagerSubsystem::SendMessage(const FString& Content, const FString& C
 		}
 	}
 
-	// JSON 바디 구성
+	// JSON 바디 구성 — senderId 는 보내지 않는다. 서버가 토큰 pid 로 고정한다(설계서 §3.5)
 	TSharedRef<FJsonObject> JsonBody = MakeShareable(new FJsonObject());
-	JsonBody->SetStringField(TEXT("senderId"), SenderId);
 	JsonBody->SetStringField(TEXT("senderName"), SenderName);
 	JsonBody->SetStringField(TEXT("content"), Content);
 	JsonBody->SetStringField(TEXT("channel"), Channel);
@@ -121,15 +139,7 @@ void UChatManagerSubsystem::SendMessage(const FString& Content, const FString& C
 	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
 	FJsonSerializer::Serialize(JsonBody, Writer);
 
-	// 채팅만 PlayFab SDK 대신 Firebase 직접 HTTP (유일한 raw HTTP 경로)
-	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = FHttpModule::Get().CreateRequest();
-	const FString SendUrl = FString::Printf(TEXT("%s/chat/send"), *FirebaseBaseUrl);
-	HttpRequest->SetURL(SendUrl);
-	HttpRequest->SetVerb(TEXT("POST"));
-	HttpRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
-	HttpRequest->SetContentAsString(RequestBody);
-	HttpRequest->OnProcessRequestComplete().BindUObject(this, &UChatManagerSubsystem::OnSendMessageResponse);
-	HttpRequest->ProcessRequest();
+	const FString SendUrl = DispatchSendRequest(RequestBody, /*bAllowRetry=*/true);
 
 	// 내 메시지는 로컬에서 즉시 표시 (서버 응답 안 기다림)
 	FChatMessage LocalMsg;
@@ -146,8 +156,8 @@ void UChatManagerSubsystem::SendMessage(const FString& Content, const FString& C
 		CachedMessages.RemoveAt(0);
 	}
 
-	// LastMessageTimestamp 갱신 (폴링에서 내 메시지 중복 수신 방지)
-	LastMessageTimestamp = LocalMsg.CreatedAt;
+	// ⚠ 커서는 여기서 전진시키지 않는다 ― 로컬 시계가 서버보다 앞서면 그 차이만큼 남의 메시지를 조용히 건너뛴다.
+	// 커서는 /chat/send 응답의 서버 createdAt 으로만 전진한다(OnSendMessageResponse). 로컬 에코는 표시용이다.
 
 	OnMessagesReceived.Broadcast({LocalMsg});
 
@@ -156,15 +166,27 @@ void UChatManagerSubsystem::SendMessage(const FString& Content, const FString& C
 
 void UChatManagerSubsystem::FetchRecentMessages(const FString& Channel, int32 Limit)
 {
+	if (ShouldSuppressHttpRequests())
+	{
+		return;
+	}
+
 	if (FirebaseBaseUrl.IsEmpty())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[ChatManager] Firebase URL이 설정되지 않음"));
 		return;
 	}
 
+	// 서버가 Bearer 를 요구한다 — 미인증이면 폴링도 요청을 보내지 않는다(설계서 §3.5)
+	const FString IdToken = AcquireIdTokenOrLogOnce();
+	if (IdToken.IsEmpty())
+	{
+		return;
+	}
+
 	// URL 쿼리 파라미터 구성
-	FString Url = FString::Printf(TEXT("%s/chat/messages?channel=%s&limit=%d"),
-		*FirebaseBaseUrl, *Channel, Limit);
+	FString Url = FString::Printf(TEXT("%s?channel=%s&limit=%d"),
+		*FCloudHttp::JoinUrl(FirebaseBaseUrl, TEXT("/chat/messages")), *Channel, Limit);
 
 	// 폴링 최적화: 마지막 타임스탬프 이후 메시지만 요청
 	if (!LastMessageTimestamp.IsEmpty())
@@ -179,12 +201,103 @@ void UChatManagerSubsystem::FetchRecentMessages(const FString& Channel, int32 Li
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = FHttpModule::Get().CreateRequest();
 	HttpRequest->SetURL(Url);
 	HttpRequest->SetVerb(TEXT("GET"));
+	FCloudHttp::ApplyCommonHeaders(HttpRequest, IdToken, FString());
 	HttpRequest->OnProcessRequestComplete().BindUObject(this, &UChatManagerSubsystem::OnFetchMessagesResponse);
-	HttpRequest->ProcessRequest();
+	ProcessChatHttpRequest(HttpRequest);
+}
+
+FString UChatManagerSubsystem::AcquireIdTokenOrLogOnce()
+{
+	UGameInstance* GI = GetGameInstance();
+	UFirebaseAuthSubsystem* AuthMgr = GI ? GI->GetSubsystem<UFirebaseAuthSubsystem>() : nullptr;
+
+	if (AuthMgr && AuthMgr->IsAuthReady() && !AuthMgr->GetIdToken().IsEmpty())
+	{
+		// 복구 후 다시 끊기면 한 번 더 알려야 한다
+		bUnauthenticatedLogged = false;
+		return AuthMgr->GetIdToken();
+	}
+
+	if (!bUnauthenticatedLogged)
+	{
+		bUnauthenticatedLogged = true;
+		// 채팅 태그를 재사용하지 않는다 — CF1 캡처 launcher 가 그 태그의 허용 목록을 정확히 검사한다
+		UE_LOG(LogTemp, Warning, TEXT("[ChatAuth] 인증 대기 — Firebase idToken 이 없어 채팅 요청을 보내지 않음"));
+	}
+
+	return FString();
+}
+
+FString UChatManagerSubsystem::DispatchSendRequest(const FString& RequestBody, bool bAllowRetry)
+{
+	if (ShouldSuppressHttpRequests()) return FString();
+
+	// 말단 슬래시가 섞인 ini 값이 '//chat/send'(404) 가 되지 않게 JoinUrl 로 합친다
+	const FString SendUrl = FCloudHttp::JoinUrl(FirebaseBaseUrl, TEXT("/chat/send"));
+
+	// 채팅만 PlayFab SDK 대신 Firebase 직접 HTTP (유일한 raw HTTP 경로)
+	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> HttpRequest = FHttpModule::Get().CreateRequest();
+	HttpRequest->SetURL(SendUrl);
+	HttpRequest->SetVerb(TEXT("POST"));
+	FCloudHttp::ApplyCommonHeaders(HttpRequest, AcquireIdTokenOrLogOnce(), TEXT("application/json"));
+	HttpRequest->SetContentAsString(RequestBody);
+	// 재전송 상태를 멤버 1칸에 두면 연타 시 A 의 401 이 B 의 바디를 재전송하고 A 를 잃는다 ― 요청별로 캡처한다.
+	TWeakObjectPtr<UChatManagerSubsystem> WeakSelf(this);
+	const FString CapturedBody = RequestBody;
+	const bool bCapturedAllowRetry = bAllowRetry;
+	HttpRequest->OnProcessRequestComplete().BindLambda(
+		[WeakSelf, CapturedBody, bCapturedAllowRetry](FHttpRequestPtr Req, FHttpResponsePtr Res, bool bOk)
+		{
+			if (UChatManagerSubsystem* Self = WeakSelf.Get())
+			{
+				Self->OnSendMessageResponse(Req, Res, bOk, CapturedBody, bCapturedAllowRetry);
+			}
+		});
+	ProcessChatHttpRequest(HttpRequest);
+
+	return SendUrl;
+}
+
+void UChatManagerSubsystem::HandleAuthRejection(const FString& ResponseBody, const FString& RetryBody, bool bAllowResend)
+{
+	FCloudResponse Parsed;
+	FCloudHttp::ParseEnvelope(401, ResponseBody, Parsed);
+
+	UGameInstance* GI = GetGameInstance();
+	UFirebaseAuthSubsystem* AuthMgr = GI ? GI->GetSubsystem<UFirebaseAuthSubsystem>() : nullptr;
+	if (!AuthMgr)
+	{
+		return;
+	}
+
+	if (!bAllowResend)
+	{
+		AuthMgr->NotifyAuthRejected(Parsed.Code);
+		return;
+	}
+
+	TWeakObjectPtr<UChatManagerSubsystem> WeakSelf(this);
+	AuthMgr->NotifyAuthRejected(Parsed.Code, [WeakSelf, RetryBody](bool bRecovered)
+	{
+		// 실패 방송은 호출부(OnSendMessageResponse)가 이미 했다 ― 복구된 경우에만 재전송한다
+		if (!bRecovered)
+		{
+			return;
+		}
+		if (UChatManagerSubsystem* Self = WeakSelf.Get())
+		{
+			Self->DispatchSendRequest(RetryBody, /*bAllowRetry=*/false);
+		}
+	});
 }
 
 void UChatManagerSubsystem::StartPolling(float IntervalSeconds)
 {
+	if (ShouldSuppressHttpRequests())
+	{
+		return;
+	}
+
 	if (bIsPolling)
 	{
 		return;
@@ -232,13 +345,69 @@ void UChatManagerSubsystem::StopPolling()
 
 void UChatManagerSubsystem::PollMessages()
 {
+	if (ShouldSuppressHttpRequests())
+	{
+		return;
+	}
+
 	FetchRecentMessages(CurrentPollingChannel);
+}
+
+bool UChatManagerSubsystem::ShouldSuppressHttpRequests()
+{
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		StopPolling();
+		if (bConnectionHealthy)
+		{
+			bConnectionHealthy = false;
+			OnChatConnectionChanged.Broadcast(false);
+		}
+		return true;
+	}
+
+	if (!bCaptureIsolationEvaluated)
+	{
+		bSuppressHttpRequestsForCapture =
+			CGR::CF1CaptureSavePolicy::ShouldSuppressOnlineRequests(
+				FCommandLine::Get(), FPaths::ProjectSavedDir());
+		bCaptureIsolationEvaluated = true;
+	}
+
+	if (!bSuppressHttpRequestsForCapture)
+	{
+		return false;
+	}
+
+	bIsPolling = false;
+	if (!bCaptureIsolationMarkerLogged)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CF1Isolation] CHAT_HTTP_SUPPRESSED"));
+		bCaptureIsolationMarkerLogged = true;
+	}
+
+	return true;
+}
+
+void UChatManagerSubsystem::ProcessChatHttpRequest(
+	const TSharedRef<IHttpRequest, ESPMode::ThreadSafe>& HttpRequest)
+{
+	if (!ShouldSuppressHttpRequests())
+	{
+		HttpRequest->ProcessRequest();
+	}
 }
 
 // ===== HTTP 응답 핸들러 =====
 
-void UChatManagerSubsystem::OnSendMessageResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
+void UChatManagerSubsystem::OnSendMessageResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful,
+	const FString& SentBody, bool bAllowResend)
 {
+	if (ShouldSuppressHttpRequests())
+	{
+		if (UCGDevSettings::IsOfflineMode()) OnSendResult.Broadcast(false);
+		return;
+	}
 	if (!bWasSuccessful || !Response.IsValid())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[ChatManager] 메시지 전송 실패: HTTP 요청 에러"));
@@ -251,17 +420,55 @@ void UChatManagerSubsystem::OnSendMessageResponse(FHttpRequestPtr Request, FHttp
 	if (ResponseCode != 200)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[ChatManager] 메시지 전송 실패 (HTTP %d): %s"), ResponseCode, *Response->GetContentAsString());
+		if (ResponseCode == 401)
+		{
+			HandleAuthRejection(Response->GetContentAsString(), SentBody, bAllowResend);
+		}
 		OnSendResult.Broadcast(false);
 		OnChatError.Broadcast(FString::Printf(TEXT("메시지 전송 실패 (HTTP %d)"), ResponseCode));
 		return;
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[ChatManager] 메시지 전송 성공"));
+
+	AdvanceCursorFromSendResponse(Response->GetContentAsString());
+
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UFirebaseAuthSubsystem* AuthMgr = GI->GetSubsystem<UFirebaseAuthSubsystem>())
+		{
+			AuthMgr->NotifyAuthAccepted();
+		}
+	}
+
 	OnSendResult.Broadcast(true);
+}
+
+void UChatManagerSubsystem::AdvanceCursorFromSendResponse(const FString& ResponseBody)
+{
+	FCloudResponse Parsed;
+	FCloudHttp::ParseEnvelope(200, ResponseBody, Parsed);
+
+	FString ServerCreatedAt;
+	if (!Parsed.Root.IsValid() || !Parsed.Root->TryGetStringField(TEXT("createdAt"), ServerCreatedAt) || ServerCreatedAt.IsEmpty())
+	{
+		// 서버가 정답을 안 주면 커서를 그대로 둔다 ― 로컬 시계로 메꾸면 남의 메시지를 건너뛴다
+		UE_LOG(LogTemp, Warning, TEXT("[ChatCursor] send 응답에 createdAt 이 없음 — 커서를 전진시키지 않는다"));
+		return;
+	}
+
+	// 서버 ISO(UTC 'Z' 고정)는 사전식 비교 = 시간순. 커서는 되돌리지 않는다
+	if (ServerCreatedAt.Compare(LastMessageTimestamp, ESearchCase::CaseSensitive) > 0)
+	{
+		LastMessageTimestamp = ServerCreatedAt;
+		UE_LOG(LogTemp, Verbose, TEXT("[ChatCursor] 커서 전진 createdAt=%s"), *ServerCreatedAt);
+	}
 }
 
 void UChatManagerSubsystem::OnFetchMessagesResponse(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
 {
+	if (ShouldSuppressHttpRequests()) return;
+
 	if (!bWasSuccessful || !Response.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ChatManager] 메시지 조회 실패: HTTP 요청 에러"));
@@ -272,6 +479,11 @@ void UChatManagerSubsystem::OnFetchMessagesResponse(FHttpRequestPtr Request, FHt
 	if (Response->GetResponseCode() != 200)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ChatManager] 메시지 조회 실패 (HTTP %d)"), Response->GetResponseCode());
+		if (Response->GetResponseCode() == 401)
+		{
+			// 폴링은 3초 뒤 다시 오므로 재전송을 예약하지 않는다
+			HandleAuthRejection(Response->GetContentAsString(), FString(), /*bAllowResend=*/false);
+		}
 		HandleFetchFailure();
 		return;
 	}
@@ -338,6 +550,15 @@ void UChatManagerSubsystem::HandleFetchFailure()
 void UChatManagerSubsystem::HandleFetchSuccess()
 {
 	ConsecutiveFetchFailures = 0;
+
+	// 인증이 붙은 요청이 실제로 통과했다 ― 재인증 거절 카운터는 여기서만 리셋된다
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UFirebaseAuthSubsystem* AuthMgr = GI->GetSubsystem<UFirebaseAuthSubsystem>())
+		{
+			AuthMgr->NotifyAuthAccepted();
+		}
+	}
 
 	if (!bConnectionHealthy)
 	{

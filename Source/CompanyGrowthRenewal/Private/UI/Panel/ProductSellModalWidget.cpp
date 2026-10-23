@@ -1,14 +1,17 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Panel/ProductSellModalWidget.h"
+#include "UI/Element/Common/ModalFrameWidget.h"
 #include "UI/Element/Cards/ItemCardSlotWidget.h"
 #include "UI/Element/Trade/CountrySellRowWidget.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
 #include "UI/Element/Common/StatRowWidget.h"
+#include "UI/Element/Common/EmptyStateWidget.h"
 #include "Components/WidgetSwitcher.h"
 #include "Manager/TradePort.h"
 #include "Manager/CountryMarketManager.h"
+#include "Manager/SaveLoadManager.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/WorldMapManager.h"
 #include "Global/GlobalUtilFunctions.h"
@@ -68,9 +71,9 @@ void UProductSellModalWidget::NativeOnActivated()
 		MarketMgr = GI->GetSubsystem<UCountryMarketManager>();
 	}
 
-	if (CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
 	{
-		CloseButton->OnCloseClicked.AddDynamic(this, &UProductSellModalWidget::HandleCloseClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UProductSellModalWidget::HandleCloseClicked);
 	}
 	if (BackgroundBtn)
 	{
@@ -124,9 +127,9 @@ void UProductSellModalWidget::NativeOnActivated()
 
 void UProductSellModalWidget::NativeOnDeactivated()
 {
-	if (CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
 	{
-		CloseButton->OnCloseClicked.RemoveDynamic(this, &UProductSellModalWidget::HandleCloseClicked);
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UProductSellModalWidget::HandleCloseClicked);
 	}
 	if (BackgroundBtn)
 	{
@@ -230,21 +233,21 @@ void UProductSellModalWidget::RebuildInventoryList()
 	}
 
 	// 카드 그리드 영역의 빈 안내 — 필터/인벤 상태별 메시지
-	if (InventoryEmptyText)
+	if (InventoryEmptyState)
 	{
 		if (Items.Num() == 0)
 		{
-			InventoryEmptyText->SetText(FText::FromString(TEXT("창고가 비어 있습니다 ― 물품을 생산하면 이곳에 표시됩니다")));
-			InventoryEmptyText->SetVisibility(ESlateVisibility::HitTestInvisible);
+			InventoryEmptyState->SetMessage(FText::FromString(TEXT("창고가 비어 있습니다 ― 물품을 생산하면 이곳에 표시됩니다")));
+			InventoryEmptyState->SetVisibility(ESlateVisibility::HitTestInvisible);
 		}
 		else if (Visible.Num() == 0)
 		{
-			InventoryEmptyText->SetText(FText::FromString(TEXT("이 산업에는 보유한 물품이 없습니다")));
-			InventoryEmptyText->SetVisibility(ESlateVisibility::HitTestInvisible);
+			InventoryEmptyState->SetMessage(FText::FromString(TEXT("이 산업에는 보유한 물품이 없습니다")));
+			InventoryEmptyState->SetVisibility(ESlateVisibility::HitTestInvisible);
 		}
 		else
 		{
-			InventoryEmptyText->SetVisibility(ESlateVisibility::Collapsed);
+			InventoryEmptyState->SetVisibility(ESlateVisibility::Collapsed);
 		}
 	}
 
@@ -712,10 +715,32 @@ void UProductSellModalWidget::SetupIndustryTabGroup()
 
 	IndustryTabGroup->SetSelectionRequired(true);
 
-	if (TabAllBtn)           { IndustryTabGroup->AddWidget(TabAllBtn);           TabAllBtn->SetIsSelectable(true); }
-	if (TabElectronicsBtn)   { IndustryTabGroup->AddWidget(TabElectronicsBtn);   TabElectronicsBtn->SetIsSelectable(true); }
-	if (TabSemiconductorBtn) { IndustryTabGroup->AddWidget(TabSemiconductorBtn); TabSemiconductorBtn->SetIsSelectable(true); }
-	if (TabAutomobileBtn)    { IndustryTabGroup->AddWidget(TabAutomobileBtn);    TabAutomobileBtn->SetIsSelectable(true); }
+	// 미가용 업종(이번 출시 범위 밖) 탭은 접고 그룹에도 넣지 않는다 ― 접기만 하고 그룹에 남기면
+	// 포커스 이동이 숨은 탭을 선택해 빈 목록이 뜬다. 매니저를 못 찾으면 전부 넣는다(탭이 다 사라지는 쪽이 더 나쁘다).
+	UGameInstance* GI = GetGameInstance();
+	USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+	auto AddIndustryTab = [this, SaveMgr](UButtonWidget* Btn, ECompanyType TabIndustry)
+	{
+		if (!Btn) return;
+		if (TabIndustry != ECompanyType::None && SaveMgr && !SaveMgr->IsIndustryAvailable(TabIndustry))
+		{
+			Btn->SetVisibility(ESlateVisibility::Collapsed);
+			return;
+		}
+		// 접힌 탭만 되돌린다 ― 무조건 세팅하면 WBP 가 저작한 가시성을 덮는다.
+		// 풀에서 재사용된 위젯이 접힌 채 그룹에 들어가면 위 주석의 "숨은 탭 선택" 그 상태가 된다.
+		if (Btn->GetVisibility() == ESlateVisibility::Collapsed)
+		{
+			Btn->SetVisibility(ESlateVisibility::Visible);
+		}
+		IndustryTabGroup->AddWidget(Btn);
+		Btn->SetIsSelectable(true);
+	};
+
+	AddIndustryTab(TabAllBtn, ECompanyType::None);
+	AddIndustryTab(TabElectronicsBtn, ECompanyType::Electronics);
+	AddIndustryTab(TabSemiconductorBtn, ECompanyType::Semiconductor);
+	AddIndustryTab(TabAutomobileBtn, ECompanyType::Automobile);
 
 	IndustryTabGroup->OnSelectedButtonBaseChanged.AddDynamic(this, &UProductSellModalWidget::HandleIndustryTabChanged);
 	IndustryTabGroup->SelectButtonAtIndex(0);  // 전체 탭 기본
@@ -803,6 +828,11 @@ void UProductSellModalWidget::SortCountriesByMode()
 	TMap<UCountrySellRowWidget*, float> SortKeys;
 	const int64 PreviewQty = SelectedQuantity > 0 ? SelectedQuantity : 1;
 
+	// 미가용 업종(이번 출시 범위 밖) 셀은 국가 평균 정렬키에서 뺀다 ― 11국 루프 밖에서 한 번만 잡는다.
+	// 매니저를 못 찾으면 전부 더한다(정렬키가 뭉개지는 쪽이 더 나쁘다).
+	UGameInstance* GI = GetGameInstance();
+	USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+
 	for (UCountrySellRowWidget* Row : SpawnedCountryRows)
 	{
 		if (!Row) continue;
@@ -831,6 +861,7 @@ void UProductSellModalWidget::SortCountriesByMode()
 				{
 					if (S.Country == Row->GetCountry())
 					{
+						if (SaveMgr && !SaveMgr->IsIndustryAvailable(S.Industry)) continue;
 						Total += S.Current;
 						++Count;
 					}

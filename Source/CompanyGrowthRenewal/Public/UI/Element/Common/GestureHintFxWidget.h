@@ -12,7 +12,7 @@
  * WBP z-order 에서 HandImage 보다 먼저(아래) 배치해야 한다.
  * 상태는 소유하지 않는다 — 부모(UGestureHintWidget)가 매 틱 SetMotion 으로 주입.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UGestureHintFxWidget : public UUserWidget
 {
 	GENERATED_BODY()

@@ -14,6 +14,7 @@ class UCGGameInstance;
 class UTableManagerSubsystem;
 class AInteractableBaseActor;
 class ACityPlotActor;
+class ACityPlotWalkwayManager;
 class AVacantPlotDressingManager;
 
 //struct FSpawnerInfo;
@@ -53,8 +54,24 @@ private:
 	UPROPERTY()
 	AVacantPlotDressingManager* VacantPlotDressingManager = nullptr;
 
+	UPROPERTY()
+	ACityPlotWalkwayManager* PlotWalkwayManager = nullptr;
+
 	// 부지 중복 스폰 방지 가드
 	bool bPlotsSpawned = false;
+
+	// 소유 부지 PlotId 원장 — 세이브 직렬화의 단일 권위.
+	// ⚠ SpawnedPlots 를 세서 저장하지 말 것: World Partition 맵의 배치형 부지는 셀이 언로드되면
+	//    액터가 죽어 조회가 실패하므로, 그 상태로 저장하면 플레이어가 산 부지가 세이브에서 사라진다.
+	//    (정확히는 UPROPERTY TMap 이라 **키는 남고 값만 null** 이 된다 — 엔트리가 빠지는 게 아니다.
+	//     RegisterPlacedPlot 이 그 죽은 엔트리를 중복으로 오판하지 않게 IsValid 로 가른다.)
+	//    다른 도시 맵에 있는 동안 저장할 때 그 맵 부지 소유가 지워지는 문제도 같은 뿌리다(부지 행은 맵별 공존).
+	//    소유는 취소되지 않는 단조 상태라 원장에 쌓기만 하면 된다.
+	TSet<FName> OwnedPlotIdLedger;
+
+	// 빈 부지 소품 매니저는 월드당 1개 — 부지가 하나라도 생긴 뒤에 만든다(없으면 패치 대상이 0).
+	void EnsureVacantPlotDressingManager();
+	void EnsurePlotWalkwayManager();
 
 public:
 	// 건물 스폰 (저장 데이터로 복원 시 사용)
@@ -70,12 +87,25 @@ public:
 	// bPlotsSpawned 가드로 중복 스폰을 막는다.
 	void SpawnCityPlots();
 
+	// 레벨에 손으로 배치한 ACityPlotActor 하나를 SpawnedPlots 에 등록한다(DT 좌표 스폰과 상호 배타).
+	// 등록하지 않으면 GatherOwnedPlotIds/GetOwnedPlotAt 이 못 보므로 클릭은 되는데 건설 게이트가 전부 막는다.
+	// ⚠ 호출자 = ACityPlotActor::BeginPlay (부지가 스스로 등록). World Partition 은 BeginPlay 이후에도
+	//    셀을 스트리밍 인 하므로 서브시스템이 한 번 훑는 방식으로는 늦게 들어온 부지를 영구히 놓친다.
+	//    PlotId 로 멱등 — 이미 등록돼 있으면 false 를 돌려주고 아무것도 하지 않는다.
+	bool RegisterPlacedPlot(ACityPlotActor* Plot);
+
+	// OnWorldBeginPlay 시점에 이미 스트리밍된 배치형 부지를 선등록(나머지는 위 자가 등록이 받는다).
+	void RegisterLevelPlacedPlots();
+
 	// 로드된 세이브의 OwnedPlotIds 로 이미 스폰된 부지들의 소유 상태를 복원한다.
 	// (스폰은 OnWorldBeginPlay, 세이브 로드는 그 뒤라 분리 — SaveLoadManager 가 호출.)
 	void RestorePlotOwnership(const TArray<FName>& OwnedPlotIds);
 
-	// 세이브(gather) 단일 소스 — 현재 IsOwned() 인 부지 PlotId 를 수집한다.
-	// 구매 부지 + bOwnedAtStart 부지가 모두 SetOwnedState(true) 로 표시돼 있으므로 한 번에 직렬화된다.
+	// 부지가 소유로 전환될 때 원장에 적는다 — 유일 호출자 = ACityPlotActor::SetOwnedState.
+	// 그 한 곳으로 모아 두면 구매/시작소유/세이브복원/치트 어느 경로로 들어와도 원장이 비지 않는다.
+	void NoteOwnedPlot(FName InPlotId);
+
+	// 세이브(gather) 단일 소스 — 소유 부지 PlotId 원장을 내보낸다.
 	void GatherOwnedPlotIds(TArray<FName>& OutOwnedPlotIds) const;
 
 	// [치트] 스폰된 모든 부지를 즉시 소유 상태로(구매 게이트/결제 우회). 반환 = 새로 소유된 부지 수.
@@ -90,12 +120,21 @@ public:
 	// PlotId 로 스폰된 부지 액터 조회(없으면 nullptr). 칸별 건축가능 마스크 조회 등 PlotId→액터 경로 재사용.
 	ACityPlotActor* GetSpawnedPlotById(FName InPlotId) const;
 
+	// 튜토리얼 M28 — 회사 키가 입주한 부지(DT_CityPlot.OccupantCompanyKeys). 스폰형·배치형 모두 SpawnedPlots 에 있어 한 번에 훑는다. 스트리밍 아웃이면 nullptr
+	ACityPlotActor* FindPlotByOccupantKey(int32 CompanyKey) const;
+
 	AVacantPlotDressingManager* GetVacantPlotDressingManager() const
 	{
 		return VacantPlotDressingManager;
 	}
 
+	ACityPlotWalkwayManager* GetPlotWalkwayManager() const
+	{
+		return PlotWalkwayManager;
+	}
+
 	// [dev 프리셋] 부지 안에서 기존 건물과 겹치지 않는 배치 트랜스폼을 찾는다.
+	// 반환 트랜스폼과 AlreadyPlanned의 XY는 점유 사각형 중심이며, 메시 피벗과 다를 수 있다.
 	// 실제 배치는 UPlacementHandler::ComputePlotPlacement(private)가 드래그 입력 기반으로 산출해 재사용 불가 —
 	// 여기선 그 겹침/접지 판정만 축소 재현한다.
 	// ⚠ AlreadyPlanned = 아직 스폰 전이라 GetBuildingsOnPlot 에 안 잡히는 예정 위치들.

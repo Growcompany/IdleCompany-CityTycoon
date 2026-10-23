@@ -1,11 +1,13 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "Player/CGCheatManager.h"
+#include "GameMode/CGGameModeBase.h"
 #include "Core/CGGameInstance.h"
 #include "Kismet/GameplayStatics.h"
 #include "Manager/EmployeeManager.h"
 #include "Entity/Officeworker/Officeworker.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
+#include "Entity/Officeworker/FunnyOfficeworker.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Manager/ResourceItemManager.h"
 #include "Manager/ProductionOrderManager.h"
@@ -16,8 +18,14 @@
 #include "Manager/ProjectOperationManager.h"
 #include "Manager/ItemInventoryManager.h"
 #include "Manager/LaunchLootManagerSubsystem.h"
+#include "Enum/WidgetType.h"
 #include "Manager/SaveLoadManager.h"
+#include "Manager/SideContentSubsystem.h"
 #include "Manager/TableManagerSubsystem.h"
+#include "Table/LoadingTipTable.h"
+#include "UI/Element/Effects/ScoreOrbContainerWidget.h"
+#include "Blueprint/UserWidget.h"
+#include "Engine/GameViewportClient.h"
 #include "Data/ShippedRecord.h"
 #include "Data/ProjectBoardData.h"
 #include "Table/ProjectDataTable.h"
@@ -32,12 +40,19 @@
 #include "Manager/SpawnManager.h"
 #include "Manager/EntityManager.h"
 #include "Entity/Building/BuildingBaseActor.h"
+#include "Entity/Building/BuildingDefaultSkin.h"
 #include "Manager/UIManagerSubsystem.h"
+#include "UI/Element/SideContent/BusinessTripCardWidget.h"
+#include "UI/Panel/BusinessTripPanelWidget.h"
+#include "UObject/UObjectIterator.h"
+#include "UI/Panel/TrainingCenterPanelWidget.h"
 #include "UI/UIBase.h"
+#include "Containers/Ticker.h"
 #include "UI/Panel/InGameLayerWidget.h"
 #include "Player/MainMapPlayerController.h"
 #include "Input/CommonUIActionRouterBase.h"
 #include "Engine/LocalPlayer.h"
+#include "EngineUtils.h"
 #include "Manager/MineManager.h"
 #include "Manager/WorldMapManager.h"
 #include "Office/OfficeManager.h"
@@ -46,7 +61,8 @@
 #include "Office/DecorationActor.h"
 #include "TimeCycle/TimeCycleManager.h"
 #include "TimeCycle/TimeCycleCode.h"
-#include "Entity/Country/CountryActor.h"
+#include "TimeCycle/TimeCycleSky.h"
+#include "Enum/CountryType.h"
 #include "Entity/Factory/BrickFactory.h"
 #include "Data/FactorySaveData.h"
 #include "Data/FactoryUpgradeData.h"
@@ -56,8 +72,23 @@
 #include "Enum/LootBoxRarity.h"
 #include "Table/BuildingSkinData.h"
 #include "Kismet/GameplayStatics.h"
+#include "Manager/GameClockSubsystem.h"
+#include "Manager/QuestSubsystem.h"
+#include "Manager/AttendanceSubsystem.h"
+#include "Manager/MailboxSubsystem.h"
+#include "Manager/LiveOpsSubsystem.h"
+#include "Data/LiveOpsRules.h"
+#include "Data/GameClockRules.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+// CamInfo (카메라 측정) 용
+#include "Player/PlayerCamera.h"
+#include "Player/Components/MovementInputHandler.h"
+#include "Player/Components/CameraFramingMath.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "Camera/CameraComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCGCheat, Log, All);
 
@@ -113,15 +144,15 @@ void UCGCheatManager::Exp(int32 Amount, int32 EmployeeID)
 		return;
 	}
 
-	float OldExp = Employee->Experience;
+	const double OldExp = EmployeeMgr->GetExperience(TargetID);
 	int32 MaxExp = EmployeeMgr->GetMaxExperienceForLevel(Employee->Level);
 
 	EmployeeMgr->AddExperience(TargetID, static_cast<float>(Amount));
 
 	UE_LOG(LogTemp, Warning, TEXT("[Cheat:Exp] %s (ID:%d): %.1f -> %.1f / %d (Lv.%d)"),
-		*Employee->EmployeeName, TargetID, OldExp, Employee->Experience, MaxExp, Employee->Level);
+		*Employee->EmployeeName, TargetID, OldExp, EmployeeMgr->GetExperience(TargetID), MaxExp, Employee->Level);
 
-	if (Employee->Experience >= MaxExp)
+	if (EmployeeMgr->CanLevelUpEmployee(TargetID))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[Cheat:Exp] >>> LEVEL UP AVAILABLE!"));
 	}
@@ -181,14 +212,14 @@ void UCGCheatManager::ExpStatus()
 	for (const FEmployeeInstance& Employee : EmployeeList)
 	{
 		int32 MaxExp = EmployeeMgr->GetMaxExperienceForLevel(Employee.Level);
-		float Progress = (MaxExp > 0) ? (Employee.Experience / MaxExp * 100.0f) : 0.0f;
-		bool bCanLevelUp = Employee.Experience >= MaxExp;
+		double Progress = (MaxExp > 0) ? (EmployeeMgr->GetExperience(Employee.EmployeeID) / MaxExp * 100.0) : 0.0;
+		bool bCanLevelUp = EmployeeMgr->CanLevelUpEmployee(Employee.EmployeeID);
 
 		UE_LOG(LogTemp, Warning, TEXT("  [%d] %s | Lv.%d | %.0f/%d (%.0f%%) | Bld:%d %s"),
 			Employee.EmployeeID,
 			*Employee.EmployeeName,
 			Employee.Level,
-			Employee.Experience,
+			EmployeeMgr->GetExperience(Employee.EmployeeID),
 			MaxExp,
 			Progress,
 			Employee.AssignedBuildingIndex,
@@ -407,15 +438,15 @@ void UCGCheatManager::SetRank(int32 EnhancementLevel)
 
 void UCGCheatManager::SetStat(int32 StatIndex, int32 Value, int32 EmployeeID)
 {
-	if (StatIndex < 0 || StatIndex > 5)
+    if (StatIndex < 0 || StatIndex >= static_cast<int32>(EEmployeeStatIndex::Count))
 	{
 		// 표시명 단일 진실 = GetStatDisplayName (UMETA DisplayName 바뀌어도 경고 문구 자동 반영)
 		FString Legend;
-		for (uint8 i = 0; i < 6; ++i)
+        for (uint8 i = 0; i < static_cast<uint8>(EEmployeeStatIndex::Count); ++i)
 		{
 			Legend += FString::Printf(TEXT("%d=%s "), i, *UEmployeeStatsHelper::GetStatDisplayName(i).ToString());
 		}
-		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SetStat] StatIndex 는 0~5 (%s)"), *Legend.TrimEnd());
+        UE_LOG(LogTemp, Warning, TEXT("[Cheat:SetStat] StatIndex 는 0~%d (%s)"), static_cast<int32>(EEmployeeStatIndex::Count) - 1, *Legend.TrimEnd());
 		return;
 	}
 
@@ -455,7 +486,7 @@ void UCGCheatManager::SetStat(int32 StatIndex, int32 Value, int32 EmployeeID)
 	case 2: Employee->Stats.Composure   = ClampedValue; break;
 	case 3: Employee->Stats.ExpGain     = ClampedValue; break;
 	case 4: Employee->Stats.Stamina     = ClampedValue; break;
-	case 5: Employee->Stats.Focus       = ClampedValue; break;
+	case 5: Employee->Stats.CritDamage  = ClampedValue; break;
 	default: break;
 	}
 
@@ -513,6 +544,90 @@ void UCGCheatManager::StatStatus(int32 EmployeeID)
 	UE_LOG(LogTemp, Warning, TEXT("  Overall: %d"), UEmployeeStatsHelper::CalculateOverall(Employee->Stats));
 	UE_LOG(LogTemp, Warning, TEXT("==============================================="));
 	UE_LOG(LogTemp, Warning, TEXT(""));
+}
+
+namespace
+{
+	// 검수 표본 = 자릿수 구간 × 직능색 × 크리티컬. 한 화면에서 서로 비교할 수 있게 세로로 깐다.
+	struct FDamageDemoRow { int64 Amount; int32 Step; bool bCrit; };
+	static const FDamageDemoRow DamageDemoRows[] = {
+		{          847, 1, false },
+		{        12400, 3, false },
+		{       283455, 5, false },
+		{     45612345, 3, false },
+		{         8800, 3, true  },
+		{    912341234, 3, true  },
+	};
+	static TWeakObjectPtr<UScoreOrbContainerWidget> GDamageDemoContainer;
+}
+
+void UCGCheatManager::DamageNumberDemo(int32 bFreeze)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	UWorld* W = GetWorld();
+	APlayerController* PC = W ? W->GetFirstPlayerController() : nullptr;
+	if (!TableMgr || !PC)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:DamageNumberDemo] TableManager/PlayerController 없음"));
+		return;
+	}
+
+	TSubclassOf<UUserWidget> OrbClass = TableMgr->GetWidgetClass(EWidgetType::ScoreOrbContainer);
+	if (!OrbClass)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:DamageNumberDemo] ScoreOrbContainer 위젯 클래스 미등록"));
+		return;
+	}
+
+	DamageNumberDemoClear();
+
+	UScoreOrbContainerWidget* Container = CreateWidget<UScoreOrbContainerWidget>(PC, OrbClass);
+	if (!Container)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:DamageNumberDemo] 컨테이너 생성 실패"));
+		return;
+	}
+	Container->SetVisibility(ESlateVisibility::HitTestInvisible);
+	Container->AddToViewport(9000);   // 검수용이라 HUD 위
+	GDamageDemoContainer = Container;
+
+	// 겹침 해소가 끼면 자리가 흔들려 비교가 안 된다 — 행 간격을 넉넉히 떼어 서로 안 만나게 한다.
+	FVector2D ViewSize(1920.f, 1080.f);
+	if (GEngine && GEngine->GameViewport)
+	{
+		GEngine->GameViewport->GetViewportSize(ViewSize);
+	}
+	const int32 RowCount = UE_ARRAY_COUNT(DamageDemoRows);
+	const float Pitch = ViewSize.Y / (RowCount + 1);
+	for (int32 i = 0; i < RowCount; ++i)
+	{
+		const FDamageDemoRow& Row = DamageDemoRows[i];
+		Container->SpawnScoreNumber(FVector2D(ViewSize.X * 0.5f, Pitch * (i + 1)),
+			Row.Amount, Row.Step, Row.bCrit);
+	}
+
+	if (IConsoleVariable* Freeze = IConsoleManager::Get().FindConsoleVariable(TEXT("cg.DamageNumber.Freeze")))
+	{
+		Freeze->Set(bFreeze != 0 ? 1 : 0, ECVF_SetByConsole);
+	}
+
+	UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:DamageNumberDemo] %d행 표시 (freeze=%d). 해제 = DamageNumberDemoClear"),
+		RowCount, bFreeze);
+}
+
+void UCGCheatManager::DamageNumberDemoClear()
+{
+	if (UScoreOrbContainerWidget* Prev = GDamageDemoContainer.Get())
+	{
+		Prev->RemoveFromParent();
+	}
+	GDamageDemoContainer.Reset();
+
+	if (IConsoleVariable* Freeze = IConsoleManager::Get().FindConsoleVariable(TEXT("cg.DamageNumber.Freeze")))
+	{
+		Freeze->Set(0, ECVF_SetByConsole);
+	}
 }
 
 void UCGCheatManager::SetCrit(float Percent)
@@ -752,6 +867,251 @@ void UCGCheatManager::RevenueMax(int64 AmountPerBuilding)
 	}
 }
 
+namespace
+{
+	/** 치트가 UI 를 띄우려면 이 셋이 다 있어야 한다 — 하나라도 없으면 조용히 실패하지 않고 왜인지 남긴다. */
+	bool GetSideContentUIHosts(const TCHAR* Tag, UUIManagerSubsystem*& OutUI, UTableManagerSubsystem*& OutTable,
+		USaveLoadManager*& OutSave)
+	{
+		UCGGameInstance* GI = UCGGameInstance::GetInstance();
+		OutUI = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+		OutTable = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+		OutSave = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+		if (!OutUI || !OutUI->GetUIBase() || !OutTable || !OutSave)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Cheat:%s] UI/Table/SaveLoad 매니저 없음"), Tag);
+			return false;
+		}
+		return true;
+	}
+}
+
+void UCGCheatManager::SideOpenTraining(int32 BuildingIndex)
+{
+	UUIManagerSubsystem* UIMgr = nullptr;
+	UTableManagerSubsystem* TableMgr = nullptr;
+	USaveLoadManager* SaveMgr = nullptr;
+	if (!GetSideContentUIHosts(TEXT("SideOpenTraining"), UIMgr, TableMgr, SaveMgr)) return;
+
+	const int32 Index = ResolveSideBuilding(BuildingIndex, SaveMgr);
+	if (Index == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideOpenTraining] 보유 건물이 없음"));
+		return;
+	}
+
+	TSubclassOf<UUserWidget> WidgetClass = TableMgr->GetWidgetClass(EWidgetType::TrainingCenterPanel);
+	if (!WidgetClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideOpenTraining] DT_WidgetClass 에 TrainingCenterPanel 행이 없음"));
+		return;
+	}
+
+	UCommonActivatableWidget* Pushed = UIMgr->GetUIBase()->PushPromptClass(
+		TSubclassOf<UCommonActivatableWidget>(WidgetClass));
+	if (UTrainingCenterPanelWidget* Panel = Cast<UTrainingCenterPanelWidget>(Pushed))
+	{
+		Panel->Configure(Index, SaveMgr->GetBuildingCompanyType(Index));
+	}
+}
+
+void UCGCheatManager::SideOpenTrip(int32 BuildingIndex)
+{
+	UUIManagerSubsystem* UIMgr = nullptr;
+	UTableManagerSubsystem* TableMgr = nullptr;
+	USaveLoadManager* SaveMgr = nullptr;
+	if (!GetSideContentUIHosts(TEXT("SideOpenTrip"), UIMgr, TableMgr, SaveMgr)) return;
+
+	const int32 Index = ResolveSideBuilding(BuildingIndex, SaveMgr);
+	if (Index == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideOpenTrip] 보유 건물이 없음"));
+		return;
+	}
+
+	TSubclassOf<UUserWidget> WidgetClass = TableMgr->GetWidgetClass(EWidgetType::BusinessTripPanel);
+	if (!WidgetClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideOpenTrip] DT_WidgetClass 에 BusinessTripPanel 행이 없음"));
+		return;
+	}
+
+	UCommonActivatableWidget* Pushed = UIMgr->GetUIBase()->PushPromptClass(
+		TSubclassOf<UCommonActivatableWidget>(WidgetClass));
+	if (UBusinessTripPanelWidget* Panel = Cast<UBusinessTripPanelWidget>(Pushed))
+	{
+		Panel->Configure(Index, SaveMgr->GetBuildingCompanyType(Index));
+	}
+}
+
+void UCGCheatManager::SideSelectTripCard(int32 CardSlot)
+{
+	// 패널은 카드를 protected 로 들고 있다 — 월드에 살아 있는 카드를 직접 찾는다.
+	// TObjectIterator 는 CDO·아키타입까지 내므로 월드 소속으로 가른다.
+	TArray<UBusinessTripCardWidget*> Cards;
+	for (TObjectIterator<UBusinessTripCardWidget> It; It; ++It)
+	{
+		UBusinessTripCardWidget* Card = *It;
+		if (Card && Card->GetWorld()) { Cards.Add(Card); }
+	}
+	if (Cards.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideSelectTripCard] 열려 있는 출장 카드가 없음 — SideOpenTrip 먼저"));
+		return;
+	}
+
+	// 순회 순서는 배치 순서가 아니다 — WBP 트리 이름(Card0/1/2)으로 화면 순서를 되살린다
+	Cards.Sort([](const UBusinessTripCardWidget& A, const UBusinessTripCardWidget& B)
+	{
+		return A.GetName() < B.GetName();
+	});
+
+	const int32 Slot = FMath::Clamp(CardSlot, 0, Cards.Num() - 1);
+	const FName Key = Cards[Slot]->GetCardKey();
+	if (Key.IsNone())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideSelectTripCard] %d번 카드에 키가 없음(갱신 중?)"), Slot);
+		return;
+	}
+	Cards[Slot]->OnTripCardClicked.Broadcast(Key);
+	UE_LOG(LogTemp, Log, TEXT("[Cheat:SideSelectTripCard] %d번 카드 선택 — %s (총 %d장)"),
+		Slot, *Key.ToString(), Cards.Num());
+}
+
+int32 UCGCheatManager::ResolveSideBuilding(int32 BuildingIndex, USaveLoadManager* SaveMgr)
+{
+	if (BuildingIndex >= 0) { return BuildingIndex; }
+	if (USaveGame_GameData* SaveData = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr)
+	{
+		for (const TPair<int32, FOfficeSaveData>& Pair : SaveData->GameData.OfficeDataMap)
+		{
+			return Pair.Key;
+		}
+	}
+	return INDEX_NONE;
+}
+
+void UCGCheatManager::SideFillCrew(int32 BuildingIndex, int32 Count)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UEmployeeManager* EmployeeMgr = GI ? GI->GetSubsystem<UEmployeeManager>() : nullptr;
+	USideContentSubsystem* Side = GI ? GI->GetSubsystem<USideContentSubsystem>() : nullptr;
+	USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+	if (!EmployeeMgr || !Side || !SaveMgr)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideFillCrew] 매니저 없음"));
+		return;
+	}
+
+	const int32 Index = ResolveSideBuilding(BuildingIndex, SaveMgr);
+	if (Index == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideFillCrew] 보유 건물이 없음"));
+		return;
+	}
+
+	int32 Moved = 0;
+	for (const FEmployeeInstance& Employee : EmployeeMgr->GetAllEmployees())
+	{
+		if (Moved >= Count) { break; }
+		if (Employee.AssignedBuildingIndex == Index) { continue; }
+		if (EmployeeMgr->AssignEmployeeToBuilding(Employee.EmployeeID, Index)) { ++Moved; }
+	}
+
+	const int32 Course = Side->GetCurrentCourse(Index);
+	UE_LOG(LogTemp, Log, TEXT("[Cheat:SideFillCrew] 건물 %d <- %d명 이동. 배치 전원 %d · 팀 파워 %.0f / 과정 %d 요구 %.0f"),
+		Index, Moved, EmployeeMgr->GetEmployeeCountInBuilding(Index), Side->GetTrainingTeamPower(Index),
+		Course, Side->GetCourseRequirement(Course));
+}
+
+void UCGCheatManager::SideSetTraining(int32 BuildingIndex, int32 CourseBest, int32 Entries)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	USideContentSubsystem* Side = GI ? GI->GetSubsystem<USideContentSubsystem>() : nullptr;
+	USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+	if (!Side || !SaveMgr)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideSetTraining] 매니저 없음"));
+		return;
+	}
+
+	const int32 Index = ResolveSideBuilding(BuildingIndex, SaveMgr);
+	if (Index == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideSetTraining] 보유 건물이 없음"));
+		return;
+	}
+
+	Side->DebugSetTraining(Index, CourseBest, Entries);
+	UE_LOG(LogTemp, Log, TEXT("[Cheat:SideSetTraining] 건물 %d -> 과정 %d · 입장권 %d"),
+		Index, Side->GetCurrentCourse(Index), Side->GetTrainingEntries(Index));
+}
+
+void UCGCheatManager::SideOpenSkyline()
+{
+	UUIManagerSubsystem* UIMgr = nullptr;
+	UTableManagerSubsystem* TableMgr = nullptr;
+	USaveLoadManager* SaveMgr = nullptr;
+	if (!GetSideContentUIHosts(TEXT("SideOpenSkyline"), UIMgr, TableMgr, SaveMgr)) return;
+
+	TSubclassOf<UUserWidget> WidgetClass = TableMgr->GetWidgetClass(EWidgetType::SkylineScreen);
+	if (!WidgetClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideOpenSkyline] DT_WidgetClass 에 SkylineScreen 행이 없음"));
+		return;
+	}
+
+	// 프롬프트가 아니라 메뉴 스택이다 — HUD 를 덮는 전용 화면이라 MenuPanelWidget 의 분기와 같은 경로로 띄운다
+	UIMgr->GetUIBase()->PushMenuClass(TSubclassOf<UCommonActivatableWidget>(WidgetClass));
+}
+
+void UCGCheatManager::SideOpenFusion()
+{
+	UUIManagerSubsystem* UIMgr = nullptr;
+	UTableManagerSubsystem* TableMgr = nullptr;
+	USaveLoadManager* SaveMgr = nullptr;
+	if (!GetSideContentUIHosts(TEXT("SideOpenFusion"), UIMgr, TableMgr, SaveMgr)) return;
+	const TSubclassOf<UUserWidget> WidgetClass = TableMgr->GetWidgetClass(EWidgetType::FusionProjectPanel);
+	if (!WidgetClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideOpenFusion] DT_WidgetClass FusionProjectPanel row is missing"));
+		return;
+	}
+	UIMgr->GetUIBase()->PushPromptClass(TSubclassOf<UCommonActivatableWidget>(WidgetClass));
+}
+
+void UCGCheatManager::SideSetFusion(FName FusionKey, int32 Level, int32 RemainingSeconds)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	USideContentSubsystem* Side = GI ? GI->GetSubsystem<USideContentSubsystem>() : nullptr;
+	if (!Side)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideSetFusion] SideContentSubsystem is unavailable"));
+		return;
+	}
+	Side->DebugSetFusion(FusionKey, Level, RemainingSeconds);
+	UE_LOG(LogTemp, Log, TEXT("[Cheat:SideSetFusion] %s level=%d active=%s remaining=%d claimable=%d"),
+		*FusionKey.ToString(), Side->GetFusionLevel(FusionKey), *Side->GetSideContentData().FusionActiveKey.ToString(),
+		Side->GetFusionRemainingSeconds(), Side->IsFusionClaimable());
+}
+
+void UCGCheatManager::SideSetSkyline(int32 BestFloor, int32 Entries)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	USideContentSubsystem* Side = GI ? GI->GetSubsystem<USideContentSubsystem>() : nullptr;
+	if (!Side)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cheat:SideSetSkyline] 매니저 없음"));
+		return;
+	}
+
+	// 상한은 GetSkylineMaxFloor 가 잡는 게 아니라 DT 가 잡는다 — 여기서 자르면 「100 을 넣었는데 99」 가 된다
+	Side->DebugSetSkyline(BestFloor, Entries);
+
+	UE_LOG(LogTemp, Log, TEXT("[Cheat:SideSetSkyline] 최고 %d층 · 입장권 %d · 수익 배율 x%.2f"),
+		Side->GetBestFloor(), Side->GetSkylineEntries(), Side->GetSkylineRevenueMultiplier());
+}
+
 void UCGCheatManager::ShowOfflineReport(int32 OfflineHours, int32 bZeroGain, int32 FakeRows)
 {
 	UCGGameInstance* GI = UCGGameInstance::GetInstance();
@@ -825,11 +1185,14 @@ void UCGCheatManager::ShowOfflineReport(int32 OfflineHours, int32 bZeroGain, int
 	}
 
 	const bool bCapReached = (Hours >= 12);
-	SaveLoadMgr->DebugSetPendingOfflineReport(Total, Hours * 3600.0f, Entries, bCapReached);
+	// 벽돌 줄도 표시 경로를 타게 한다 — 실제 공장 생산율이 아니라 시간에 비례한 더미값.
+	// Exec 인자를 늘리면 치트 문서 2종을 같이 갱신해야 하므로 Hours 에서 파생시킨다.
+	const int64 FakeBricks = bZero ? 0 : static_cast<int64>(Hours) * 100;
+	SaveLoadMgr->DebugSetPendingOfflineReport(Total, Hours * 3600.0f, Entries, bCapReached, FakeBricks);
 	UIMgr->TryShowOfflineReport();
 
-	UE_LOG(LogTemp, Warning, TEXT("[Cheat:ShowOfflineReport] %d행, 총 %.0f원, %dh, 캡=%s, zero=%s"),
-		Entries.Num(), Total, Hours, bCapReached ? TEXT("Y") : TEXT("N"), bZero ? TEXT("Y") : TEXT("N"));
+	UE_LOG(LogTemp, Warning, TEXT("[Cheat:ShowOfflineReport] %d행, 총 %.0f원, 벽돌 %lld개, %dh, 캡=%s, zero=%s"),
+		Entries.Num(), Total, FakeBricks, Hours, bCapReached ? TEXT("Y") : TEXT("N"), bZero ? TEXT("Y") : TEXT("N"));
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Cyan,
@@ -1067,6 +1430,83 @@ void UCGCheatManager::UnlockSkins(int32 Count)
 
 	UE_LOG(LogTemp, Warning, TEXT("[Cheat:UnlockSkins] Total unlocked: %d / %d requested (Remaining unowned: %d)"),
 		ActualCount, Count, UnownedSkins.Num() - ActualCount);
+}
+
+void UCGCheatManager::BldDefaultSkins()
+{
+	UWorld* CurrentWorld = GetWorld();
+	UEntityManager* EntityMgr = CurrentWorld ? CurrentWorld->GetSubsystem<UEntityManager>() : nullptr;
+	UCGGameInstance* GameInstance = CurrentWorld ? CurrentWorld->GetGameInstance<UCGGameInstance>() : nullptr;
+	USaveLoadManager* SaveMgr = GameInstance ? GameInstance->GetSubsystem<USaveLoadManager>() : nullptr;
+	if (!EntityMgr || !SaveMgr || !CurrentWorld->GetMapName().Contains(TEXT("MainMap"))
+		|| GameInstance->IsVisitMode() || SaveMgr->IsSaveLockedForDevMode())
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:BldDefaultSkins] Requires the player's city with saves enabled"));
+		return;
+	}
+
+	// 전체 저장에 미확정 배치 좌표가 포함되지 않도록 배치가 끝난 뒤에만 실행한다.
+	for (ABuildingBaseActor* Building : EntityMgr->GetBuildings())
+	{
+		if (IsValid(Building) && (Building->ActorHasTag(TEXT("PlacementMode")) || Building->ActorHasTag(TEXT("Build"))))
+		{
+			UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:BldDefaultSkins] Finish or cancel building placement before running"));
+			return;
+		}
+	}
+
+	int32 ChangedCount = 0;
+	for (ABuildingBaseActor* Building : EntityMgr->GetBuildings())
+	{
+		if (!IsValid(Building) || !Building->ActorHasTag(TEXT("Building"))
+			|| Building->ActorHasTag(TEXT("PlacementMode")) || Building->GetAppliedSkinID() != 100)
+		{
+			continue;
+		}
+
+		const int32 DefaultSkinID = CGBuildingDefaultSkin::FindDefaultSkinID(Building->GetBuildingID());
+		if (DefaultSkinID == INDEX_NONE)
+		{
+			UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:BldDefaultSkins] No default skin for %s; skipped"),
+				*Building->GetBuildingID().ToString());
+			continue;
+		}
+		if (DefaultSkinID == 100)
+		{
+			continue;
+		}
+
+		Building->ApplySkin(DefaultSkinID, true);
+		if (Building->GetAppliedSkinID() != DefaultSkinID)
+		{
+			UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:BldDefaultSkins] Failed to apply skin to building %d; stopped"), Building->GetBuildingIndex());
+			return;
+		}
+
+		// ApplySkin의 저장 호출은 결과를 반환하지 않으므로 캐시가 아닌 디스크를 확인한다.
+		const int32 ChangedBuildingIndex = Building->GetBuildingIndex();
+		const USaveGame_GameData* DiskSave = Cast<USaveGame_GameData>(
+			UGameplayStatics::LoadGameFromSlot(SaveMgr->GetActiveSaveSlotName(), 0));
+		const FBuildingEntitySaveData* DiskBuilding = DiskSave ? DiskSave->GameData.Buildings.FindByPredicate(
+			[ChangedBuildingIndex](const FBuildingEntitySaveData& Entry) { return Entry.BuildingIndex == ChangedBuildingIndex; }) : nullptr;
+		if (!DiskBuilding || DiskBuilding->BuildingData.AppliedSkinID != DefaultSkinID)
+		{
+			Building->ApplySkin(100, false);
+			if (USaveGame_GameData* CachedSave = SaveMgr->GetCurrentSaveData())
+			{
+				if (FBuildingEntitySaveData* CachedBuilding = CachedSave->GameData.Buildings.FindByPredicate(
+					[ChangedBuildingIndex](const FBuildingEntitySaveData& Entry) { return Entry.BuildingIndex == ChangedBuildingIndex; }))
+				{
+					CachedBuilding->BuildingData.AppliedSkinID = 100;
+				}
+			}
+			UE_LOG(LogCGCheat, Error, TEXT("[Cheat:BldDefaultSkins] Disk verification failed for building %d; restored skin 100 and stopped after %d saved changes"),
+				ChangedBuildingIndex, ChangedCount);
+			return;
+		}
+		++ChangedCount;
+	}
+	UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:BldDefaultSkins] Reassigned %d buildings; non-100 skins preserved"), ChangedCount);
 }
 
 void UCGCheatManager::BldLightsOn(int32 bOn)
@@ -1569,6 +2009,52 @@ void UCGCheatManager::CamBand(float InPitch, float OutPitch, float InFOV, float 
 	}
 }
 
+void UCGCheatManager::CamPose()
+{
+	APlayerController* PC = GetOuterAPlayerController();
+	AOfficeCameraPawn* Pawn = PC ? Cast<AOfficeCameraPawn>(PC->GetPawn()) : nullptr;
+	if (!Pawn)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:CamPose] OfficeMap에서 possess한 OfficeCameraPawn이 필요함"));
+		return;
+	}
+
+	int32 InteriorCount = 0;
+	AOfficeInterior* Interior = nullptr;
+	for (TActorIterator<AOfficeInterior> InteriorIt(Pawn->GetWorld()); InteriorIt; ++InteriorIt)
+	{
+		++InteriorCount;
+		Interior = InteriorCount == 1 ? *InteriorIt : nullptr;
+	}
+	if (InteriorCount != 1 || !IsValid(Interior))
+	{
+		UE_LOG(
+			LogCGCheat,
+			Warning,
+			TEXT("[Cheat:CamPose] 유효한 OfficeInterior가 정확히 하나여야 함 (현재 %d)"),
+			InteriorCount);
+		return;
+	}
+
+	int32 ViewportWidth = 0;
+	int32 ViewportHeight = 0;
+	PC->GetViewportSize(ViewportWidth, ViewportHeight);
+	if (ViewportWidth <= 0 || ViewportHeight <= 0)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:CamPose] 유효한 viewport가 필요함"));
+		return;
+	}
+
+	FString PoseLine;
+	if (!Pawn->TryBuildCameraPoseLog(Interior, FIntPoint(ViewportWidth, ViewportHeight), PoseLine))
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:CamPose] 현재 카메라 포즈를 기록할 수 없음"));
+		return;
+	}
+
+	UE_LOG(LogCGCheat, Warning, TEXT("%s"), *PoseLine);
+}
+
 // ========== 튜토리얼 (미션 점프) ==========
 
 void UCGCheatManager::SkipToMission(const FString& MissionRowName)
@@ -1618,6 +2104,37 @@ void UCGCheatManager::ResetTutorial()
 }
 
 // ========== 미션판 (UGoalBoardSubsystem) ==========
+
+// ========== 개발자 모드 ==========
+
+void UCGCheatManager::DevMode()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	if (!GI)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:DevMode] GameInstance not found"));
+		return;
+	}
+
+	USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>();
+	UMissionManagerSubsystem* MissionMgr = GI->GetSubsystem<UMissionManagerSubsystem>();
+	if (!SaveMgr || !MissionMgr)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:DevMode] SaveLoadManager / MissionManager not found"));
+		return;
+	}
+
+	// 봉인이 먼저다 — 아래 단계들이 저장을 부르므로, 순서가 뒤집히면 치트 상태가 디스크에 박힌다.
+	SaveMgr->LockSavesForDevMode();
+	MissionMgr->ApplyDevModeCheat();
+
+	UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:DevMode] 튜토리얼 종료 + 미션판 언락 + 자원 Rich + HQ20. 이 세션은 저장되지 않는다."));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Yellow,
+			TEXT("[Cheat] DevMode ON - 저장 봉인됨 (재시작하면 전부 사라짐)"));
+	}
+}
 
 void UCGCheatManager::UnlockGoalBoard()
 {
@@ -1772,6 +2289,58 @@ void UCGCheatManager::Day()
 void UCGCheatManager::Night()
 {
 	SetTime(0, 0);
+}
+
+namespace
+{
+	// 노을 정점 시각을 하늘에서 파생한다. 상수로 박으면 맵마다 틀린다 —
+	// MainMap(황혼 2h, 꼬리 0)은 18:00, WP_Office(황혼 3h, 꼬리 1.5h)는 19:00 이 정점이다.
+	bool TryGetCheatTwilightHour(const UWorld* World, bool bDawn, float& OutHour)
+	{
+		if (!World) { return false; }
+		ATimeCycleSky* Sky = Cast<ATimeCycleSky>(
+			UGameplayStatics::GetActorOfClass(const_cast<UWorld*>(World), ATimeCycleSky::StaticClass()));
+		if (!Sky) { return false; }
+		OutHour = Sky->GetTwilightApexHour(bDawn);
+		return FMath::IsFinite(OutHour);
+	}
+}
+
+void UCGCheatManager::Dusk()
+{
+	float ApexHour = 0.0f;
+	if (!TryGetCheatTwilightHour(GetWorld(), /*bDawn*/ false, ApexHour))
+	{
+		// 하늘이 없으면 노을 폭을 모른다 — 시계의 일몰로 폴백하고 그 사실을 남긴다.
+		ATimeCycleManager* Mgr = GetTimeCycleManager();
+		if (!Mgr) { return; }
+		const FTimeCycleCode SetCode = Mgr->GetSunSetTime();
+		UE_LOG(LogCGCheat, Warning,
+			TEXT("[Cheat:Dusk] TimeCycleSky 없음 — 노을 정점 대신 일몰 %02d:%02d 로 폴백"),
+			SetCode.Hours, SetCode.Minutes);
+		SetTime(SetCode.Hours, SetCode.Minutes);
+		return;
+	}
+	const int32 Hour = FMath::FloorToInt32(ApexHour);
+	SetTime(Hour, FMath::RoundToInt32((ApexHour - Hour) * 60.0f));
+}
+
+void UCGCheatManager::Dawn()
+{
+	float ApexHour = 0.0f;
+	if (!TryGetCheatTwilightHour(GetWorld(), /*bDawn*/ true, ApexHour))
+	{
+		ATimeCycleManager* Mgr = GetTimeCycleManager();
+		if (!Mgr) { return; }
+		const FTimeCycleCode RiseCode = Mgr->GetSunRiseTime();
+		UE_LOG(LogCGCheat, Warning,
+			TEXT("[Cheat:Dawn] TimeCycleSky 없음 — 노을 정점 대신 일출 %02d:%02d 로 폴백"),
+			RiseCode.Hours, RiseCode.Minutes);
+		SetTime(RiseCode.Hours, RiseCode.Minutes);
+		return;
+	}
+	const int32 Hour = FMath::FloorToInt32(ApexHour);
+	SetTime(Hour, FMath::RoundToInt32((ApexHour - Hour) * 60.0f));
 }
 
 void UCGCheatManager::SetTime(int32 Hour, int32 Minute)
@@ -2057,7 +2626,7 @@ void UCGCheatManager::UnlockFactoryAuto()
 
 		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:UnlockFactoryAuto] %s -> 자동 수집 해금 (간격 %.3fs / 용량 %.0f)"),
 			*Factory->GetName(),
-			Factory->GetUpgradeValue(EFactoryUpgradeType::AutoCollection),
+			Factory->GetUpgradeValue(EFactoryUpgradeType::LaborerCount),
 			Factory->GetUpgradeValue(EFactoryUpgradeType::AutoCollectionCapacity));
 	}
 
@@ -2119,6 +2688,45 @@ void UCGCheatManager::CG_DumpUI()
 	}
 }
 
+namespace
+{
+	// 쇼플래그는 종류 단위라 "하늘돔만/바다판만" 을 못 가른다 — 이름 부분일치로 프리미티브를 직접 끈다(실기기 GPU 비용 귀속).
+	int32 SetPrimitiveVisibilityByName(UWorld* World, const FString& Needle, bool bVisible)
+	{
+		int32 Count = 0;
+		if (!World || Needle.IsEmpty()) { return Count; }
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			const bool bActorMatch = It->GetName().Contains(Needle) || It->GetClass()->GetName().Contains(Needle);
+			for (UActorComponent* Comp : It->GetComponents())
+			{
+				UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Comp);
+				if (!Prim) { continue; }
+				const UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(Prim);
+				const bool bMeshMatch = SMC && SMC->GetStaticMesh() && SMC->GetStaticMesh()->GetName().Contains(Needle);
+				if (bActorMatch || bMeshMatch)
+				{
+					Prim->SetVisibility(bVisible, false);
+					++Count;
+				}
+			}
+		}
+		return Count;
+	}
+}
+
+void UCGCheatManager::CG_HideMesh(const FString& NameSubstring)
+{
+	const int32 Count = SetPrimitiveVisibilityByName(GetWorld(), NameSubstring, false);
+	UE_LOG(LogCGCheat, Warning, TEXT("[CG_HideMesh] '%s' 부분일치 프리미티브 %d개 숨김"), *NameSubstring, Count);
+}
+
+void UCGCheatManager::CG_ShowMesh(const FString& NameSubstring)
+{
+	const int32 Count = SetPrimitiveVisibilityByName(GetWorld(), NameSubstring, true);
+	UE_LOG(LogCGCheat, Warning, TEXT("[CG_ShowMesh] '%s' 부분일치 프리미티브 %d개 표시"), *NameSubstring, Count);
+}
+
 void UCGCheatManager::CG_UnlockInput()
 {
 	AMainMapPlayerController* MainPC = Cast<AMainMapPlayerController>(GetOuterAPlayerController());
@@ -2143,6 +2751,65 @@ void UCGCheatManager::CG_UnlockInput()
 	if (GEngine)
 	{
 		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Green, TEXT("[CG_UnlockInput] 입력모드 Normal + 라우터 All 복원"));
+	}
+}
+
+// 레벨 전환 오버레이 ─────────────────────────────────────────
+
+void UCGCheatManager::CG_PreviewTransition(float Seconds, FString TipKey)
+{
+#if !UE_BUILD_SHIPPING
+	UCGGameInstance* GI = Cast<UCGGameInstance>(UGameplayStatics::GetGameInstance(this));
+	if (!GI)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[CG_PreviewTransition] CGGameInstance 없음"));
+		return;
+	}
+	// PreviewLevelTransition 자체가 Shipping 에 없다 ― 치트 cpp 는 Shipping 에서도 컴파일된다
+	GI->PreviewLevelTransition(Seconds, TipKey);
+#endif
+}
+
+void UCGCheatManager::CG_PreviewCityOpening()
+{
+#if !UE_BUILD_SHIPPING
+	UWorld* World = GetWorld();
+	ACGGameModeBase* CityMode = World ? World->GetAuthGameMode<ACGGameModeBase>() : nullptr;
+	if (!CityMode || !CityMode->PreviewCityOpening())
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[CG_PreviewCityOpening] 미리보기를 시작할 수 없습니다 (자세한 상태는 CityOpening 로그 확인)."));
+	}
+#endif
+}
+
+void UCGCheatManager::CG_ListTips()
+{
+	UGameInstance* GI = UGameplayStatics::GetGameInstance(this);
+	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	if (!TableMgr)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[CG_ListTips] TableManager 없음"));
+		return;
+	}
+	const TArray<FLoadingTipTable>& Rows = TableMgr->GetLoadingTips();
+	const UEnum* ContextEnum = StaticEnum<ELoadingTipContext>();
+	int32 Overlong = 0;
+	for (const FLoadingTipTable& Row : Rows)
+	{
+		const FString Body = Row.Body.ToString();
+		const bool bOverlong = Body.Len() > FLoadingTipRules::MaxBodyChars;
+		Overlong += bOverlong ? 1 : 0;
+		UE_LOG(LogCGCheat, Warning, TEXT("[CG_ListTips] %-14s %-10s %-12s w=%-3d len=%-3d%s | %s"),
+			*Row.TipKey.ToString(), *Row.Category.ToString(),
+			ContextEnum ? *ContextEnum->GetNameStringByValue(static_cast<int64>(Row.Context)) : TEXT("?"),
+			Row.Weight, Body.Len(), bOverlong ? TEXT(" OVER") : TEXT(""), *Body);
+	}
+	UE_LOG(LogCGCheat, Warning, TEXT("[CG_ListTips] %d행 (상한 %d자 초과 %d행)"),
+		Rows.Num(), FLoadingTipRules::MaxBodyChars, Overlong);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.0f, Overlong > 0 ? FColor::Yellow : FColor::Green,
+			FString::Printf(TEXT("[CG_ListTips] %d행 / 초과 %d행 (상세는 Output Log)"), Rows.Num(), Overlong));
 	}
 }
 
@@ -2357,6 +3024,42 @@ void UCGCheatManager::WorkerSpeedStatus()
 	}
 }
 
+// ========== 직원 얼굴 ==========
+
+void UCGCheatManager::Face_Set(int32 ExpressionIndex)
+{
+	UWorld* W = GetWorld();
+	if (!W) return;
+
+	const int32 MaxIndex = static_cast<int32>(EWorkerFaceExpression::Max);
+	if (ExpressionIndex < -1 || ExpressionIndex >= MaxIndex)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:Face_Set] 표정 번호는 -1(해제) 또는 0~%d"), MaxIndex - 1);
+		return;
+	}
+	const EWorkerFaceExpression Expression = ExpressionIndex < 0
+		? EWorkerFaceExpression::Max : static_cast<EWorkerFaceExpression>(ExpressionIndex);
+
+	int32 Applied = 0;
+	for (TActorIterator<AFunnyOfficeworker> It(W); It; ++It)
+	{
+		AFunnyOfficeworker* Worker = *It;
+		// 증명사진 리그는 촬영 스냅샷이라 고정 표정이 사진에 박히면 안 된다
+		if (!Worker || Worker->bIsPortraitMode) continue;
+		Worker->SetDebugFaceOverride(Expression);
+		++Applied;
+	}
+
+	const FString Label = ExpressionIndex < 0 ? FString(TEXT("해제"))
+		: StaticEnum<EWorkerFaceExpression>()->GetDisplayNameTextByValue(ExpressionIndex).ToString();
+	UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:Face_Set] 직원 %d명 표정 = %d (%s)"), Applied, ExpressionIndex, *Label);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Green,
+			FString::Printf(TEXT("[Face_Set] %d명 → %d %s"), Applied, ExpressionIndex, *Label));
+	}
+}
+
 // ========== 프로젝트 진척 / 도감 ==========
 
 namespace
@@ -2368,6 +3071,7 @@ namespace
 		UTableManagerSubsystem* TableMgr = nullptr;
 		USaveGame_GameData* SaveData = nullptr;
 		ECompanyType Industry = ECompanyType::Game;
+		int32 BuildingIndex = INDEX_NONE;
 		bool bOK = false;
 	};
 
@@ -2392,6 +3096,12 @@ namespace
 			return Ctx;
 		}
 		Ctx.Industry = GI->GetCurrentBuildingCompanyType();
+		Ctx.BuildingIndex = GI->GetCurrentManagedBuildingIndex();
+		if (Ctx.BuildingIndex < 0)
+		{
+			UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:%s] 현재 관리 건물 없음"), Tag);
+			return Ctx;
+		}
 		Ctx.bOK = true;
 		return Ctx;
 	}
@@ -2421,14 +3131,10 @@ void UCGCheatManager::Proj_Seed(int32 Count, int32 Review)
 
 		const int32 NewReview = (Review > 0) ? FMath::Clamp(Review, 1, 40) : FMath::RandRange(12, 34);
 
-		// 실제 출시 경로(ComputeReviewAndDiscovery)와 같은 upsert 규칙 —
-		// 치트가 blind Add 를 하면 실제 플레이로는 생길 수 없는 '같은 인덱스 2행' 상태가 만들어진다.
+		// 실제 출시 경로(ComputeReviewAndDiscovery)와 같은 건물별 갱신 규칙.
 		const ECompanyType SeedIndustry = Ctx.Industry;
-		FShippedProjectRecord* Existing = Ctx.SaveData->GameData.ShippedProjects.FindByPredicate(
-			[Idx, SeedIndustry](const FShippedProjectRecord& R)
-			{
-				return R.ProjectIndex == Idx && R.Industry == SeedIndustry;
-			});
+		FShippedProjectRecord* Existing = ShippedProjectRecords::Find(
+			Ctx.SaveData->GameData.ShippedProjects, Ctx.BuildingIndex, SeedIndustry, Idx);
 
 		if (Existing)
 		{
@@ -2441,6 +3147,7 @@ void UCGCheatManager::Proj_Seed(int32 Count, int32 Review)
 				? FString::Printf(TEXT("%s %s"), *Row.Material.ToString(), *Row.Genre.ToString())
 				: Row.ProjectName.ToString();
 			Rec.Industry = SeedIndustry;
+			Rec.BuildingIndex = Ctx.BuildingIndex;
 			Rec.ProjectIndex = Idx;
 			Rec.Genre = Row.Genre;
 			Rec.Material = Row.Material;
@@ -2480,10 +3187,11 @@ void UCGCheatManager::Proj_ClearHistory()
 	Progress.MilestoneRewardedTiers.Empty();
 	Progress.bAllProjectsMilestoneRewarded = false;
 	Ctx.StageMgr->SetTierProgress(Progress);
-	Ctx.StageMgr->SyncTierProgressToSave();
 
-	const int32 HadShip = Ctx.SaveData->GameData.ShippedProjects.Num();
-	Ctx.SaveData->GameData.ShippedProjects.Empty();
+	const int32 HadShip = Ctx.SaveData->GameData.ShippedProjects.RemoveAll(
+		[BuildingIndex = Ctx.BuildingIndex](const FShippedProjectRecord& Record)
+		{ return Record.BuildingIndex == BuildingIndex; });
+	Ctx.StageMgr->SyncTierProgressToSave();
 
 	UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:Proj_ClearHistory] 개발이력 %d건 / 출시기록 %d건 삭제"), HadDev, HadShip);
 }
@@ -2497,7 +3205,7 @@ void UCGCheatManager::Proj_State()
 	int32 Shipped = 0;
 	for (const FShippedProjectRecord& Rec : Ctx.SaveData->GameData.ShippedProjects)
 	{
-		if (Rec.Industry == Ctx.Industry) { ++Shipped; }
+		if (Rec.Industry == Ctx.Industry && Rec.BuildingIndex == Ctx.BuildingIndex) { ++Shipped; }
 	}
 
 	UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:Proj_State] 산업=%s 티어=%d 개발이력=%d 출시기록=%d"),
@@ -2555,19 +3263,37 @@ namespace CGProdCheat
 		if (bProjOk && !Proj.ProjectName.IsEmpty()) ProductName = Proj.ProjectName.ToString();
 
 		EResourceType Bottleneck = EResourceType::None;
-		bool bMaterialBound = false;
-		const int32 MaxProducible = OrderMgr->GetMaxProducible(Order, Bottleneck, bMaterialBound);
+		bool bSupplyBound = false;
+		const int32 MaxProducible = OrderMgr->GetMaxProducible(Order, Bottleneck, bSupplyBound);
 		const UEnum* ResEnum = StaticEnum<EResourceType>();
+
+		// 병목 이름이 비면(Bottleneck=None) 제품 입력(칩)이 상한을 정한 것 — 자원 열거값을 그대로 찍으면
+		// 칩 체인이 정상인데도 "None 부족" 으로 보여 CSV 검증이 오판한다. 인덱스·소요까지 찍어 행을 바로 대조한다.
+		FString BoundName = EnumStr(ResEnum, static_cast<int64>(Bottleneck));
+		if (bSupplyBound && Bottleneck == EResourceType::None)
+		{
+			bool bRecipeOk = false;
+			const FProductRecipeTable Recipe = TableMgr->GetProductRecipe(Order.CompanyType, Order.ProjectIndex, bRecipeOk);
+			int32 NeedIndex = 0;
+			int32 NeedQty = 0;
+			if (bRecipeOk && Recipe.GetProductInput(NeedIndex, NeedQty))
+			{
+				bool bInputOk = false;
+				const FProjectData InputProj = TableMgr->GetProjectData(Order.CompanyType, NeedIndex, bInputOk);
+				const FString InputName = (bInputOk && !InputProj.ProjectName.IsEmpty())
+					? InputProj.ProjectName.ToString() : FString(TEXT("?"));
+				BoundName = FString::Printf(TEXT("제품idx%d %s x%d"), NeedIndex, *InputName, NeedQty);
+			}
+		}
 
 		FString Cap;
 		if (MaxProducible <= 0)
 		{
-			Cap = FString::Printf(TEXT("제작불가(%s 부족)"), *EnumStr(ResEnum, static_cast<int64>(Bottleneck)));
+			Cap = FString::Printf(TEXT("제작불가(%s 부족)"), *BoundName);
 		}
-		else if (bMaterialBound)
+		else if (bSupplyBound)
 		{
-			Cap = FString::Printf(TEXT("%d개까지(상한 %s)"), MaxProducible,
-				*EnumStr(ResEnum, static_cast<int64>(Bottleneck)));
+			Cap = FString::Printf(TEXT("%d개까지(상한 %s)"), MaxProducible, *BoundName);
 		}
 		else
 		{
@@ -2806,8 +3532,9 @@ void UCGCheatManager::Fac_FillLines(const FString& CountryName)
 	// 재료 차감 없는 더미 라인 - "라인 가득" UI 상태만 만들기 위한 것
 	while (FactoryMgr->GetActiveLineCount(Country) < Max)
 	{
+		// 업종 없음 = 수령해도 창고에 완제품이 생기지 않는 더미
 		const int32 Id = FactoryMgr->StartProduction(
-			Country, /*ProductIndex=*/1,
+			Country, ECompanyType::None, /*ProductIndex=*/1,
 			FText::FromString(TEXT("치트 더미")), NoIcon,
 			/*BaseRatePerSecond=*/0.01f, /*TargetQty=*/9999);
 		if (Id <= 0) break;
@@ -2838,18 +3565,19 @@ void UCGCheatManager::Fac_ClearLines(const FString& CountryName)
 	ECountryType Country;
 	if (!CGProdCheat::ResolveCountry(CountryName, TEXT("Fac_ClearLines"), Country)) return;
 
-	// Claim 이 원본 배열에서 라인을 지우므로 ID 로 먼저 떠 둔다 (인덱스는 매 Claim 마다 밀린다)
-	TArray<int32> LineIds;
-	for (const FWorldFactoryLineState& Line : FactoryMgr->GetActiveLines(Country))
-	{
-		LineIds.Add(Line.LineId);
-	}
+	// 수령은 라인을 남기므로(계속 생산) 실제 라인만 수령해 완제품을 받고, 슬롯은 RemoveLine 으로 비운다.
+	// RemoveLine 이 원본 배열을 줄이므로 사본으로 돈다.
+	const TArray<FWorldFactoryLineState> Lines = FactoryMgr->GetActiveLines(Country);
 
 	int32 Cleared = 0;
-	for (int32 Id : LineIds)
+	for (const FWorldFactoryLineState& Line : Lines)
 	{
-		FactoryMgr->InstantFinishLine(Country, Id);   // 더미는 완주에 수일 — 시간을 앞으로 당긴다
-		if (FactoryMgr->ClaimLine(Country, Id)) ++Cleared;
+		if (Line.CompanyType != ECompanyType::None)
+		{
+			FactoryMgr->InstantFinishLine(Country, Line.LineId);
+			FactoryMgr->ClaimLine(Country, Line.LineId);
+		}
+		if (FactoryMgr->RemoveLine(Country, Line.LineId)) ++Cleared;
 	}
 
 	UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:Fac_ClearLines] %s: %d개 비움 -> %d / %d"),
@@ -3380,4 +4108,263 @@ void UCGCheatManager::BalvGateFinish(const TCHAR* AbortReason)
 	BalvGateTrialElapsed = 0.0f;
 	bBalvGateTimerSeen = false;
 	bBalvGateNeedStart = false;
+}
+
+void UCGCheatManager::ClockOffset(int64 Seconds)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UGameClockSubsystem* Clock = GI ? GI->GetSubsystem<UGameClockSubsystem>() : nullptr;
+	if (!Clock)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:ClockOffset] GameClockSubsystem not found"));
+		return;
+	}
+	Clock->SetDebugOffsetSeconds(Clock->GetDebugOffsetSeconds() + Seconds);
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:ClockOffset] offset=%lld day=%s week=%s"), Clock->GetDebugOffsetSeconds(), *Clock->GetDayKey(), *Clock->GetWeekKey());
+}
+
+void UCGCheatManager::ClockStatus()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UGameClockSubsystem* Clock = GI ? GI->GetSubsystem<UGameClockSubsystem>() : nullptr;
+	if (!Clock)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:ClockStatus] GameClockSubsystem not found"));
+		return;
+	}
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:ClockStatus] valid=%d synced=%d lastSync=%lld now=%lld day=%s week=%s dayRoll=%s weekRoll=%s offset=%lld"),
+		Clock->IsServerTimeValid() ? 1 : 0, Clock->HasSyncedOnce() ? 1 : 0, Clock->GetLastSyncUnix(), Clock->GetServerNowUnix(),
+		*Clock->GetDayKey(), *Clock->GetWeekKey(),
+		*FGameClockRules::FormatCountdown(Clock->GetSecondsUntilDayRoll()), *FGameClockRules::FormatCountdown(Clock->GetSecondsUntilWeekRoll()),
+		Clock->GetDebugOffsetSeconds());
+}
+
+void UCGCheatManager::QuestReport(const FString& CounterName, int64 Amount)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UQuestSubsystem* QuestMgr = GI ? GI->GetSubsystem<UQuestSubsystem>() : nullptr;
+	if (!QuestMgr)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:QuestReport] QuestSubsystem not found"));
+		return;
+	}
+	const int64 Value = StaticEnum<EQuestCounter>()->GetValueByNameString(CounterName);
+	if (Value == INDEX_NONE)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:QuestReport] unknown counter '%s' (EQuestCounter 이름을 그대로 쓸 것)"), *CounterName);
+		return;
+	}
+	QuestMgr->ReportCounter(static_cast<EQuestCounter>(Value), Amount);
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:QuestReport] %s +%lld"), *CounterName, Amount);
+}
+
+void UCGCheatManager::QuestReset()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	if (UQuestSubsystem* QuestMgr = GI ? GI->GetSubsystem<UQuestSubsystem>() : nullptr)
+	{
+		QuestMgr->DevReset();
+		UE_LOG(LogCGCheat, Log, TEXT("[Cheat:QuestReset] done"));
+	}
+}
+
+void UCGCheatManager::QuestStatus()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UQuestSubsystem* QuestMgr = GI ? GI->GetSubsystem<UQuestSubsystem>() : nullptr;
+	if (!QuestMgr) return;
+	const EQuestPeriod Periods[] = { EQuestPeriod::Daily, EQuestPeriod::Weekly, EQuestPeriod::Lifetime };
+	for (EQuestPeriod P : Periods)
+	{
+		TArray<FQuestEntry> Entries;
+		QuestMgr->GetEntries(P, Entries);
+		UE_LOG(LogCGCheat, Log, TEXT("[Cheat:QuestStatus] period=%d rows=%d"), static_cast<int32>(P), Entries.Num());
+		for (const FQuestEntry& E : Entries)
+		{
+			UE_LOG(LogCGCheat, Log, TEXT("  %s state=%d %lld/%lld"), *E.QuestID.ToString(), static_cast<int32>(E.State), E.Current, E.Target);
+		}
+	}
+}
+
+void UCGCheatManager::AttendClaim()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UAttendanceSubsystem* AttendMgr = GI ? GI->GetSubsystem<UAttendanceSubsystem>() : nullptr;
+	if (!AttendMgr)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:AttendClaim] AttendanceSubsystem not found"));
+		return;
+	}
+	const bool bClaimed = AttendMgr->ClaimToday();
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:AttendClaim] claimed=%d day=%d total=%d"),
+		bClaimed ? 1 : 0, AttendMgr->GetCycleDay(), AttendMgr->GetTotalDays());
+}
+
+void UCGCheatManager::AttendReset()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	if (UAttendanceSubsystem* AttendMgr = GI ? GI->GetSubsystem<UAttendanceSubsystem>() : nullptr)
+	{
+		AttendMgr->DevReset();
+		UE_LOG(LogCGCheat, Log, TEXT("[Cheat:AttendReset] done"));
+	}
+}
+
+void UCGCheatManager::AttendStatus()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UAttendanceSubsystem* AttendMgr = GI ? GI->GetSubsystem<UAttendanceSubsystem>() : nullptr;
+	if (!AttendMgr) return;
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:AttendStatus] canClaim=%d nextDay=%d cycleDay=%d total=%d"),
+		AttendMgr->CanClaimToday() ? 1 : 0, AttendMgr->GetNextDay(), AttendMgr->GetCycleDay(), AttendMgr->GetTotalDays());
+}
+
+void UCGCheatManager::MailSend(int32 DiamondAmount)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UMailboxSubsystem* MailMgr = GI ? GI->GetSubsystem<UMailboxSubsystem>() : nullptr;
+	if (!MailMgr)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:MailSend] MailboxSubsystem not found"));
+		return;
+	}
+	TArray<FMissionReward> Rewards;
+	FMissionReward Gem;
+	Gem.ResourceType = EResourceType::Diamond;
+	Gem.Amount = DiamondAmount;
+	Rewards.Add(Gem);
+	FMissionReward Ticket;
+	Ticket.ItemType = EItemType::RecruitTicketNormal;
+	Ticket.ItemAmount = 5;
+	Rewards.Add(Ticket);
+	MailMgr->AddSystemMail(FText::FromString(TEXT("테스트 우편")), FText::FromString(TEXT("치트로 보낸 테스트 우편입니다.")), Rewards, 7);
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:MailSend] diamond=%d count=%d"), DiamondAmount, MailMgr->GetUnclaimedCount());
+}
+
+void UCGCheatManager::MailClear()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	if (UMailboxSubsystem* MailMgr = GI ? GI->GetSubsystem<UMailboxSubsystem>() : nullptr)
+	{
+		MailMgr->DevClear();
+		UE_LOG(LogCGCheat, Log, TEXT("[Cheat:MailClear] done"));
+	}
+}
+
+void UCGCheatManager::MailStatus()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	UMailboxSubsystem* MailMgr = GI ? GI->GetSubsystem<UMailboxSubsystem>() : nullptr;
+	if (!MailMgr) return;
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:MailStatus] count=%d"), MailMgr->GetUnclaimedCount());
+	for (const FMailEntry& E : MailMgr->GetMails())
+	{
+		UE_LOG(LogCGCheat, Log, TEXT("  %s rewards=%d expire=%s"), *E.Title.ToString(), E.Rewards.Num(),
+			*FDateTime::FromUnixTimestamp(E.ExpireUnix).ToString());
+	}
+}
+
+void UCGCheatManager::LiveOpsRefresh()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	ULiveOpsSubsystem* LiveOpsMgr = GI ? GI->GetSubsystem<ULiveOpsSubsystem>() : nullptr;
+	if (!LiveOpsMgr)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:LiveOpsRefresh] LiveOpsSubsystem not found"));
+		return;
+	}
+	LiveOpsMgr->RefreshFromServer(/*bForce=*/true);
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:LiveOpsRefresh] requested"));
+}
+
+void UCGCheatManager::EventPoints(const FString& EventId, int64 Amount)
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	ULiveOpsSubsystem* LiveOpsMgr = GI ? GI->GetSubsystem<ULiveOpsSubsystem>() : nullptr;
+	if (!LiveOpsMgr)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:EventPoints] LiveOpsSubsystem not found"));
+		return;
+	}
+	if (!LiveOpsMgr->DevAddEventPoints(EventId, Amount))
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:EventPoints] '%s' 는 활성 수집 이벤트가 아닙니다"), *EventId);
+		return;
+	}
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:EventPoints] %s +%lld points=%lld"), *EventId, Amount,
+		LiveOpsMgr->GetEventProgress(EventId).Points);
+}
+
+void UCGCheatManager::EventStatus()
+{
+	UCGGameInstance* GI = UCGGameInstance::GetInstance();
+	ULiveOpsSubsystem* LiveOpsMgr = GI ? GI->GetSubsystem<ULiveOpsSubsystem>() : nullptr;
+	if (!LiveOpsMgr) return;
+	TArray<FLiveOpsEventDef> Active;
+	LiveOpsMgr->GetActiveEvents(Active);
+	TArray<FLiveOpsNoticeDef> AllNotices;
+	LiveOpsMgr->GetNotices(AllNotices);
+	int32 Unread = 0;
+	for (const FLiveOpsNoticeDef& N : AllNotices)
+	{
+		if (!LiveOpsMgr->IsNoticeRead(N.Id)) ++Unread;
+	}
+	UE_LOG(LogCGCheat, Log, TEXT("[Cheat:EventStatus] active=%d hotTime=%.2f notices=%d unread=%d"),
+		Active.Num(), LiveOpsMgr->GetRevenueMultiplierNow(), AllNotices.Num(), Unread);
+	for (const FLiveOpsEventDef& Def : Active)
+	{
+		const FLiveOpsEventProgress Progress = LiveOpsMgr->GetEventProgress(Def.Id);
+		FString Milestones;
+		for (int32 Index = 0; Index < Def.Milestones.Num(); ++Index)
+		{
+			const bool bClaimed = Progress.ClaimedMilestones.Contains(Index);
+			const bool bClaimable = FLiveOpsRules::IsMilestoneClaimable(Progress, Def, Index);
+			Milestones += FString::Printf(TEXT(" [%d]%lld%s"), Index, Def.Milestones[Index].Threshold,
+				bClaimed ? TEXT("claimed") : (bClaimable ? TEXT("claimable") : TEXT("locked")));
+		}
+		UE_LOG(LogCGCheat, Log, TEXT("  %s type=%d points=%lld%s"), *Def.Id, static_cast<int32>(Def.Type), Progress.Points, *Milestones);
+	}
+}
+
+// ========== 카메라 측정 (맵 무관) ==========
+
+void UCGCheatManager::CamInfo()
+{
+	APlayerController* PC = GetOuterAPlayerController();
+	APlayerCamera* Cam = PC ? Cast<APlayerCamera>(PC->GetPawn()) : nullptr;
+	UMovementInputHandler* Handler = Cam ? Cam->MovementInputHandler.Get() : nullptr;
+	if (!Cam || !Handler || !Cam->SpringArm || !Cam->CameraComponent)
+	{
+		UE_LOG(LogCGCheat, Warning, TEXT("[Cheat:CamInfo] APlayerCamera 계열을 possess 한 상태여야 함"));
+		return;
+	}
+
+	// 팔길이 ≠ 카메라 거리: SocketOffset.X 가 카메라를 팔 끝에서 한 번 더 뒤로 민다
+	const float Arm = Cam->SpringArm->TargetArmLength;
+	const float PullBack = -Cam->SpringArm->SocketOffset.X;
+	const float CameraDistance = Arm + PullBack;
+
+	// 수직 화각 ≠ FieldOfView: MaintainYFOV 에서 tan(v/2) = tan(h/2) / CameraAspectRatio
+	const FZoomRigParams Rig = Handler->GetZoomRigParams();
+	const float HorizontalFOV = Cam->CameraComponent->FieldOfView;
+	const float VerticalHalfTan = CameraFramingMath::VerticalHalfTangent(HorizontalFOV, Rig.CameraAspectRatio);
+	const float VerticalFOV = 2.f * FMath::RadiansToDegrees(FMath::Atan(VerticalHalfTan));
+
+	int32 ViewportX = 0;
+	int32 ViewportY = 0;
+	PC->GetViewportSize(ViewportX, ViewportY);
+	const float ViewportAspect = (ViewportY > 0) ? static_cast<float>(ViewportX) / static_cast<float>(ViewportY) : (16.f / 9.f);
+
+	const float VisibleHeight = 2.f * CameraDistance * VerticalHalfTan;
+	const float VisibleWidth = VisibleHeight * ViewportAspect;
+	const float Pitch = Cam->SpringArm->GetRelativeRotation().Pitch;
+
+	UE_LOG(LogCGCheat, Warning,
+		TEXT("[Cheat:CamInfo] arm=%.0f +후퇴%.0f = 카메라거리 %.0f cm (%.0fm) | hFOV=%.1f vFOV=%.1f | pitch=%.1f | 보이는구역 %.0f x %.0f m | 줌범위 %.0f~%.0f (카메라 %.0f~%.0f m) | viewport %dx%d"),
+		Arm, PullBack, CameraDistance, CameraDistance / 100.f,
+		HorizontalFOV, VerticalFOV, Pitch,
+		VisibleWidth / 100.f, VisibleHeight / 100.f,
+		Handler->MinZoomDistance, Handler->MaxZoomDistance,
+		(Handler->MinZoomDistance + PullBack) / 100.f, (Handler->MaxZoomDistance + PullBack) / 100.f,
+		ViewportX, ViewportY);
 }

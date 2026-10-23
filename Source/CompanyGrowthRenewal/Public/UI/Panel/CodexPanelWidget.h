@@ -1,15 +1,18 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "CommonActivatableWidget.h"
+#include "UI/AnimatedActivatableWidget.h"
 #include "Enum/CompanyType.h"
 #include "CodexPanelWidget.generated.h"
 
 class UCommonTextBlock;
 class UButtonWidget;
-class UCloseButtonWidget;
+class UModalFrameWidget;
+class UIconWithButtonWidget;
 class UButton;
 class UImage;
+class UWidget;
+class UPanelWidget;
 class UWidgetSwitcher;
 class UScrollBox;
 class UHorizontalBox;
@@ -28,8 +31,9 @@ enum class EShippedSort : uint8
 };
 
 /**
- * 포트폴리오 패널 (UI_CodexPanel) — 건물(회사) 개별 뷰. 2탭: [조합 발견]=10티어 진척 지도 / [출시작].
- * 표시명만 "포트폴리오", 내부명 Codex 유지. 산업 시그니처색을 입음(런타임 DT AccentColor 주입).
+ * 도감 패널 (UI_CodexPanel) — 좌측 산업 레일로 6산업 전체를 넘나드는 뷰. 2탭: [프로젝트]=10티어 진척 지도 / [출시작].
+ * 표시 산업의 권위는 레일 선택이다 — GameInstance 의 현재 건물 산업은 초기 선택으로만 쓴다.
+ * 표시명 "도감"(업적 A_Codex_1~5 가 쓰는 말), 내부명 Codex 유지. 산업 시그니처색은 레일 탭 웰에 싣는다(런타임 DT AccentColor).
  * ★ 열람 전용 — 착수는 기획 보드(UI_PitchBoardPanel)가 단일 창구다.
  *   셀에 개발비/수익/소요가 없어 정보 없이 돈을 쓰게 되므로 2026-07-26 착수 배선을 제거했다.
  * 로드맵 노드(UIE_RoadmapNode)/조합 셀(UIE_PortfolioCell)은 재사용 컴포넌트를 CreateWidget+Configure 로 채움
@@ -37,13 +41,19 @@ enum class EShippedSort : uint8
  * 설계 SOT = memory project_portfolio_panel_design.md / 목업 docs/05_UI/Codex_Improved_MOCKUP.html.
  */
 UCLASS()
-class COMPANYGROWTHRENEWAL_API UCodexPanelWidget : public UCommonActivatableWidget
+class COMPANYGROWTHRENEWAL_API UCodexPanelWidget : public UAnimatedActivatableWidget
 {
 	GENERATED_BODY()
 
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
+	virtual void NativeOnDeactivated() override;
+
+	// ---- 좌측 산업 레일 ----
+	// 탭은 런타임 생성(UIE_IndustryRailTab). 디자이너에선 비어 있는 게 정상.
+	UPROPERTY(meta = (BindWidget))
+	UPanelWidget* IndustryRailBox;
 
 	// ---- 탭 (세그먼트 트랙) ----
 	UPROPERTY(meta = (BindWidget))
@@ -57,6 +67,13 @@ protected:
 	UWidgetSwitcher* CodexSwitcher;
 
 	// ---- 페이지 0: 조합 발견 ----
+	// 대표작 3 ― 기록이 없으면 섹션째 Collapsed (빈 판 금지)
+	UPROPERTY(meta = (BindWidgetOptional))
+	UWidget* TopHitsSection;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UHorizontalBox* TopHitsBox;
+
 	// 가로 로드맵 컨테이너 — T1~T10 노드는 C++ 생성
 	UPROPERTY(meta = (BindWidget))
 	UHorizontalBox* RoadmapBox;
@@ -69,16 +86,9 @@ protected:
 	UPROPERTY(meta = (BindWidget))
 	UScrollBox* ShippedList;
 
-	// 공용 닫기 X — 타입은 반드시 UCloseButtonWidget (UButtonWidget 아님)
+	// 공통 셸·제목·도움말·닫기 영역
 	UPROPERTY(meta = (BindWidget))
-	UCloseButtonWidget* CloseButton;
-
-	// ---- 헤더: 회사 정체성 ----
-	UPROPERTY(meta = (BindWidget))
-	UCommonTextBlock* CompanyNameText;
-
-	UPROPERTY(meta = (BindWidget))
-	UCommonTextBlock* CompanyIndustryText;
+	TObjectPtr<UModalFrameWidget> ModalFrame;
 
 	// ---- 랭크 요약칩 (탭 트랙 우측) ----
 	UPROPERTY(meta = (BindWidget))
@@ -98,9 +108,7 @@ protected:
 	UCommonTextBlock* Text_TierReward;
 
 	// ---- 산업색 주입 대상 (비주얼, 선택) ----
-	UPROPERTY(meta = (BindWidgetOptional))
-	UImage* AccentBar;
-
+	// 랭크 칩 뒤판 — 선택 산업의 AccentColor 를 곱해 칩 채움/테두리를 물들인다
 	UPROPERTY(meta = (BindWidgetOptional))
 	UImage* CompanyPlate;
 
@@ -120,17 +128,22 @@ protected:
 	UButtonWidget* SortByRevenueBtn;
 
 private:
-	void ApplyCompanyIdentity();   // 산업색/이름/칩 — 정적 1회
-	void RefreshRankSummary();     // 랭크 요약칩
-	void PopulateRoadmap();        // 티어 노드 (스텁)
-	void RefreshTierDetail();      // 선택 티어 헤더 + 그리드
-	void PopulateTierGrid();       // 도감: 장르 그룹 × 소재 셀 (DiscoveredCombos 발견 판정 + 발견 카운트)
+	void PopulateIndustryRail();   // 레일 탭 생성(가용 업종만) + 요약 주입
+	void SelectIndustry(ECompanyType InIndustry);   // 산업 전환 + 전 구획 재빌드
+	void ApplyCompanyIdentity();   // 산업색/업종 강조 — 산업이 바뀔 때마다
+	void RefreshIndustryRecord();  // 기록 요약 4항 — 그리드가 카운트를 채운 뒤에 불러야 한다
+	void PopulateRoadmap();        // 진척 한 줄 (R2: 10칸 사다리 폐지)
+	void PopulateTopHits();        // 누적매출 상위 3
+	void PopulateComboGrid();      // 도감: 전 티어를 한 판에, 장르 그룹 × 소재 셀
 	void PopulateShipped();        // 출시작 리스트
 
-	// 이 회사의 자체개발 이력 — 오피스면 매니저, 그 외(MainMap 등)는 세이브 OfficeDataMap 에서.
+	// 선택 산업의 자체개발 이력 — 그 산업 건물들의 합집합. 건물별로 갈리면 같은 작품이 한쪽에서 '?'가 된다.
 	void ResolveDevelopedProjects(TArray<int32>& OutDeveloped) const;
 
 	UCommonTextBlock* MakeText(const FText& InText, int32 Size, const FLinearColor& Color, bool bBold) const;  // ShippedList 행 전용
+
+	UFUNCTION()
+	void OnIndustryTabChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
 
 	UFUNCTION()
 	void OnTabChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
@@ -145,10 +158,28 @@ private:
 	void OnShippedSortChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
 
 	ECompanyType Industry = ECompanyType::Game;
-	int32 CurrentTier = 1;
-	int32 SelectedTier = 1;   // 로드맵에서 선택된 티어(기본 = 현재)
+	// 미진출은 0 이다. 1 로 두면 진출한 적 없는 산업이 "TIER 1"으로 표시된다(R2 이전 버그).
+	int32 CurrentTier = 0;
+
+	// ===== 산업 총괄 기록 (R2) — 표시 직전에 채워진다 =====
+	bool bIndustryOwned = false;
+	int64 IndustryRevenue = 0;
+	int32 IndustryShippedCount = 0;
+	int32 DiscoveredCount = 0;   // 그리드 순회가 채운다
+	int32 TotalComboCount = 0;   // 〃 (분모)
 	EShippedSort ShippedSort = EShippedSort::ByReview;
 	FLinearColor IndustryColor = FLinearColor(0.391f, 0.091f, 0.930f, 1.0f);  // #A855F7 폴백
+
+	UPROPERTY()
+	UCommonButtonGroupBase* RailGroup = nullptr;
+
+	// 레일 탭 인덱스 → 산업 (표시 순서 = ECompanyType 선언 순서)
+	TArray<ECompanyType> RailIndustries;
+
+	TSet<ECompanyType> OwnedIndustries;
+
+	// SelectIndustry 가 한 번이라도 돌았는가 ― 델리게이트가 이미 적용한 뒤 폴백이 또 리빌드하는 걸 막는다
+	bool bIndustryApplied = false;
 
 	UPROPERTY()
 	UCommonButtonGroupBase* TabGroup = nullptr;

@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "Manager/PlayFabManagerSubsystem.h"
+#include "Global/CGDevSettings.h"
 #include "Core/PlayFabClientAPI.h"
 #include "Core/PlayFabClientDataModels.h"
 #include "Core/PlayFabLeaderboardsAPI.h"
@@ -15,6 +16,7 @@ static const FString PlayFab_LastSyncKey = TEXT("LastSync");
 void UPlayFabManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
+	OfflineGainsIntervalEndUtc = FDateTime();
 
 	PlayFabClientPtr = MakeShareable(new PlayFab::UPlayFabClientAPI());
 	LeaderboardsApiPtr = MakeShareable(new PlayFab::UPlayFabLeaderboardsAPI());
@@ -24,6 +26,7 @@ void UPlayFabManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UPlayFabManagerSubsystem::Deinitialize()
 {
+	OfflineGainsIntervalEndUtc = FDateTime();
 	PlayFabClientPtr.Reset();
 	LeaderboardsApiPtr.Reset();
 
@@ -32,6 +35,13 @@ void UPlayFabManagerSubsystem::Deinitialize()
 
 void UPlayFabManagerSubsystem::LoginAsGuest()
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		Logout();
+		OnLoginComplete.Broadcast(false);
+		return;
+	}
+
 	if (!PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[PlayFabManager] ClientAPI가 초기화되지 않음"));
@@ -75,6 +85,13 @@ void UPlayFabManagerSubsystem::LoginAsGuest()
 
 void UPlayFabManagerSubsystem::LoginWithGoogle(const FString& ServerAuthCode)
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		Logout();
+		OnLoginComplete.Broadcast(false);
+		return;
+	}
+
 	if (!PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Error, TEXT("[PlayFabManager] ClientAPI가 초기화되지 않음"));
@@ -127,12 +144,14 @@ void UPlayFabManagerSubsystem::Logout()
 	EntityType.Empty();
 	PendingTimeRequest = EServerTimeRequestType::None;
 	bAwaitingLastSyncResponse = false;
+	OfflineGainsIntervalEndUtc = FDateTime();
 
 	UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] 로그아웃 완료"));
 }
 
 void UPlayFabManagerSubsystem::UpdateDisplayName(const FString& NewDisplayName)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!IsLoggedIn() || !PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 로그인 상태가 아니므로 디스플레이 이름 변경 불가"));
@@ -151,6 +170,7 @@ void UPlayFabManagerSubsystem::UpdateDisplayName(const FString& NewDisplayName)
 
 void UPlayFabManagerSubsystem::SavePlayerData(const FString& Key, const FString& Value)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!IsLoggedIn() || !PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 로그인 상태가 아니므로 데이터 저장 불가"));
@@ -173,6 +193,7 @@ void UPlayFabManagerSubsystem::SavePlayerData(const FString& Key, const FString&
 
 void UPlayFabManagerSubsystem::LoadPlayerData(const FString& Key)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!IsLoggedIn() || !PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 로그인 상태가 아니므로 데이터 로드 불가"));
@@ -193,13 +214,19 @@ void UPlayFabManagerSubsystem::LoadPlayerData(const FString& Key)
 
 bool UPlayFabManagerSubsystem::IsLoggedIn() const
 {
-	return LoginState == EPlayFabLoginState::LoggedIn && CurrentUser.IsValid();
+	return !UCGDevSettings::IsOfflineMode() && LoginState == EPlayFabLoginState::LoggedIn && CurrentUser.IsValid();
 }
 
 // ===== Private 콜백 =====
 
 void UPlayFabManagerSubsystem::OnLoginSuccess(const PlayFab::ClientModels::FLoginResult& Result)
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		Logout();
+		OnLoginComplete.Broadcast(false);
+		return;
+	}
 	CurrentUser.PlayFabId = Result.PlayFabId;
 	CurrentUser.SessionTicket = Result.SessionTicket;
 	LoginState = EPlayFabLoginState::LoggedIn;
@@ -254,6 +281,7 @@ void UPlayFabManagerSubsystem::OnLoginError(const PlayFab::FPlayFabCppError& Err
 
 void UPlayFabManagerSubsystem::OnDataGetSuccess(const PlayFab::ClientModels::FGetUserDataResult& Result)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	// 오프라인 시퀀스에서 LastSync 를 요청한 응답이면 별도 처리 후 조기 리턴
 	// (일반 LoadPlayerData 브로드캐스트와 섞이지 않도록 플래그 기반 구분)
 	if (bAwaitingLastSyncResponse)
@@ -281,6 +309,7 @@ void UPlayFabManagerSubsystem::OnDataGetSuccess(const PlayFab::ClientModels::FGe
 			ServerNow, LastSync, OfflineSeconds, OfflineCapSeconds);
 
 		// 여기선 경과 초만 전달. 정산·지급은 SaveLoadManager
+		OfflineGainsIntervalEndUtc = ServerNow > 0 ? FDateTime::FromUnixTimestamp(ServerNow) : FDateTime();
 		OnOfflineGainsRequested.Broadcast(static_cast<float>(OfflineSeconds));
 
 		// 보상 브로드캐스트 직후 LastSync 갱신 → 다음 시퀀스 기준점 확정
@@ -334,6 +363,7 @@ void UPlayFabManagerSubsystem::OnApiError(const PlayFab::FPlayFabCppError& Error
 
 void UPlayFabManagerSubsystem::UpdateLeaderboardScore(const FString& LeaderboardName, int64 Score)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!IsLoggedIn() || !PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 리더보드 업데이트 불가 (로그인=%d)"), IsLoggedIn());
@@ -360,13 +390,16 @@ void UPlayFabManagerSubsystem::UpdateLeaderboardScore(const FString& Leaderboard
 
 void UPlayFabManagerSubsystem::GetLeaderboard(const FString& LeaderboardName, int32 PageSize)
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		OnLeaderboardResult.Broadcast(LeaderboardName, TArray<FPlayFabLeaderboardEntry>());
+		return;
+	}
 	if (!IsLoggedIn() || !PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 리더보드 조회 불가"));
 		return;
 	}
-
-	PendingLeaderboardName = LeaderboardName;
 
 	PlayFab::ClientModels::FGetLeaderboardRequest Request;
 	Request.StatisticName = LeaderboardName;
@@ -375,7 +408,7 @@ void UPlayFabManagerSubsystem::GetLeaderboard(const FString& LeaderboardName, in
 
 	PlayFabClientPtr->GetLeaderboard(
 		Request,
-		PlayFab::UPlayFabClientAPI::FGetLeaderboardDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnGetLeaderboardSuccess),
+		PlayFab::UPlayFabClientAPI::FGetLeaderboardDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnGetLeaderboardSuccess, LeaderboardName),
 		PlayFab::FPlayFabErrorDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnApiError)
 	);
 
@@ -384,13 +417,16 @@ void UPlayFabManagerSubsystem::GetLeaderboard(const FString& LeaderboardName, in
 
 void UPlayFabManagerSubsystem::GetLeaderboardAroundPlayer(const FString& LeaderboardName, int32 MaxResults)
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		OnLeaderboardResult.Broadcast(LeaderboardName, TArray<FPlayFabLeaderboardEntry>());
+		return;
+	}
 	if (!IsLoggedIn() || !PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 리더보드 조회 불가"));
 		return;
 	}
-
-	PendingLeaderboardName = LeaderboardName;
 
 	PlayFab::ClientModels::FGetLeaderboardAroundPlayerRequest Request;
 	Request.StatisticName = LeaderboardName;
@@ -398,7 +434,7 @@ void UPlayFabManagerSubsystem::GetLeaderboardAroundPlayer(const FString& Leaderb
 
 	PlayFabClientPtr->GetLeaderboardAroundPlayer(
 		Request,
-		PlayFab::UPlayFabClientAPI::FGetLeaderboardAroundPlayerDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnGetLeaderboardAroundSuccess),
+		PlayFab::UPlayFabClientAPI::FGetLeaderboardAroundPlayerDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnGetLeaderboardAroundSuccess, LeaderboardName),
 		PlayFab::FPlayFabErrorDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnApiError)
 	);
 
@@ -407,6 +443,11 @@ void UPlayFabManagerSubsystem::GetLeaderboardAroundPlayer(const FString& Leaderb
 
 void UPlayFabManagerSubsystem::GetOtherPlayerData(const FString& PlayFabId, const TArray<FString>& Keys)
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		OnOtherPlayerDataLoaded.Broadcast(PlayFabId, FStringStringMap());
+		return;
+	}
 	if (!IsLoggedIn())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 로그인 상태가 아니므로 타 플레이어 데이터 조회 불가"));
@@ -445,7 +486,7 @@ void UPlayFabManagerSubsystem::OnUpdateLeaderboardSuccess(const PlayFab::ClientM
 	UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] 통계 업데이트 성공 (Linked → v2 리더보드 자동 반영)"));
 }
 
-void UPlayFabManagerSubsystem::OnGetLeaderboardSuccess(const PlayFab::ClientModels::FGetLeaderboardResult& Result)
+void UPlayFabManagerSubsystem::OnGetLeaderboardSuccess(const PlayFab::ClientModels::FGetLeaderboardResult& Result, FString LeaderboardName)
 {
 	TArray<FPlayFabLeaderboardEntry> Entries;
 	Entries.Reserve(Result.Leaderboard.Num());
@@ -461,10 +502,10 @@ void UPlayFabManagerSubsystem::OnGetLeaderboardSuccess(const PlayFab::ClientMode
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] Classic 리더보드 조회 성공 (%d명)"), Entries.Num());
-	OnLeaderboardResult.Broadcast(PendingLeaderboardName, Entries);
+	OnLeaderboardResult.Broadcast(LeaderboardName, Entries);
 }
 
-void UPlayFabManagerSubsystem::OnGetLeaderboardAroundSuccess(const PlayFab::ClientModels::FGetLeaderboardAroundPlayerResult& Result)
+void UPlayFabManagerSubsystem::OnGetLeaderboardAroundSuccess(const PlayFab::ClientModels::FGetLeaderboardAroundPlayerResult& Result, FString LeaderboardName)
 {
 	TArray<FPlayFabLeaderboardEntry> Entries;
 	Entries.Reserve(Result.Leaderboard.Num());
@@ -480,7 +521,7 @@ void UPlayFabManagerSubsystem::OnGetLeaderboardAroundSuccess(const PlayFab::Clie
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] Classic 내 주변 리더보드 조회 성공 (%d명)"), Entries.Num());
-	OnLeaderboardResult.Broadcast(PendingLeaderboardName, Entries);
+	OnLeaderboardResult.Broadcast(LeaderboardName, Entries);
 }
 
 // OnOtherPlayerDataGetSuccess는 람다로 대체됨 (GetOtherPlayerData 내부)
@@ -489,6 +530,13 @@ void UPlayFabManagerSubsystem::OnGetLeaderboardAroundSuccess(const PlayFab::Clie
 
 void UPlayFabManagerSubsystem::RequestServerTime()
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		PendingTimeRequest = EServerTimeRequestType::None;
+		bAwaitingLastSyncResponse = false;
+		PendingServerNow = 0;
+		return;
+	}
 	if (!IsLoggedIn() || !PlayFabClientPtr.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 서버 시간 요청 불가 (로그인 상태 아님)"));
@@ -507,8 +555,60 @@ void UPlayFabManagerSubsystem::RequestServerTime()
 	UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] 서버 시간 요청 (Type=%d)"), (int32)PendingTimeRequest);
 }
 
+void UPlayFabManagerSubsystem::RequestTitleData(const TArray<FString>& Keys)
+{
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		OnTitleDataReceived.Broadcast(FPlayFabTitleDataMap());
+		return;
+	}
+	if (!IsLoggedIn())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] TitleData 요청 불가 (로그인 상태 아님)"));
+		return;
+	}
+
+	if (!PlayFabClientPtr.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] TitleData 요청 불가 (클라이언트 API 없음)"));
+		return;
+	}
+
+	// 키를 비우면 PlayFab 이 타이틀의 모든 키를 돌려준다
+	if (Keys.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] TitleData 요청 불가 (키 목록이 비었음)"));
+		return;
+	}
+
+	PlayFab::ClientModels::FGetTitleDataRequest Request;
+	Request.Keys = Keys;
+
+	PlayFabClientPtr->GetTitleData(
+		Request,
+		PlayFab::UPlayFabClientAPI::FGetTitleDataDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnGetTitleDataSuccess),
+		PlayFab::FPlayFabErrorDelegate::CreateUObject(this, &UPlayFabManagerSubsystem::OnGetTitleDataError)
+	);
+
+	UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] TitleData 요청 (%d keys)"), Keys.Num());
+}
+
+void UPlayFabManagerSubsystem::OnGetTitleDataSuccess(const PlayFab::ClientModels::FGetTitleDataResult& Result)
+{
+	UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] TitleData 수신 (%d keys)"), Result.Data.Num());
+
+	OnTitleDataReceived.Broadcast(Result.Data);
+}
+
+void UPlayFabManagerSubsystem::OnGetTitleDataError(const PlayFab::FPlayFabCppError& Error)
+{
+	// 시간 시퀀스 상태를 건드리지 않기 위해 OnApiError 와 분리 (실패해도 호출자는 DT 기본값을 쓴다)
+	UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] TitleData 요청 실패: %s"), *Error.ErrorMessage);
+}
+
 void UPlayFabManagerSubsystem::OnGetTimeSuccess(const PlayFab::ClientModels::FGetTimeResult& Result)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	const int64 ServerUnix = Result.Time.ToUnixTimestamp();
 
 	UE_LOG(LogTemp, Log, TEXT("[PlayFabManager] 서버 시간 수신: %lld (Type=%d)"), ServerUnix, (int32)PendingTimeRequest);
@@ -542,6 +642,7 @@ void UPlayFabManagerSubsystem::OnGetTimeSuccess(const PlayFab::ClientModels::FGe
 
 void UPlayFabManagerSubsystem::UpdateLastSync(int64 ServerUtcTimestamp)
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	const FString ValueStr = LexToString(ServerUtcTimestamp);
 	SavePlayerData(PlayFab_LastSyncKey, ValueStr);
 
@@ -550,6 +651,11 @@ void UPlayFabManagerSubsystem::UpdateLastSync(int64 ServerUtcTimestamp)
 
 void UPlayFabManagerSubsystem::StartHeartbeat()
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		StopHeartbeat();
+		return;
+	}
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -582,6 +688,11 @@ void UPlayFabManagerSubsystem::StopHeartbeat()
 
 void UPlayFabManagerSubsystem::OnHeartbeatTick()
 {
+	if (UCGDevSettings::IsOfflineMode())
+	{
+		StopHeartbeat();
+		return;
+	}
 	if (!IsLoggedIn())
 	{
 		StopHeartbeat();
@@ -601,6 +712,7 @@ void UPlayFabManagerSubsystem::OnHeartbeatTick()
 
 void UPlayFabManagerSubsystem::StartOfflineGainsSequence()
 {
+	if (UCGDevSettings::IsOfflineMode()) return;
 	if (!IsLoggedIn())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[PlayFabManager] 오프라인 시퀀스 불가 (로그인 상태 아님)"));

@@ -1,6 +1,7 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+﻿// Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Element/Office/OfficeRecruitmentCardWidget.h"
+#include "Global/CGDevSettings.h"
 #include "UI/Element/Common/StatRowWidget.h"
 #include "Components/WidgetSwitcher.h"
 #include "Components/VerticalBox.h"
@@ -8,7 +9,6 @@
 #include "CommonTextBlock.h"
 #include "CommonButtonBase.h"
 #include "Manager/TableManagerSubsystem.h"
-#include "Manager/EmployeeManager.h"
 #include "Core/CGGameInstance.h"
 #include "Enum/WidgetType.h"
 #include "Table/UIIconData.h"
@@ -192,12 +192,8 @@ void UOfficeRecruitmentCardWidget::SetEmployeeData(const FEmployeeInstance& InEm
 	// 직급 설정
 	if (RankText)
 	{
-		UEmployeeManager* EmpMgr = GetWorld()->GetGameInstance()->GetSubsystem<UEmployeeManager>();
-		if (EmpMgr)
-		{
-			EEmployeeRank Rank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(InEmployee.EnhancementLevel);
-			RankText->SetText(FText::FromString(EmpMgr->GetRankDisplayName(Rank)));
-		}
+		RankText->SetText(FText::FromString(UEmployeeTypeHelper::GetJobTitleDisplayName(
+			UEmployeeTypeHelper::GetJobTitleFromLevel(InEmployee.Level))));
 	}
 
 	// Portrait 로드 및 설정
@@ -220,12 +216,16 @@ void UOfficeRecruitmentCardWidget::UpdateStatDisplay()
 {
 	const FEmployeeStats& Stats = EmployeeData.Stats;
 
-	UE_LOG(LogTemp, Log, TEXT("[OfficeRecruitmentCardWidget] UpdateStatDisplay - Speed: %d, Crit: %d, Composure: %d, Exp: %d, Stam: %d, Focus: %d"),
-		Stats.WorkSpeed, Stats.CritChance, Stats.Composure, Stats.ExpGain, Stats.Stamina, Stats.Focus);
+	UE_LOG(LogTemp, Log, TEXT("[OfficeRecruitmentCardWidget] UpdateStatDisplay - Speed: %d, Crit: %d, Composure: %d, Exp: %d, Stam: %d"),
+		Stats.WorkSpeed, Stats.CritChance, Stats.Composure, Stats.ExpGain, Stats.Stamina);
 
 	TArray<int32> StatValues = {
-		Stats.WorkSpeed, Stats.CritChance, Stats.Composure, Stats.ExpGain, Stats.Stamina, Stats.Focus
+		Stats.WorkSpeed, Stats.CritChance, Stats.Composure, Stats.ExpGain, Stats.Stamina, Stats.CritDamage
 	};
+	for (int32 i = StatValues.Num(); i < DetailStatRows.Num(); ++i)
+	{
+		if (DetailStatRows[i]) { DetailStatRows[i]->SetVisibility(ESlateVisibility::Collapsed); }
+	}
 
 	// 부서-스탯 매핑 폐기(Task 2) — 실제 최고값 스탯 2개를 하이라이트로 대체
 	int32 PrimaryIdx = 0, SecondaryIdx = 1;
@@ -262,7 +262,7 @@ void UOfficeRecruitmentCardWidget::UpdateStatDisplay()
 void UOfficeRecruitmentCardWidget::LoadPortraitImage(int32 EmployeeID)
 {
 	FString BasePath = FPaths::ProjectSavedDir();
-	FString FilePath = BasePath / TEXT("Portraits") / (FString::FromInt(EmployeeID) + TEXT(".png"));
+	FString FilePath = BasePath / UCGDevSettings::GetPortraitFolderName() / (FString::FromInt(EmployeeID) + TEXT(".png"));
 
 	if (!FPaths::FileExists(FilePath))
 	{

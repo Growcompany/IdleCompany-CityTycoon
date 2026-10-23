@@ -18,10 +18,11 @@ void UMaterialReqRowWidget::NativePreConstruct()
 	ApplyLackVisual(false);
 }
 
-void UMaterialReqRowWidget::SetRequirement(EResourceType InType, int64 InHave, int64 InNeed, int32 InCapMax)
+void UMaterialReqRowWidget::SetRequirement(EResourceType InType, int64 InHave, int64 InNeedPerUnit, int32 InQuantity,
+	int32 InCapMax)
 {
-	const bool bLack = (InNeed > 0) && (InHave < InNeed);
-
+	FText ResolvedName;
+	UTexture2D* ResolvedIcon = nullptr;
 	if (UGameInstance* GI = GetGameInstance())
 	{
 		if (UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>())
@@ -30,50 +31,71 @@ void UMaterialReqRowWidget::SetRequirement(EResourceType InType, int64 InHave, i
 			const FResourceInfo Info = TableMgr->GetResourceInfo(InType, bOk);
 			if (bOk)
 			{
-				if (NameText)
-				{
-					NameText->SetText(Info.DisplayName);
-				}
-				if (IconImage && !Info.Icon.IsNull())
-				{
-					if (UTexture2D* Icon = Info.Icon.LoadSynchronous())
-					{
-						IconImage->SetBrushFromTexture(Icon);
-					}
-				}
+				ResolvedName = Info.DisplayName;
+				if (!Info.Icon.IsNull()) ResolvedIcon = Info.Icon.LoadSynchronous();
 			}
 		}
 	}
 
-	if (HaveText)
+	ApplyRequirement(ResolvedName, ResolvedIcon, InHave, InNeedPerUnit, InQuantity, InCapMax);
+}
+
+void UMaterialReqRowWidget::SetProductRequirement(const FText& InName, const TSoftObjectPtr<UTexture2D>& InIcon,
+	int64 InHave, int64 InNeedPerUnit, int32 InQuantity, int32 InCapMax)
+{
+	ApplyRequirement(InName, InIcon.IsNull() ? nullptr : InIcon.LoadSynchronous(), InHave, InNeedPerUnit, InQuantity, InCapMax);
+}
+
+void UMaterialReqRowWidget::ApplyRequirement(const FText& InName, UTexture2D* InIcon,
+	int64 InHave, int64 InNeedPerUnit, int32 InQuantity, int32 InCapMax)
+{
+	const int64 NeedTotal = FMath::Max<int64>(0, InNeedPerUnit) * FMath::Max(1, InQuantity);
+	const bool bLack = (NeedTotal > 0) && (InHave < NeedTotal);
+	const bool bBottleneck = (InCapMax >= 0);
+
+	// 행 위젯은 재사용된다(ProductionStartPopupWidget) ― 실패 경로에서 비우지 않으면
+	// 이름·아이콘만 직전 재료로 남아 수치와 다른 재료를 가리킨다.
+	if (NameText)
 	{
-		HaveText->SetText(UGlobalUtilFunctions::AbbreviateNumber(InHave));
+		NameText->SetText(InName);
 	}
+	if (IconImage)
+	{
+		IconImage->SetBrushFromTexture(InIcon);
+		IconImage->SetVisibility(InIcon ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Hidden);
+	}
+
 	if (NeedText)
 	{
 		// 비용 표기는 Ceil — 축약이 요구량을 실제보다 작게 보이면 "되는 줄 알았는데 안 됨"이 된다
-		NeedText->SetText(FText::Format(
-			NSLOCTEXT("MaterialReqRow", "NeedFmt", "/ {0}"),
-			UGlobalUtilFunctions::AbbreviateNumber(InNeed, ENumberAbbrevStyle::Auto, ENumberRoundMode::Ceil)));
+		NeedText->SetText(UGlobalUtilFunctions::AbbreviateNumber(InNeedPerUnit, ENumberAbbrevStyle::Auto, ENumberRoundMode::Ceil));
+	}
+	if (HaveText)
+	{
+		HaveText->SetText(FText::Format(NSLOCTEXT("MaterialReqRow", "HaveFmt", "보유 {0}"),
+			UGlobalUtilFunctions::AbbreviateNumber(InHave)));
+		HaveText->SetColorAndOpacity(bLack ? InkLack : (bBottleneck ? InkCap : InkOk));
 	}
 	if (LackText)
 	{
 		LackText->SetText(bLack
-			? FText::Format(NSLOCTEXT("MaterialReqRow", "LackFmt", "-{0}"),
-				UGlobalUtilFunctions::AbbreviateNumber(InNeed - InHave, ENumberAbbrevStyle::Auto, ENumberRoundMode::Ceil))
+			? FText::Format(NSLOCTEXT("MaterialReqRow", "LackCountFmt", "{0}개 부족"),
+				UGlobalUtilFunctions::AbbreviateNumber(NeedTotal - InHave, ENumberAbbrevStyle::Auto, ENumberRoundMode::Ceil))
 			: FText::GetEmpty());
+		LackText->SetColorAndOpacity(InkLack);
+		LackText->SetVisibility(bLack ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	}
 
 	if (FillBar)
 	{
-		const float Percent = (InNeed > 0)
-			? FMath::Clamp(static_cast<float>(static_cast<double>(InHave) / static_cast<double>(InNeed)), 0.0f, 1.0f)
-			: 1.0f;
+		// 보유 0 인데 필요가 있으면 가득(전부 모자람), 필요가 없으면 빈 막대
+		const float Percent = (InHave > 0)
+			? FMath::Clamp(static_cast<float>(static_cast<double>(NeedTotal) / static_cast<double>(InHave)), 0.0f, 1.0f)
+			: (NeedTotal > 0 ? 1.0f : 0.0f);
 		FillBar->SetPercent(Percent);
-		FillBar->SetFillColorAndOpacity(bLack ? FillColorLack : FillColorOk);
+		FillBar->SetFillColorAndOpacity(bLack ? FillColorLack : (bBottleneck ? FillColorCap : FillColorOk));
 	}
 
-	const bool bBottleneck = (InCapMax >= 0);
 	if (CapMarkBorder)
 	{
 		CapMarkBorder->SetVisibility(bBottleneck ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
@@ -91,8 +113,4 @@ void UMaterialReqRowWidget::ApplyLackVisual(bool bLack)
 	const ESlateVisibility LackVis = bLack ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed;
 	if (LackTint) LackTint->SetVisibility(LackVis);
 	if (LackEdge) LackEdge->SetVisibility(LackVis);
-
-	// 숫자만 색이 바뀐다 — 이름까지 붉히면 행 전체가 경보가 되어 어느 값이 문제인지 흐려진다
-	if (HaveText) HaveText->SetColorAndOpacity(bLack ? InkLack : InkOk);
-	if (LackText) LackText->SetColorAndOpacity(InkLack);
 }

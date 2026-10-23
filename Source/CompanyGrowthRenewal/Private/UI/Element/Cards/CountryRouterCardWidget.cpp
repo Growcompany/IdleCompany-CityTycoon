@@ -8,7 +8,7 @@
 #include "Table/CountryInfoTable.h"
 #include "Table/ResourceInfo.h"
 #include "Enum/WidgetType.h"
-#include "Entity/Country/CountryActor.h"
+#include "Entity/Country/LegacyCountryActor.h"
 #include "CommonTextBlock.h"
 #include "CommonButtonBase.h"
 #include "Components/Image.h"
@@ -143,7 +143,7 @@ void UCountryRouterCardWidget::HandleMoveClicked()
 	if (!UIBase) return;
 
 	// 카메라 포커스 (국기 클릭과 동일 동작)
-	if (ACountryActor* CountryActor = ACountryActor::FindCountryActor(this, Country))
+	if (ALegacyCountryActor* CountryActor = ALegacyCountryActor::FindCountryActor(this, Country))
 	{
 		CountryActor->RequestFocus(true);
 	}

@@ -5,6 +5,7 @@
 #include "Scalability.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Utils/FWidgetAnimationUtils.h"
 
 void USettingsManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -17,12 +18,14 @@ void USettingsManagerSubsystem::SetQualityPreset(EGraphicsQualityPreset Preset)
 {
 	Settings.QualityPreset = Preset;
 	ApplyGraphicsSettings();
+	PushToSaveCache();
 }
 
 void USettingsManagerSubsystem::SetFrameRateLimit(int32 NewLimit)
 {
 	Settings.FrameRateLimit = FMath::Clamp(NewLimit, 30, 120);
 	ApplyGraphicsSettings();
+	PushToSaveCache();
 }
 
 void USettingsManagerSubsystem::SetReduceMotion(bool bReduce)
@@ -32,7 +35,37 @@ void USettingsManagerSubsystem::SetReduceMotion(bool bReduce)
 		return;
 	}
 	Settings.bReduceMotion = bReduce;
+	FMotionGate::SetReduced(bReduce);
 	OnReduceMotionChanged.Broadcast(bReduce);
+	PushToSaveCache();
+}
+
+void USettingsManagerSubsystem::SetHandOpenBox(bool bOn)
+{
+	if (Settings.bHandOpenBox == bOn)
+	{
+		return;
+	}
+	Settings.bHandOpenBox = bOn;
+	PushToSaveCache();
+}
+
+void USettingsManagerSubsystem::PushToSaveCache()
+{
+	if (USaveLoadManager* SaveLoadManager = GetGameInstance()->GetSubsystem<USaveLoadManager>())
+	{
+		if (USaveGame_GameData* SaveData = SaveLoadManager->GetCurrentSaveData())
+		{
+			SaveData->GameData.GameSettings = Settings;
+		}
+	}
+}
+
+void USettingsManagerSubsystem::CollectSaveData(FGameSaveData& OutData) const
+{
+	// 캐시에 밀어넣는 것만으로는 첫 실행(슬롯 없음 → GetCurrentSaveData()==nullptr)에서 설정이 통째로 유실된다.
+	// 스냅샷이 항상 여기서 받아가므로 캐시 존재 여부와 무관해진다.
+	OutData.GameSettings = Settings;
 }
 
 void USettingsManagerSubsystem::SaveSettings()
@@ -58,6 +91,7 @@ void USettingsManagerSubsystem::LoadSettings()
 			Settings.FrameRateLimit = FMath::Clamp(Settings.FrameRateLimit, 30, 120);
 		}
 	}
+	FMotionGate::SetReduced(Settings.bReduceMotion);
 	ApplyGraphicsSettings();
 }
 

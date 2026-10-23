@@ -22,54 +22,38 @@ bool FCGRFactoryAutoUnlockPolicyTest::RunTest(const FString& Parameters)
 		FactoryUpgradeUnlockPolicy::IsAutoUnlockType(EFactoryUpgradeType::HoldProductionSpeed));
 	TestFalse(TEXT("홀드 생산량은 자동 계열 아님"),
 		FactoryUpgradeUnlockPolicy::IsAutoUnlockType(EFactoryUpgradeType::HoldProductionAmount));
-	TestTrue(TEXT("자동 생산은 자동 계열"),
-		FactoryUpgradeUnlockPolicy::IsAutoUnlockType(EFactoryUpgradeType::AutoCollection));
-	TestTrue(TEXT("자동 생산 용량은 자동 계열"),
+	TestFalse(TEXT("인부 추가는 처음부터 — 자동 계열 아님"),
+		FactoryUpgradeUnlockPolicy::IsAutoUnlockType(EFactoryUpgradeType::LaborerCount));
+	TestTrue(TEXT("오프라인 누적량은 자동 계열"),
 		FactoryUpgradeUnlockPolicy::IsAutoUnlockType(EFactoryUpgradeType::AutoCollectionCapacity));
-	TestTrue(TEXT("벽돌 재고는 자동 계열"),
-		FactoryUpgradeUnlockPolicy::IsAutoUnlockType(EFactoryUpgradeType::BrickStock));
 
 	const TArray<FFactoryUpgradeDefinition> Definitions = {
 		MakeDefinition(EFactoryUpgradeType::AutoCollectionCapacity, 10),
 		MakeDefinition(EFactoryUpgradeType::HoldProductionSpeed, 0),
-		MakeDefinition(EFactoryUpgradeType::BrickStock, 10),
 		MakeDefinition(EFactoryUpgradeType::HoldProductionAmount, 0),
-		MakeDefinition(EFactoryUpgradeType::AutoCollection, 10)
 	};
 
 	int32 RequiredHQLevel = -1;
-	TestTrue(TEXT("자동 계열 3행의 동일한 HQ 요구 레벨을 해석"),
+	TestTrue(TEXT("상한 행의 HQ 요구 레벨을 해석"),
 		FactoryUpgradeUnlockPolicy::TryResolveRequiredHQLevel(Definitions, RequiredHQLevel));
 	TestEqual(TEXT("해금 레벨은 DT 값"), RequiredHQLevel, 10);
 
+	// DT 재임포트로 행이 날아간 경우 — 조용히 해금되지 말고 실패해야 한다(loud failure)
 	TArray<FFactoryUpgradeDefinition> MissingDefinitions = Definitions;
 	MissingDefinitions.RemoveAll([](const FFactoryUpgradeDefinition& Definition)
 	{
-		return Definition.UpgradeType == EFactoryUpgradeType::BrickStock;
+		return Definition.UpgradeType == EFactoryUpgradeType::AutoCollectionCapacity;
 	});
 	RequiredHQLevel = 999;
-	TestFalse(TEXT("행 누락은 실패"),
+	TestFalse(TEXT("상한 행 누락은 실패"),
 		FactoryUpgradeUnlockPolicy::TryResolveRequiredHQLevel(MissingDefinitions, RequiredHQLevel));
 	TestEqual(TEXT("행 누락 실패 시 출력은 0"), RequiredHQLevel, 0);
 
-	TArray<FFactoryUpgradeDefinition> InconsistentDefinitions = Definitions;
-	for (FFactoryUpgradeDefinition& Definition : InconsistentDefinitions)
-	{
-		if (Definition.UpgradeType == EFactoryUpgradeType::AutoCollectionCapacity)
-		{
-			Definition.RequiredHQLevel = 11;
-			break;
-		}
-	}
-	RequiredHQLevel = 999;
-	TestFalse(TEXT("불일치 값은 실패"),
-		FactoryUpgradeUnlockPolicy::TryResolveRequiredHQLevel(InconsistentDefinitions, RequiredHQLevel));
-	TestEqual(TEXT("불일치 실패 시 출력은 0"), RequiredHQLevel, 0);
-
+	// RequiredHQLevel 미저작(0) — DT 셀이 비면 전원 해금이 되는 사고를 막는다
 	TArray<FFactoryUpgradeDefinition> NonPositiveDefinitions = Definitions;
 	for (FFactoryUpgradeDefinition& Definition : NonPositiveDefinitions)
 	{
-		if (Definition.UpgradeType == EFactoryUpgradeType::AutoCollection)
+		if (Definition.UpgradeType == EFactoryUpgradeType::AutoCollectionCapacity)
 		{
 			Definition.RequiredHQLevel = 0;
 			break;
@@ -83,7 +67,7 @@ bool FCGRFactoryAutoUnlockPolicyTest::RunTest(const FString& Parameters)
 	TArray<FFactoryUpgradeDefinition> NegativeDefinitions = Definitions;
 	for (FFactoryUpgradeDefinition& Definition : NegativeDefinitions)
 	{
-		if (Definition.UpgradeType == EFactoryUpgradeType::BrickStock)
+		if (Definition.UpgradeType == EFactoryUpgradeType::AutoCollectionCapacity)
 		{
 			Definition.RequiredHQLevel = -1;
 			break;
@@ -143,6 +127,41 @@ bool FCGRFactoryCostCurveTest::RunTest(const FString& Parameters)
 			FFactoryUpgradeConfig::CalculateUpgradeValue(SpeedType, SpeedMaxLevel - 1),
 			FFactoryUpgradeConfig::CalculateUpgradeValue(SpeedType, SpeedMaxLevel), KINDA_SMALL_NUMBER));
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRFactoryEarlyCostCurveTest,
+	"CGR.Factory.EarlyCostCurve",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRFactoryEarlyCostCurveTest::RunTest(const FString& Parameters)
+{
+	for (const ECostCurveType CurveType : { ECostCurveType::Power, ECostCurveType::Geometric })
+	{
+		FFactoryUpgradeDefinition Definition;
+		Definition.BaseCost = 100;
+		Definition.CostCurveType = CurveType;
+		const FFactoryCostCurve Original = Definition.GetCostCurve();
+		Definition.EarlyCostMultiplier = 0.1f;
+		Definition.FullCostFromLevel = 10;
+		const FFactoryCostCurve Discounted = Definition.GetCostCurve();
+		TestTrue(TEXT("첫 구매는 실제로 저렴해진다"), Discounted.CostAtLevel(1) < Original.CostAtLevel(1));
+		int64 SingleTotal = 0;
+		for (int32 Level = 1; Level <= 20; ++Level)
+		{
+			TestTrue(TEXT("전환 경계에서도 가격이 감소하지 않는다"),
+				Discounted.CostAtLevel(Level) >= Discounted.CostAtLevel(Level - 1));
+			if (Level >= Definition.FullCostFromLevel)
+			{
+				TestEqual(TEXT("중후반 가격은 원래 곡선과 일치"), Discounted.CostAtLevel(Level), Original.CostAtLevel(Level));
+			}
+			SingleTotal += Definition.CalculateUpgradeCost(Level);
+		}
+		TestEqual(TEXT("초반 보정 경계를 넘는 벌크도 단건 결제 합계와 일치"), Discounted.BulkCost(1, 20), SingleTotal);
+		Definition.FullCostFromLevel = 1;
+		TestEqual(TEXT("보정 구간이 없으면 기본 가격"), Definition.CalculateUpgradeCost(1), Original.CostAtLevel(1));
+	}
 	return true;
 }
 

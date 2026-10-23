@@ -1,5 +1,13 @@
 #include "Misc/AutomationTest.h"
 #include "Utils/LaunchRewardRevealMath.h"
+#include "Data/StageProgressData.h"
+#include "JsonObjectConverter.h"
+#include "Serialization/MemoryReader.h"
+#include "Serialization/MemoryWriter.h"
+#include "Serialization/ObjectAndNameAsStringProxyArchive.h"
+#include "Manager/OfficeStageProgressManager.h"
+#include "Engine/World.h"
+#include "Misc/ScopeExit.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -60,6 +68,71 @@ bool FCGRRevealStampRunTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("3장 간격 0.108 (가속)"), FMath::IsNearlyEqual(T[2] - T[1], 0.108f, 0.0001f));
 	TestTrue(TEXT("하한 0.10 적용 (4→5장: 0.12*0.9^3=0.087 → 0.10)"), FMath::IsNearlyEqual(T[4] - T[3], 0.10f, 0.0001f));
 	TestEqual(TEXT("0장"), LaunchRewardRevealMath::StampRunTimes(0, 2.15f, 0.12f, 0.9f, 0.10f).Num(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRLaunchLootPreviewSaveTest,
+	"CGR.Launch.LootPreview.SaveRoundTrip",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRLaunchLootPreviewSaveTest::RunTest(const FString& Parameters)
+{
+	// 저장/재진입이 이미 공개한 보상을 잃으면 재추첨하거나 표시와 다른 보상을 지급하게 된다.
+	const FString Fixture = TEXT(R"({"reviewScore":35,"earnedExperience":278.5,"bLaunchLootPrepared":true,"pendingLaunchLoot":[{"itemType":"RecruitTicketAdvanced","itemAmount":2},{"itemType":"RecruitTicketPremium","itemAmount":1}]})");
+	FStageProgressData Before;
+	if (!TestTrue(TEXT("준비된 출시 결과 입력"), FJsonObjectConverter::JsonObjectStringToUStruct(Fixture, &Before))) return false;
+
+	TArray<uint8> Bytes;
+	FMemoryWriter Writer(Bytes);
+	FObjectAndNameAsStringProxyArchive SaveArchive(Writer, false);
+	SaveArchive.ArIsSaveGame = true;
+	SaveArchive.ArNoDelta = true;
+	FStageProgressData::StaticStruct()->SerializeItem(SaveArchive, &Before, nullptr);
+
+	FStageProgressData After;
+	FMemoryReader Reader(Bytes);
+	FObjectAndNameAsStringProxyArchive LoadArchive(Reader, true);
+	LoadArchive.ArIsSaveGame = true;
+	FStageProgressData::StaticStruct()->SerializeItem(LoadArchive, &After, nullptr);
+
+	TSharedPtr<FJsonObject> Restored = FJsonObjectConverter::UStructToJsonObject(After);
+	bool bPrepared = false;
+	const bool bHasPrepared = Restored.IsValid() && Restored->TryGetBoolField(TEXT("bLaunchLootPrepared"), bPrepared);
+	TestTrue(TEXT("로드한 결과도 추첨 완료 상태"), bHasPrepared && bPrepared);
+	const TArray<TSharedPtr<FJsonValue>>* Rewards = nullptr;
+	if (!TestTrue(TEXT("공개한 보상은 세이브에 남음"), Restored.IsValid() && Restored->TryGetArrayField(TEXT("pendingLaunchLoot"), Rewards))) return false;
+	if (!TestEqual(TEXT("보상 종류 보존"), Rewards->Num(), 2)) return false;
+	TestEqual(TEXT("고급 채용권 수량 보존"), (*Rewards)[0]->AsObject()->GetIntegerField(TEXT("itemAmount")), 2);
+	TestEqual(TEXT("프리미엄 채용권 수량 보존"), (*Rewards)[1]->AsObject()->GetIntegerField(TEXT("itemAmount")), 1);
+	TestEqual(TEXT("고급 채용권 타입 보존"), (*Rewards)[0]->AsObject()->GetStringField(TEXT("itemType")), FString(TEXT("RecruitTicketAdvanced")));
+	TestEqual(TEXT("실제 적립된 개인 경험치 합계도 결과와 함께 저장"), After.EarnedExperience, 278.5f);
+
+	UWorld* TestWorld = UWorld::CreateWorld(EWorldType::Game, false);
+	if (!TestNotNull(TEXT("저장 복원 테스트 월드"), TestWorld)) return false;
+	ON_SCOPE_EXIT { TestWorld->DestroyWorld(false); };
+	UOfficeStageProgressManager* Stage = NewObject<UOfficeStageProgressManager>(TestWorld);
+	After.ProjectID = After.ProjectNumber = 1;
+	After.ProjectName = TEXT("Pending launch");
+	After.ActiveMode = EProjectMode::InHouse;
+	After.CompanyType = ECompanyType::Game;
+	After.CurrentStep = 1;
+	After.StepDuration = 15.f;
+	FStepRoundData CompletedStep;
+	CompletedStep.DisciplineSlot = 0;
+	CompletedStep.AcquiredScore = CompletedStep.TargetScore;
+	CompletedStep.bIsCompleted = true;
+	After.Steps = { CompletedStep };
+	Stage->SetProgressData(After);
+	TestEqual(TEXT("공개한 결과는 출시 대기로 복원"), Stage->GetLifecycle(), EProjectLifecycle::LaunchPending);
+	TestEqual(TEXT("복원된 창에 같은 전리품 2종"), Stage->GetProgressData().PendingLaunchLoot.Num(), 2);
+	TestEqual(TEXT("복원된 창에 같은 개인 경험치 합계"), Stage->GetLastRoundEmployeeExp(), 278.5f);
+	TestFalse(TEXT("복원은 개발 타이머를 재시작하지 않음"), Stage->IsTimerRunning());
+	After.bLaunchLootPrepared = false;
+	Stage->SetProgressData(After);
+	TestEqual(TEXT("미완성 개발은 대기 상태로 복원"), Stage->GetLifecycle(), EProjectLifecycle::Idle);
+	TestEqual(TEXT("취소된 결과의 전리품은 남지 않음"), Stage->GetProgressData().PendingLaunchLoot.Num(), 0);
+	TestEqual(TEXT("취소된 결과의 경험치 표시는 남지 않음"), Stage->GetLastRoundEmployeeExp(), 0.0f);
 	return true;
 }
 

@@ -3,6 +3,7 @@
 #include "Manager/WorldMapManager.h"
 #include "Manager/SaveLoadManager.h"
 #include "Manager/TableManagerSubsystem.h"
+#include "Manager/TradePort.h"
 #include "Table/ProductRecipeTable.h"
 
 // ─────────────────────────────────────────────
@@ -629,13 +630,14 @@ TArray<FIntPoint> UWorldMapManager::GetAllProductKeys() const
 
 int64 UWorldMapManager::GetTotalWarehouseValue() const
 {
-	// MVP: ProjectIndex 기반 BasePrice 곡선만으로 추정
-	// (TradePort::GetBasePrice와 동일 공식 — 추후 함수 통합 가능)
+	const UGameInstance* GI = GetGameInstance();
+	const UTradePort* Trade = GI ? GI->GetSubsystem<UTradePort>() : nullptr;
+	if (!Trade) return 0;
 	int64 Total = 0;
 	for (const TPair<FIntPoint, int64>& Pair : ProductInventory)
 	{
-		const int64 Idx = FMath::Max<int64>(1, static_cast<int64>(Pair.Key.Y));
-		const int64 Base = FMath::Max<int64>(100, 100 + 50 * Idx * Idx);
+		const int64 Base = Trade->GetBasePrice(static_cast<ECompanyType>(Pair.Key.X), Pair.Key.Y);
+		if (Base <= 0) continue;
 
 		// 등급 배율 적용 (S=2.0, A=1.5, ..., F=0.5)
 		const EQualityGrade* GradePtr = ProductGrades.Find(Pair.Key);
@@ -648,14 +650,26 @@ int64 UWorldMapManager::GetTotalWarehouseValue() const
 
 void UWorldMapManager::DebugSeedRandomProducts(int32 NumSlots, int64 MinQty, int64 MaxQty)
 {
-	// 제조업 3종(Electronics/Semiconductor/Automobile) x 프로젝트 1~100 풀에서 랜덤 슬롯.
+	// 제조업(Electronics/Semiconductor/Automobile) x 프로젝트 1~100 풀에서 랜덤 슬롯.
 	// Game/Finance/IT 는 무형 산업이라 판매 가능한 물품 없음 → 제외.
-	const ECompanyType Manufacturing[] = {
+	TArray<ECompanyType> Manufacturing = {
 		ECompanyType::Electronics,
 		ECompanyType::Semiconductor,
 		ECompanyType::Automobile,
 	};
-	const int32 IndustryCount = UE_ARRAY_COUNT(Manufacturing);
+
+	// 미가용 업종(이번 출시 범위 밖)은 창고에 심지 않는다 ― 열리지 않는 업종의 재고는 팔 탭이 없다.
+	// 전부 걸러지면 필터를 포기한다(디버그 시딩이 조용히 0건이 되는 쪽이 더 나쁘다).
+	if (USaveLoadManager* AvailabilityMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<USaveLoadManager>() : nullptr)
+	{
+		TArray<ECompanyType> AvailablePool = Manufacturing.FilterByPredicate([AvailabilityMgr](ECompanyType Candidate)
+		{
+			return AvailabilityMgr->IsIndustryAvailable(Candidate);
+		});
+		if (AvailablePool.Num() > 0) { Manufacturing = MoveTemp(AvailablePool); }
+	}
+
+	const int32 IndustryCount = Manufacturing.Num();
 	const int32 ProjectMin = 1;
 	const int32 ProjectMax = 100;
 	const int32 GradeMin = static_cast<int32>(EQualityGrade::F);
@@ -671,8 +685,8 @@ void UWorldMapManager::DebugSeedRandomProducts(int32 NumSlots, int64 MinQty, int
 		AddProduct(FIntPoint(static_cast<int32>(Industry), ProjectIdx), Qty, Grade, /*bShouldSave=*/false);
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[WorldMapManager] DebugSeedRandomProducts: %d slots seeded (3 manufacturing, project 1~100, qty %lld~%lld)"),
-		NumSlots, MinQty, MaxQty);
+	UE_LOG(LogTemp, Warning, TEXT("[WorldMapManager] DebugSeedRandomProducts: %d slots seeded (%d manufacturing, project 1~100, qty %lld~%lld)"),
+		NumSlots, IndustryCount, MinQty, MaxQty);
 }
 
 ECountryType UWorldMapManager::GetPrimaryCountryForMaterial(ERawMaterialType Mat) const

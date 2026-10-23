@@ -22,15 +22,15 @@ bool FCGRFactoryTapHoldPolicyTest::RunTest(const FString& Parameters)
 		ResolveRelease(EPhase::None, false), EReleaseAction::None);
 	TestEqual(TEXT("Dragging pending release has no action"),
 		ResolveRelease(EPhase::Pending, true), EReleaseAction::None);
-	TestEqual(TEXT("Dragging holding release has no action"),
-		ResolveRelease(EPhase::Holding, true), EReleaseAction::None);
+	TestEqual(TEXT("Dragging holding release still stops production"),
+		ResolveRelease(EPhase::Holding, true), EReleaseAction::StopProduction);
 	TestEqual(TEXT("Dragging none release has no action"),
 		ResolveRelease(EPhase::None, true), EReleaseAction::None);
 
 	TestEqual(TEXT("Pending drag cancels the pending press"),
 		ResolveDrag(EPhase::Pending), EDragAction::CancelPending);
-	TestEqual(TEXT("Holding drag stops production"),
-		ResolveDrag(EPhase::Holding), EDragAction::StopProduction);
+	TestEqual(TEXT("Holding drag keeps production running"),
+		ResolveDrag(EPhase::Holding), EDragAction::KeepProduction);
 	TestEqual(TEXT("None drag has no action"),
 		ResolveDrag(EPhase::None), EDragAction::None);
 

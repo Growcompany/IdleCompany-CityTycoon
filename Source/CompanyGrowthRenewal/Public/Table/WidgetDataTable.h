@@ -15,7 +15,7 @@ struct FWidgetDataTable : public FTableRowBase
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere)
-	EWidgetType WidgetType;
+	EWidgetType WidgetType = EWidgetType::None;
 	
 	/** 생성할 위젯 클래스 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Widget")

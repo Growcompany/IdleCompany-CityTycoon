@@ -4,22 +4,28 @@
 #include "Components/ActorComponent.h"
 #include "Enum/EmployeeState.h"
 #include "Data/EmployeeBuff.h"
+#include "Data/EmployeeEquipmentRuntimeData.h"
 #include "EmployeeBehaviorComponent.generated.h"
 
 // 상태 변경 델리게이트
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEmployeeStateChanged, EEmployeeState, OldState, EEmployeeState, NewState);
 
-// 인사 애니메이션 완료 델리게이트
+// 인사 완료 델리게이트 (RecruitmentGameMode에서 바인딩)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnGreetingFinished);
 
 // 버프 변경 델리게이트 (Bubble/Overlay 갱신용)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBuffChanged, bool, bAnyActive);
 
 class UFatigueConfig;
+class UOfficeStageProgressManager;
 
 // 피로 슬랙 루프 단계 (내부 — Slacking 도달 → 텔레그래프(캐치 윈도우) → 늘어짐 → 드물게 번아웃 배회 → 복귀).
 // 개발(Stage) 중에만 동작. Slumping 까지는 자리 유지, Bolting 은 자리 이탈해 배회(움직이는 캐치 타깃).
 enum class EFatigueSlackPhase : uint8 { None, Telegraph, Slumping, Bolting };
+
+// 연출 전용 알림(반응 컴포넌트가 듣는다). 잡기 입력이었는지와 전환 직전 위치(복귀 달리기 출발점)를 같이 넘긴다.
+DECLARE_MULTICAST_DELEGATE_FourParams(FOnFatigueSlackPhaseChanged, EFatigueSlackPhase /*OldPhase*/, EFatigueSlackPhase /*NewPhase*/, bool /*bManualCatch*/, const FVector& /*PreviousLocation*/);
+DECLARE_MULTICAST_DELEGATE(FOnEmployeeCriticalContribution);
 
 /**
  * 직원 행동 시스템 컴포넌트
@@ -50,6 +56,9 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Behavior|Animation")
 	EEmployeeBehaviorMode CurrentBehaviorMode = EEmployeeBehaviorMode::Idle;
 
+	// 일반 제조 사무실에서 배정된 책상이 있는 직원의 상시 근무 여부.
+	bool IsContinuousManufacturingWorker() const;
+
 	// 현재 직원 상태
 	UPROPERTY(BlueprintReadOnly, Category = "Behavior|Animation")
 	EEmployeeState EmployeeState = EEmployeeState::Wander;
@@ -75,7 +84,7 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Behavior|Animation")
 	float Speed = 0.0f;
 
-	// 초상화·가챠 캡처처럼 외부 연출이 초기화를 직접 제어할 때 true
+	// 외부에서 초기화를 직접 제어할 때 true (RecruitmentMap 등)
 	UPROPERTY()
 	bool bSkipAutoInit = false;
 
@@ -85,10 +94,10 @@ public:
 
 	// 축적된 수익
 	UPROPERTY(BlueprintReadOnly, Category = "Behavior|Income")
-	float AccumulatedIncome = 0.0f;
+	double AccumulatedIncome = 0.0;
 
-	// Stamina 기반 Work/Rest 사이클 타이머 (현재 상태에서 경과 시간)
-	float CurrentStateTime = 0.0f;
+	// 실제 지급 정수부를 추출하고 소수부를 다음 지급까지 보존한다.
+	static int64 ResolveAccumulatedIncomePayout(double& PendingIncome);
 
 	//========================================
 	// 피로도 (Part A — 휘발성. 저장/리플리케이트 안 함, 맵 진입마다 fresh)
@@ -114,6 +123,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Behavior|Fatigue")
 	void ApplyTapRelief();
 
+	/** 실제 캐치 입력만 이 경로로 전달한다. 같은 DownID 재입력은 무변경이다. */
+	bool TryManualCatch();
+	bool IsEquipmentResting() const;
+
 	// 피로→출력 커플링 팩터 (1.0 ~ 1−MaxFatiguePenalty). Tired 이하 = 1.0, 노브는 DA_FatigueConfig.
 	float GetFatigueOutputFactor() const;
 
@@ -123,6 +136,12 @@ public:
 
 	// 라이브 힌트 문구/키가 꾸벅(Telegraph·Slumping)과 이탈(Bolting)로 갈리므로 단계까지 노출한다.
 	EFatigueSlackPhase GetFatigueSlackPhase() const { return FatigueSlackPhase; }
+
+	// 슬랙 단계 전환(진입·복귀·모드 전환 초기화) — 연출 전용, 게임플레이는 구독하지 않는다.
+	FOnFatigueSlackPhaseChanged OnFatigueSlackPhaseChanged;
+
+	// 크리티컬 기여 — 연출 전용(얼굴·몸 반응).
+	FOnEmployeeCriticalContribution OnCriticalContribution;
 
 	//========================================
 	// 일시 버프 (이벤트 효과)
@@ -155,20 +174,15 @@ public:
 	bool HasActiveBuff() const;
 
 private:
+	UOfficeStageProgressManager* GetEquipmentStage() const;
+	bool TryBeginEquipmentDown(bool bBolted);
+	bool TickEquipmentActivities();
+	void RecordEquipmentRecovery(EEquipmentRecoverySource Source);
+	float EquipmentSlumpDuration = 0;
+	float EquipmentBoltDuration = 0;
+	FGuid CurrentEquipmentDownId;
 	void TickBuffs(float DeltaTime);
 public:
-
-	//========================================
-	// Work/Rest 사이클 설정값 (Stamina 기반)
-	//========================================
-
-	// 기본 업무 지속 시간 — 실제 WorkDuration = Base × (1 + Stamina × 0.02)
-	UPROPERTY(EditDefaultsOnly, Category = "Behavior|Cycle Settings")
-	float BaseWorkDuration = 30.0f;
-
-	// 기본 휴식 지속 시간 — 실제 RestDuration = Base / (1 + Stamina × 0.01)
-	UPROPERTY(EditDefaultsOnly, Category = "Behavior|Cycle Settings")
-	float BaseRestDuration = 8.0f;
 
 	//========================================
 	// 수익 설정값 (EditDefaultsOnly)
@@ -262,14 +276,6 @@ public:
 	// 표시(수익 칩)가 여기를 읽으면 지급과 갈릴 수 없다. 앉아 쉬는 직원은 0.
 	float GetCurrentIncomePerSecond() const;
 
-	// 배회 시작
-	UFUNCTION(BlueprintCallable, Category = "Behavior|Wander")
-	void StartWander();
-
-	// 업무공간으로 복귀
-	UFUNCTION(BlueprintCallable, Category = "Behavior|Wander")
-	void ReturnToWorkstation();
-
 	// 행동 패턴 모드 변경
 	UFUNCTION(BlueprintCallable, Category = "Behavior|Mode")
 	void SetBehaviorMode(EEmployeeBehaviorMode NewMode);
@@ -277,6 +283,11 @@ public:
 	// 현재 행동 패턴 모드 반환
 	UFUNCTION(BlueprintPure, Category = "Behavior|Mode")
 	EEmployeeBehaviorMode GetBehaviorMode() const { return CurrentBehaviorMode; }
+
+	/** 채용 입장 중에는 일반 배회/피로 사이클이 달리기와 춤을 덮어쓰지 않는다. */
+	void BeginRecruitmentArrival();
+	void EndRecruitmentArrival();
+	bool IsRecruitmentArrivalActive() const { return bRecruitmentArrivalActive; }
 
 	// 앉아서 환호 (Step 성공 시)
 	UFUNCTION(BlueprintCallable, Category = "Behavior|Cheer")
@@ -303,7 +314,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Behavior|Animation")
 	void OnStandToSitComplete();
 
-	// 인사 애니메이션 시작
+	// 인사 시작 (RecruitmentGameMode에서 호출)
 	UFUNCTION(BlueprintCallable, Category = "Behavior|Greeting")
 	void StartGreeting();
 
@@ -328,6 +339,8 @@ public:
 	// 간격/산출 공통 배수 — 유효업무속도(스탯+★) 와 WorkSpeed 버프가 모이는 단일 지점.
 	// 초당 산출이 이 값에 비례하므로 피치 카드 추정기가 공식을 재구현하지 않고 그대로 읽으려 공개.
 	float GetSpeedFactor() const;
+	/** 기존 직원/이벤트/책상 속도. 장비 평가와 개발 예상치가 같은 기반을 쓴다. */
+	float GetBaseWorkSpeedFactor() const;
 
 	/** 직원 고유 속도에 책상 누적 속도율을 정확히 한 번 합성한다. */
 	static float ComposeWorkstationSpeedFactor(float EmployeeSpeedFactor, float WorkstationRate);
@@ -358,9 +371,6 @@ private:
 	// 업무 상태 틱 처리
 	void TickWorking(float DeltaTime);
 
-	// 휴식 상태 틱 처리
-	void TickRest(float DeltaTime);
-
 	// 배회 상태 틱 처리
 	void TickWander(float DeltaTime);
 
@@ -369,12 +379,6 @@ private:
 
 	// 수익 발생 처리
 	void GenerateIncome(float DeltaTime);
-
-	// Stamina 기반 Work 지속 시간 (초) — 체력 높으면 오래 일함
-	float GetWorkDuration() const;
-
-	// Stamina 기반 Rest 지속 시간 (초) — 체력 높으면 짧게 쉼
-	float GetRestDuration() const;
 
 	// Owner 직원의 Stamina 스탯 조회 — EmployeeManager 경유, 실패 시 0
 	int32 GetOwnerStamina() const;
@@ -395,6 +399,7 @@ private:
 
 	// 댄스 지속 타이머 (루프 클립이라 노티파이 없음 → 시간 경과로 종료) + 완료 콜백
 	FTimerHandle DanceTimerHandle;
+	bool bRecruitmentArrivalActive = false;
 	void OnDanceComplete();
 
 	//========================================
@@ -454,7 +459,8 @@ private:
 	void EnterSlackTelegraph();
 	void EnterSlackSlump();
 	void EnterSlackBolt();
-	void ExitSlackToWork();
+	void ExitSlackToWork(EEquipmentRecoverySource Source = EEquipmentRecoverySource::Natural);
+	void BroadcastSlackPhaseChanged(EFatigueSlackPhase OldPhase, bool bManualCatch = false, const FVector& PreviousLocation = FVector::ZeroVector);
 
 	// 폭주 굴림 — 피로 사슬과 독립. 개발 중 매초 1회 침착성 판정(1초 누산으로 프레임레이트 무관).
 	float BoltRollTimer = 0.0f;

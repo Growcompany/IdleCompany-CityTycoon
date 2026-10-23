@@ -8,9 +8,9 @@
 
 namespace
 {
-	// 위젯 로컬 크기/모양 (하단중앙 = V 꼭짓점)
-	constexpr float BoxW = 130.f;
-	constexpr float BoxH = 118.f;
+	// 위젯 로컬 크기/모양 (하단중앙 = V 꼭짓점). 이름에 Chevron 접두 = unity 빌드에서 남의 지역 변수와 충돌 방지(C4459)
+	constexpr float ChevronBoxW = 130.f;
+	constexpr float ChevronBoxH = 118.f;
 	// 주의: 비율 HalfW/Depth 는 1.30 이상 유지할 것 — Slate FLineBuilder 는 꺾임각 76.5° 초과 시
 	// 미터 대신 스트립 분할(캡 2개)로 그려서 꼭짓점이 깨짐 (48/38=1.263 으로 0.0013 차 탈락 실측)
 	constexpr float HalfW = 48.f;      // V 반폭
@@ -39,8 +39,8 @@ TSharedRef<SWidget> USelectionChevronWidget::RebuildWidget()
 	if (WidgetTree && !WidgetTree->RootWidget)
 	{
 		USizeBox* Root = WidgetTree->ConstructWidget<USizeBox>(USizeBox::StaticClass(), TEXT("ChevronRoot"));
-		Root->SetWidthOverride(BoxW);
-		Root->SetHeightOverride(BoxH);
+		Root->SetWidthOverride(ChevronBoxW);
+		Root->SetHeightOverride(ChevronBoxH);
 		WidgetTree->RootWidget = Root;
 	}
 	return Super::RebuildWidget();
@@ -60,7 +60,7 @@ int32 USelectionChevronWidget::NativePaint(const FPaintArgs& Args, const FGeomet
 	const int32 DrawLayer = MaxLayer + 1;
 
 	// 메인 V (아래 방향, 꼭짓점 = 하단중앙)
-	const FVector2D Tip(BoxW * 0.5f, BoxH - 8.f);
+	const FVector2D Tip(ChevronBoxW * 0.5f, ChevronBoxH - 8.f);
 	DrawChevronV(OutDrawElements, DrawLayer, AllottedGeometry, Tip, HalfW, Depth,
 		MainColor, 6.5f);
 

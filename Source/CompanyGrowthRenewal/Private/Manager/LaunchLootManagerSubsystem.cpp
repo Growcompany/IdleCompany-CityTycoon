@@ -189,7 +189,10 @@ TArray<FMissionReward> ULaunchLootManagerSubsystem::RollAndGrant(FName TableKey,
 			if (RandomValue < Accumulated) { Picked = C; break; }
 		}
 
-		int64 Amount = FMath::RandRange((int32)Picked->AmountMin, (int32)Picked->AmountMax);
+		// AmountMin/Max 는 int64 ― int32 캐스트는 큰 수량을 절단한다. 범위 역전은 테이블 로드에서 걸러지지만 하한도 함께 지킨다.
+		const int64 PickMin = FMath::Max<int64>(1, Picked->AmountMin);
+		const int64 PickMax = FMath::Max<int64>(PickMin, Picked->AmountMax);
+		int64 Amount = FMath::RandRange(PickMin, PickMax);
 		if (Picked->bScaleWithProject)
 		{
 			Amount = FMath::Max<int64>(1, ScaleBasis * Amount / 10000);
@@ -231,7 +234,7 @@ void ULaunchLootManagerSubsystem::GrantRewards(const TArray<FMissionReward>& Rew
 	UResourceItemManager* ResMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>();
 	UItemInventoryManager* ItemMgr = GetGameInstance()->GetSubsystem<UItemInventoryManager>();
 
-	// bShouldSave=false — 기본값이면 보상 1건당 전체 세이브(출시 1회 최대 5회)라 말미 1회로 통합 (GoalBoardSubsystem::ClaimGoal 패턴)
+	// 보상별 저장을 생략하고 출시 보상 전체를 반영한 뒤 한 번 저장한다.
 	int32 GrantedCount = 0;
 	for (const FMissionReward& R : Rewards)
 	{
@@ -262,4 +265,10 @@ void ULaunchLootManagerSubsystem::RollLaunchLoot(int32 ReviewScore, int32 Projec
 	// ScaleBasis 0 = 비례(bScaleWithProject) 엔트리 제외. 출시 전리품은 티켓 고정수량 테이블이라 비례 행이 없다.
 	LastLaunchLoot = RollAndGrant(ReviewScoreToTableKey(ReviewScore), ProjectTier, /*ScaleBasis=*/0,
 		/*ExtraRolls=*/0, /*bGrant=*/true, /*bSaveAfterGrant=*/false);
+}
+
+void ULaunchLootManagerSubsystem::GrantLaunchLoot(const TArray<FMissionReward>& Rewards)
+{
+	LastLaunchLoot = Rewards;
+	GrantRewards(Rewards, false);
 }

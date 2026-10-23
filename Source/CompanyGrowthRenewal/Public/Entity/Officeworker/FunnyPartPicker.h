@@ -2,8 +2,15 @@
 
 #include "CoreMinimal.h"
 #include "Enum/FunnyPartSlot.h"
-#include "Enum/FaceExpression.h"
 #include "Data/EmployeeTypes.h"
+
+// 얼굴 판 MID 의 개인 차이 값 — 같은 그림이라도 눈 크기·높이가 조금씩 달라야 복사한 얼굴로 안 보인다.
+struct FFunnyFaceVariation
+{
+	float EyeScale = 1.f;
+	float EyeOffsetY = 0.f;
+	float MouthOffsetY = 0.f;
+};
 
 /**
  * 개인 시드축 파츠 선택 — 월드/에셋 없이 도는 순수 로직이라 단위 테스트가 가능하다.
@@ -21,6 +28,12 @@ struct COMPANYGROWTHRENEWAL_API FFunnyPartPicker
 
 	static bool IsGenderMatch(EFunnyPartGender RowGender, EEmployeeGender Employee);
 
-	// Neutral 만 개인 시드 눈썹을 살린다. 그 외 표정은 DT 눈썹이 덮는다.
-	static bool ExpressionOverridesBrow(EWorkerFaceExpression Expression);
+	// EyeScale 0.92~1.08 · EyeOffsetY −0.02~0.02 · MouthOffsetY −0.015~0.02 (얼굴 판 UV 단위).
+	static FFunnyFaceVariation PickFaceVariation(int32 EmployeeID);
+
+	// 깜빡임 간격 난수 시드 — 사람마다 박자가 달라야 사무실 전원이 같은 순간에 눈을 감지 않는다.
+	static int32 FaceBlinkSeed(int32 EmployeeID);
+
+	// 연속 직원 ID StyleCount개마다 모든 스타일을 한 번씩 배정한다. 빈 목록은 INDEX_NONE.
+	static int32 PickFaceStyle(int32 EmployeeID, int32 StyleCount);
 };

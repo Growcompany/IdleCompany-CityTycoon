@@ -48,13 +48,13 @@ bool FCGREnhancementEconomyTest::RunTest(const FString& Parameters)
 		UBuildingEnhancementHelper::CalculateUpgradeCost(CostType, 1000)
 			> UBuildingEnhancementHelper::CalculateUpgradeCost(CostType, 999));
 
-	// 칸수 비례(bScaleCostByFootprint)는 증축 전용이다. Money 강화가 여기 휩쓸리면
-	// 2x2 빌딩이 마케팅파워까지 4배를 내게 된다. 폴백 기본값이 false 라 이 경로가 그 검증이다.
-	// (켜진 경로 = 빌드업은 DT 리임포트의 expect 검사와 PIE 가 담당 — 자동화 테스트엔 DT 가 없다.)
-	TestEqual(TEXT("칸수 비례가 꺼진 슬롯은 footprint 무관"),
-		UBuildingEnhancementHelper::CalculateUpgradeCost(CostType, 10, 4),
+	// 건설비 비례(bScaleCostByBuildCost)는 증축 전용이다. Money 강화가 여기 휩쓸리면
+	// 비싼 빌딩이 마케팅파워까지 건설비 배수로 내게 된다. 폴백 기본값이 false 라 이 경로가 그 검증이다.
+	// (켜진 경로 = 빌드업은 DT 왕복 검사와 PIE 가 담당 — 자동화 테스트엔 DT 가 없다.)
+	TestEqual(TEXT("건설비 비례가 꺼진 슬롯은 기본 건설비 무관"),
+		UBuildingEnhancementHelper::CalculateUpgradeCost(CostType, 10, 2700),
 		UBuildingEnhancementHelper::CalculateUpgradeCost(CostType, 10, 1));
-	TestEqual(TEXT("칸수 0/음수는 1칸으로 정규화"),
+	TestEqual(TEXT("기본 건설비 0/음수는 배수 1로 정규화"),
 		UBuildingEnhancementHelper::CalculateUpgradeCost(CostType, 10, 0),
 		UBuildingEnhancementHelper::CalculateUpgradeCost(CostType, 10, 1));
 
@@ -75,11 +75,11 @@ bool FCGREnhancementEconomyTest::RunTest(const FString& Parameters)
 		FMath::RoundToInt64(ABuildingBaseActor::BaseVaultCapacity), 60000LL);
 
 	// Lv2500 = 예산 도달선(Lv2,500~2,900) 표본. 배수는 폴백 EffectPerLevel(0.0008) 산출물 —
-	// 위 금고와 같은 이유로 DT 값이 아니다
-	const float KeystoneLv2500 = 10.0f * UBuildingEnhancementHelper::CalculateEffectMultiplier(
-		EBuildingEnhancementType::KeystoneAuraPower, 2500);
-	TestTrue(TEXT("키스톤 기본 10%는 Lv2500에서 30%"),
-		FMath::IsNearlyEqual(KeystoneLv2500, 30.0f, 0.01f));
+	// 위 금고와 같은 이유로 DT 값이 아니다. 폴백은 타입과 무관해 어느 타입으로도 같은 배수가 나온다.
+	const float FallbackLv2500 = 10.0f * UBuildingEnhancementHelper::CalculateEffectMultiplier(
+		EBuildingEnhancementType::ProjectLifespan, 2500);
+	TestTrue(TEXT("폴백 배수에서 기본 10%는 Lv2500에서 30%"),
+		FMath::IsNearlyEqual(FallbackLv2500, 30.0f, 0.01f));
 	return true;
 }
 
@@ -171,10 +171,9 @@ bool FCGREmployeeCapacityTest::RunTest(const FString& Parameters)
 	Data.FootprintWidthCells = 0; Data.FootprintDepthCells = 0;
 	TestEqual(TEXT("칸수 0 은 1칸 취급"), Data.GetEmployeeCapacity(0), 10);
 
-	// 키스톤은 직원을 받지 않는다
+	// 3x3 (구 특수빌딩 규격) 도 같은 식으로 인원을 받는다 — 칸수만 다르다
 	Data.FootprintWidthCells = 3; Data.FootprintDepthCells = 3;
-	Data.KeystoneAura.bIsKeystone = true;
-	TestEqual(TEXT("키스톤은 인원 0"), Data.GetEmployeeCapacity(10), 0);
+	TestEqual(TEXT("9칸 증축 10층 = (10+10)×9"), Data.GetEmployeeCapacity(10), 180);
 
 	return true;
 }
@@ -190,7 +189,7 @@ bool FCGRHireCapacityGateTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("정원 직전은 고용 가능"), UEmployeeManager::IsUnderCapacity(11, 12));
 	TestFalse(TEXT("정원 도달은 고용 불가"), UEmployeeManager::IsUnderCapacity(12, 12));
 	TestFalse(TEXT("정원 초과(데이터 오염)도 고용 불가"), UEmployeeManager::IsUnderCapacity(13, 12));
-	// 키스톤은 정원 0 — 직원을 받지 않는다
+	// 정원 0 (데이터 오염/미설정) 이면 열리지 않는다
 	TestFalse(TEXT("정원 0 이면 항상 불가"), UEmployeeManager::IsUnderCapacity(0, 0));
 	// 정원이 음수로 오염돼도 열리면 안 된다
 	TestFalse(TEXT("정원 음수는 항상 불가"), UEmployeeManager::IsUnderCapacity(0, -1));

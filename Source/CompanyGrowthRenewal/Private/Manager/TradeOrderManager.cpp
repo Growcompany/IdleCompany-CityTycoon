@@ -392,16 +392,29 @@ FTradeOrder UTradeOrderManager::CreateRandomOrder(ETradeOrderTier Tier, ECompany
 	Order.OrderId = NextOrderId++;
 	Order.Tier = Tier;
 
-	// 회사 타입 선택: 제조업 3종 중에서만 (서비스업은 재고 개념 없어 납품 불가)
+	// 회사 타입 선택: 제조업 중에서만 (서비스업은 재고 개념 없어 납품 불가)
 	ECompanyType PickedCompany = ForceCompany;
 	if (PickedCompany == ECompanyType::None)
 	{
-		const ECompanyType ManuPool[] = {
+		TArray<ECompanyType> ManuPool = {
 			ECompanyType::Electronics,
 			ECompanyType::Automobile,
 			ECompanyType::Semiconductor
 		};
-		PickedCompany = ManuPool[FMath::RandRange(0, 2)];
+
+		// 미가용 업종(이번 출시 범위 밖)은 뽑지 않는다. 전부 걸러지면 필터를 포기한다 ―
+		// 풀이 비면 납품 주문이 하나도 안 생겨 무역 컨텐츠가 통째로 멈춘다.
+		if (USaveLoadManager* AvailabilityMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<USaveLoadManager>() : nullptr)
+		{
+			TArray<ECompanyType> AvailablePool = ManuPool.FilterByPredicate([AvailabilityMgr](ECompanyType Candidate)
+			{
+				return AvailabilityMgr->IsIndustryAvailable(Candidate);
+			});
+			if (AvailablePool.Num() > 0) { ManuPool = MoveTemp(AvailablePool); }
+		}
+
+		// 상한은 풀 크기에서 유도한다 ― 상수로 적으면 풀이 줄었을 때 범위를 벗어난다
+		PickedCompany = ManuPool[FMath::RandRange(0, ManuPool.Num() - 1)];
 	}
 	Order.CompanyType = PickedCompany;
 

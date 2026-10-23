@@ -72,6 +72,10 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UIconWithButtonWidget> FriendChatTab = nullptr;
 
+	// 위로 올려 읽는 중 도착한 메시지 수 안내. WBP 에 없으면 조용히 생략되고 스크롤 정책은 그대로 동작한다.
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> NewMessageNotice = nullptr;
+
 private:
 	UPROPERTY()
 	UCommonButtonGroupBase* TabButtonGroup = nullptr;
@@ -110,6 +114,23 @@ private:
 
 	// UI에 메시지 위젯 추가
 	void AddMessageToUI(const FChatMessage& Message);
+
+	// 맨 위 오래된 메시지 잘라내기 - 위로 올려 읽는 중에는 읽던 줄이 밀리므로 바닥 근처일 때만 호출한다
+	void TrimOldMessages();
+
+	// 하단 근처인지 - 읽던 자리를 뺏지 않기 위한 판정
+	bool IsNearBottom() const;
+
+	// 대기 중인 새 메시지 수를 안내 문구에 반영한다
+	void RefreshNewMessageNotice();
+
+	// 손으로 바닥까지 내려온 경우 - 안내를 지우고 미뤄둔 트리밍을 따라잡는다
+	UFUNCTION()
+	void OnMessageScrollUserScrolled(float CurrentOffset);
+
+	// 하단에서 이만큼 안쪽이면 "바닥에 있다"로 본다
+	static constexpr float NearBottomThreshold = 24.f;
+	int32 PendingNewMessageCount = 0;
 
 	// 스크롤 맨 아래로 이동
 	void ScrollToBottom();

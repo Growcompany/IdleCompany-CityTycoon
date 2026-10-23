@@ -1,12 +1,15 @@
 #include "UI/Panel/BuildModalWidget.h"
+#include "UI/Element/Common/ModalFrameWidget.h"
 
 #include "Core/CGGameInstance.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/UIManagerSubsystem.h"
 #include "Manager/EntityManager.h"
 #include "Manager/SpawnManager.h"
+#include "Entity/Plot/CityPlotActor.h" // 수용량 권위(배치형=박스 산출)
 #include "Manager/SaveLoadManager.h"
 #include "Manager/ResourceItemManager.h"
+#include "Manager/MissionManagerSubsystem.h"
 #include "Table/ResourceInfo.h"
 #include "Enum/ResourceType.h"
 
@@ -17,6 +20,8 @@
 #include "UI/Element/Cards/BuildEntityCardWidget.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Panel/BuildPlacementPanelWidget.h"
+#include "UI/Element/Office/CatalogEdgeFade.h"
+#include "CommonTextBlock.h"
 
 #include "Groups/CommonButtonGroupBase.h"
 #include "CommonButtonBase.h"
@@ -55,6 +60,7 @@ void UBuildModalWidget::NativeConstruct()
 		{
 			Def.Key->SetCompanyType(Def.Value);
 			Def.Key->SetIsSelectable(true);
+			if (Def.Key == GameTile) Def.Key->SetIsInteractableWhenSelected(true);
 			AllTiles.Add(Def.Key);
 			Def.Key->OnClicked().AddUObject(this, &UBuildModalWidget::OnIndustryTileClicked, Def.Key);
 		}
@@ -72,26 +78,6 @@ void UBuildModalWidget::NativeConstruct()
 	// 활성화 전에는 캐시를 비우고, NativeOnActivated에서 버튼 그룹과 함께 Game으로 동기화한다.
 	SelectedCompanyType = ECompanyType::None;
 
-	// 카드 [일반]/[특수] 탭 그룹 — 두 탭이 모두 WBP 에 존재할 때만 셋업(미배치면 필터/탭 없이 전체 목록).
-	// 탭 래퍼(UTabButtonWidget)는 UUserWidget 이라 GetButton() 으로 내부 CommonButton 을 꺼내 등록(ManagePanel 패턴).
-	CurrentCardTabIndex = 0;
-	if (NormalCardTab && SpecialCardTab)
-	{
-		CardTabButtonGroup = NewObject<UCommonButtonGroupBase>(this);
-		CardTabButtonGroup->SetSelectionRequired(true); // 항상 하나는 선택
-		auto RegisterCardTab = [this](UButtonWidget* Tab)
-		{
-			if (!Tab) return;
-			// UButtonWidget = CommonButtonBase 파생 → 그룹에 직접 등록(GetButton 래퍼 불필요, SortToggle 패턴)
-			CardTabButtonGroup->AddWidget(Tab);
-			Tab->SetIsSelectable(true);
-		};
-		RegisterCardTab(NormalCardTab);   // index 0 = 일반
-		RegisterCardTab(SpecialCardTab);  // index 1 = 특수
-		CardTabButtonGroup->OnSelectedButtonBaseChanged.AddDynamic(this, &UBuildModalWidget::OnCardTabSelectionChanged);
-		CardTabButtonGroup->SelectButtonAtIndex(0);
-	}
-
 	// ListView 엔트리 생성 시 카드 선택 델리게이트 연결 (재활용 대비 AddUnique)
 	if (BuildItemListView)
 	{
@@ -99,11 +85,13 @@ void UBuildModalWidget::NativeConstruct()
 		// 가로 스크롤바 항상 표시 — 스크롤바 공간을 상시 예약해 탭 전환(스크롤바 有無) 시 높이 점프를 막는다(있고/없고가 아니라 항상 있음).
 		BuildItemListView->SetScrollbarVisibility(ESlateVisibility::Visible);
 		// 카드 타일 크기(EntryWidth/EntryHeight)는 WBP TileView 가 단일 소스 — 여기서 코드로 덮지 않는다(WBP 디자이너에서 튜닝).
+		if (UWidget* ListFade = GetWidgetFromName(TEXT("CatalogListFade"))) BindCatalogEdgeFade(this, BuildItemListView, ListFade);
+		else UE_LOG(LogTemp, Warning, TEXT("[BuildModal] CatalogListFade 미배치 ― 카드 끝 흐림 없음 (WBP 확인)"));
 	}
 
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UBuildModalWidget::OnCloseClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UBuildModalWidget::OnCloseClicked);
 	}
 
 	if (BackgroundBtn)
@@ -130,10 +118,6 @@ void UBuildModalWidget::NativeOnActivated()
 		{
 			IndustryButtonGroup->SelectButtonAtIndex(0);
 		}
-		if (CardTabButtonGroup)
-		{
-			CardTabButtonGroup->SelectButtonAtIndex(0); // 항상 [일반] 탭으로 연다
-		}
 		RefreshBuildingCards();
 		if (EmptyStatePrompt)
 		{
@@ -147,6 +131,7 @@ void UBuildModalWidget::NativeOnActivated()
 		{
 			BuildItemListView->ClearListItems();
 		}
+		RefreshListChrome();
 		if (EmptyStatePrompt)
 		{
 			EmptyStatePrompt->SetVisibility(ESlateVisibility::HitTestInvisible);
@@ -179,18 +164,13 @@ void UBuildModalWidget::NativeDestruct()
 		IndustryButtonGroup->RemoveAll();
 	}
 
-	if (CardTabButtonGroup)
-	{
-		CardTabButtonGroup->OnSelectedButtonBaseChanged.RemoveAll(this);
-		CardTabButtonGroup->RemoveAll();
-	}
-
 	if (BuildItemListView)
 	{
 		BuildItemListView->OnEntryWidgetGenerated().RemoveAll(this);
+		BuildItemListView->OnListViewScrolled().RemoveAll(this);
 	}
 
-	if (UIE_CloseButton) UIE_CloseButton->OnCloseClicked.RemoveDynamic(this, &UBuildModalWidget::OnCloseClicked);
+	if (UCloseButtonWidget* PanelCloseButton = ModalFrame ? ModalFrame->GetCloseButton() : nullptr) PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UBuildModalWidget::OnCloseClicked);
 	if (BackgroundBtn) BackgroundBtn->OnClicked.RemoveDynamic(this, &UBuildModalWidget::OnBackgroundClicked);
 
 	for (UIndustryButtonWidget* Tile : AllTiles)
@@ -210,6 +190,109 @@ void UBuildModalWidget::HandleEntryGenerated(UUserWidget& EntryWidget)
 	{
 		Card->OnCardSelected.AddUniqueDynamic(this, &UBuildModalWidget::OnBuildCardSelected);
 	}
+}
+
+UWidget* UBuildModalWidget::GetBuildGuideCatalogWidget() const
+{
+	ECompanyType CompanyType = ECompanyType::None;
+	if (!IsActivated() || !BuildItemListView || !TryGetSelectedCompanyType(CompanyType))
+	{
+		return nullptr;
+	}
+	const ESlateVisibility ListVisibility = BuildItemListView->GetVisibility();
+	if (ListVisibility == ESlateVisibility::Hidden || ListVisibility == ESlateVisibility::Collapsed
+		|| !BuildItemListView->GetIsEnabled())
+	{
+		return nullptr;
+	}
+
+	for (UUserWidget* Entry : BuildItemListView->GetDisplayedEntryWidgets())
+	{
+		UBuildEntityCardWidget* Card = Cast<UBuildEntityCardWidget>(Entry);
+		if (Card && Card->GetVisibility() != ESlateVisibility::Hidden
+			&& Card->GetVisibility() != ESlateVisibility::Collapsed
+			&& Card->GetIsEnabled() && !Card->IsLocked())
+		{
+			return BuildItemListView;
+		}
+	}
+	return nullptr;
+}
+
+UWidget* UBuildModalWidget::GetBuildGuideFirstCardWidget() const
+{
+	if (!GetBuildGuideCatalogWidget())
+	{
+		return nullptr;
+	}
+	UBuildEntityCardWidget* FirstCard = BuildItemListView->GetEntryWidgetFromItem<UBuildEntityCardWidget>(
+		BuildItemListView->GetItemAt(0));
+	return FirstCard && FirstCard->IsVisible() && FirstCard->GetIsEnabled() && !FirstCard->IsLocked()
+		? FirstCard : nullptr;
+}
+
+UWidget* UBuildModalWidget::GetBuildGuideBestCardWidget(FText* OutName) const
+{
+	if (!GetBuildGuideCatalogWidget())
+	{
+		return nullptr;
+	}
+	const UResourceItemManager* Resources = GetGameInstance() ? GetGameInstance()->GetSubsystem<UResourceItemManager>() : nullptr;
+	const UEntityCardData* Best = nullptr;
+	for (UObject* Item : BuildItemListView->GetListItems())
+	{
+		const UEntityCardData* Data = Cast<UEntityCardData>(Item);
+		EResourceType Missing = EResourceType::None;
+		if (!Data || Data->bLevelLocked || !Resources || !Resources->CanAffordCosts(Data->BuildableInfo.ConstructionCosts, Missing))
+		{
+			continue;
+		}
+		// 같은 보너스면 앞 카드를 유지한다
+		if (!Best || Data->IncomeBonusPercent > Best->IncomeBonusPercent)
+		{
+			Best = Data;
+		}
+	}
+	UBuildEntityCardWidget* Card = Best
+		? BuildItemListView->GetEntryWidgetFromItem<UBuildEntityCardWidget>(const_cast<UEntityCardData*>(Best)) : nullptr;
+	if (!Card || !Card->IsVisible() || !Card->GetIsEnabled() || Card->IsLocked())
+	{
+		return GetBuildGuideFirstCardWidget();
+	}
+	if (OutName)
+	{
+		*OutName = FText::FromName(Best->BuildableInfo.Name);
+	}
+	return Card;
+}
+
+UWidget* UBuildModalWidget::GetBuildGuideIndustryWidget() const
+{
+	return IsActivated() && GameTile && GameTile->GetIsEnabled() && !GameTile->IsIndustryLocked()
+		&& GameTile->GetVisibility() == ESlateVisibility::Visible ? GameTile : nullptr;
+}
+
+UWidget* UBuildModalWidget::GetIndustryTileWidget(ECompanyType Industry) const
+{
+	if (!IsActivated() || Industry == ECompanyType::None)
+	{
+		return nullptr;
+	}
+	for (UIndustryButtonWidget* Tile : AllTiles)
+	{
+		if (Tile && Tile->GetCompanyType() == Industry)
+		{
+			return Tile->GetIsEnabled() && !Tile->IsIndustryLocked()
+				&& Tile->GetVisibility() == ESlateVisibility::Visible ? Tile : nullptr;
+		}
+	}
+	return nullptr;
+}
+
+ECompanyType UBuildModalWidget::GetSelectedIndustry() const
+{
+	ECompanyType Selected = ECompanyType::None;
+	return TryGetSelectedCompanyType(Selected) ? Selected : ECompanyType::None;
 }
 
 bool UBuildModalWidget::TryGetSelectedCompanyType(ECompanyType& OutCompanyType) const
@@ -251,67 +334,10 @@ void UBuildModalWidget::OnIndustryTileSelected(UCommonButtonBase* SelectedButton
 	}
 }
 
-void UBuildModalWidget::OnCardTabSelectionChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex)
-{
-	CurrentCardTabIndex = ButtonIndex;
-
-	// 특수(1) 탭 = 모뉴먼트(키스톤). 업종은 모뉴먼트엔 무시되지만, 산업 타일을 Collapsed 로 숨기면
-	// 위 영역이 줄어 카드 웰이 위로 점프하는 UX 단절이 생긴다 → 탭 전환과 무관하게 항상 표시해 레이아웃 고정.
-	const bool bSpecialTab = (ButtonIndex == 1);
-	for (UIndustryButtonWidget* Tile : AllTiles)
-	{
-		if (Tile)
-		{
-			// 특수: 업종은 모뉴먼트에 무관 → 숨기지 말고(레이아웃 점프 방지) "보이되 비활성/흐림"으로.
-			// 선택 상태는 유지(일반 복귀 시 복원), 클릭은 차단, 시각적으로 "여기선 안 쓰임" 신호. 일반은 활성/선명.
-			Tile->SetVisibility(ESlateVisibility::Visible);
-			Tile->SetIsEnabled(!bSpecialTab);
-			Tile->SetRenderOpacity(bSpecialTab ? 0.45f : 1.0f);
-		}
-	}
-	if (!bSpecialTab)
-	{
-		// 위 루프가 전 타일을 RenderOpacity 1.0 으로 되돌리므로, 일반 탭 복귀 시 HQ 잠금 상태를 재적용해
-		// 잠긴 타일의 회색 티저를 복원(그대로 두면 특수 탭 왕복 후 잠긴 산업이 풀린 것처럼 보임).
-		RefreshIndustryLocks();
-	}
-	// 카드 표시 조건: 특수(업종 무관) 또는 일반+업종선택됨. 그 외(일반+미선택)엔 카드 비우고 안내만 표시.
-	// → 카드와 "산업을 선택하세요" 안내가 절대 동시에 뜨지 않게(탭 전환 시 겹침 버그 방지).
-	const bool bShowCards = bSpecialTab || (SelectedCompanyType != ECompanyType::None);
-	if (bShowCards)
-	{
-		RefreshBuildingCards();
-		if (EmptyStatePrompt)
-		{
-			EmptyStatePrompt->SetVisibility(ESlateVisibility::Collapsed);
-		}
-	}
-	else
-	{
-		if (BuildItemListView)
-		{
-			BuildItemListView->ClearListItems();
-		}
-		if (EmptyStatePrompt)
-		{
-			EmptyStatePrompt->SetVisibility(ESlateVisibility::HitTestInvisible);
-		}
-	}
-}
-
 void UBuildModalWidget::OnBuildCardSelected(const FBuildableCardTable& SelectedInfo)
 {
-	// 선택 빌딩이 키스톤(모뉴먼트)인지 — 키스톤은 업종 무관이라 산업 선택 게이트를 우회한다(탭 유무와 독립).
-	bool bSelectedKeystone = false;
-	if (UTableManagerSubsystem* KTMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr)
-	{
-		bool bKOk = false;
-		const FBuildingData KData = KTMgr->GetBuildingData(SelectedInfo.RowName, bKOk);
-		bSelectedKeystone = bKOk && KData.KeystoneAura.bIsKeystone;
-	}
-	// 일반 빌딩은 현재 버튼 그룹 선택을 검증하고, 키스톤은 기존 산업 선택 게이트를 우회한다.
 	ECompanyType CompanyTypeForBuild = SelectedCompanyType;
-	if (!bSelectedKeystone && !TryGetSelectedCompanyType(CompanyTypeForBuild))
+	if (!TryGetSelectedCompanyType(CompanyTypeForBuild))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[BuildModalWidget] Build blocked: no valid industry is selected."));
 		return;
@@ -356,14 +382,17 @@ void UBuildModalWidget::OnBuildCardSelected(const FBuildableCardTable& SelectedI
 		}
 
 		bool bAnyPlotHasRoom = false;
-		if (TableManager && EntityMgr)
+		if (SpawnMgr && EntityMgr)
 		{
 			for (const FName& OwnedId : OwnedPlotIds)
 			{
-				bool bPlotOk = false;
-				const FCityPlotData PlotData = TableManager->GetCityPlotData(OwnedId, bPlotOk);
-				if (bPlotOk &&
-					EntityMgr->HasFreeCapacityOnPlot(OwnedId, PlotData.BuildingCapacity))
+				// 수용량 권위는 부지 액터다 — 레벨 배치형은 박스 크기에서 산출하므로 DT 값과 다를 수 있다.
+				const ACityPlotActor* OwnedPlot = SpawnMgr ? SpawnMgr->GetSpawnedPlotById(OwnedId) : nullptr;
+				if (!OwnedPlot)
+				{
+					continue;
+				}
+				if (EntityMgr->HasFreeCapacityOnPlot(OwnedId, OwnedPlot->GetBuildingCapacity()))
 				{
 					bAnyPlotHasRoom = true;
 					break;
@@ -394,40 +423,38 @@ void UBuildModalWidget::OnBuildCardSelected(const FBuildableCardTable& SelectedI
 				bool bNameOk = false;
 				const FResourceInfo ResInfo = TableManager ? TableManager->GetResourceInfo(MissingType, bNameOk) : FResourceInfo();
 				const FText Msg = FText::Format(
-					NSLOCTEXT("Notification", "BuildNotEnoughResource", "{0}이(가) 부족합니다"), ResInfo.DisplayName);
+					NSLOCTEXT("Notification", "BuildNotEnoughResource", "{0}|hpp(이,가) 부족합니다"), ResInfo.DisplayName);
 				UIManager->ShowNotification(Msg, 3.0f, ENotificationType::Failed);
 			}
 			return;
 		}
 	}
 
+	UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
+	TSubclassOf<UUserWidget> PlacementClass = TableManager ? TableManager->GetWidgetClass(EWidgetType::BuildPlacementPanel) : nullptr;
+	if (!UIBase || !PlacementClass || !PlacementClass->IsChildOf(UBuildPlacementPanelWidget::StaticClass()))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BuildModalWidget] BuildPlacementPanel is unavailable."));
+		return;
+	}
+
 	// 배치 시작 — 산업을 함께 넘겨 배치 확정 시 베이크
 	const AMainMapPlayerController* PlayerController = Cast<AMainMapPlayerController>(GameInstance->GetCurrentPlayerController());
 	APlayerCamera* CameraPawn = PlayerController ? Cast<APlayerCamera>(PlayerController->GetPawn()) : nullptr;
-	if (CameraPawn)
+	if (!CameraPawn)
 	{
-		CameraPawn->BeginBuild(SelectedInfo, CompanyTypeForBuild);
+		return;
 	}
+	CameraPawn->BeginBuild(SelectedInfo, CompanyTypeForBuild);
 
 	// 모달 닫고 배치 패널 push (프롬프트 스택이라 DeactivateWidget 으로 닫힘)
 	DeactivateWidget();
 
-	if (!UIManager)
-	{
-		return;
-	}
-
-	TSubclassOf<UUserWidget> PlacementClass = TableManager ? TableManager->GetWidgetClass(EWidgetType::BuildPlacementPanel) : nullptr;
-	if (!PlacementClass)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[BuildModalWidget] BuildPlacementPanel widget class not found!"));
-		return;
-	}
-
 	UBuildPlacementPanelWidget* PlacementWidget = Cast<UBuildPlacementPanelWidget>(
-		UIManager->GetUIBase()->PushBottomClass(PlacementClass.Get()));
+		UIBase->PushBottomClass(PlacementClass.Get()));
 	if (!PlacementWidget)
 	{
+		CameraPawn->EndBuild();
 		UE_LOG(LogTemp, Error, TEXT("[BuildModalWidget] Failed to create BuildPlacementPanelWidget!"));
 		return;
 	}
@@ -447,6 +474,11 @@ void UBuildModalWidget::ApplyBuildCostProgression(TArray<FBuildableCardTable>& I
 
 	// 세이브의 건물 배열이 정본 — EntityManager 는 배치 프리뷰 액터까지 세어 첫 채부터 값이 튄다.
 	const int32 OwnedBuildings = SaveData->GameData.Buildings.Num();
+	ApplyBuildCostProgression(InOutCards, OwnedBuildings);
+}
+
+void UBuildModalWidget::ApplyBuildCostProgression(TArray<FBuildableCardTable>& InOutCards, int32 OwnedBuildings)
+{
 	if (OwnedBuildings <= 0)
 	{
 		return;
@@ -476,20 +508,6 @@ void UBuildModalWidget::RefreshBuildingCards()
 	// ⚠ 누진은 여기서만 건다. TableManager 의 단건 GetBuildableInfo 는 이미 지은 건물의 카드 표시에도
 	//    쓰이므로 거기서 곱하면 소유 건물의 원가가 부풀어 보인다.
 	ApplyBuildCostProgression(BuildableInfos);
-
-	// 키스톤 필터 — 두 탭 버튼이 모두 존재(WBP 업데이트됨)할 때만 적용. 미배치면 필터 없이 전체 표시(현 동작 유지,
-	// 특수 4종이 탭 없이 사라지지 않게). 일반 탭(0)=비키스톤만, 특수 탭(1)=키스톤만. 식별은 데이터 플래그만 사용(B번호 하드코딩 금지).
-	if (NormalCardTab && SpecialCardTab)
-	{
-		const int32 CardTabIndex = CurrentCardTabIndex;
-		BuildableInfos.RemoveAll([this, CardTabIndex](const FBuildableCardTable& Card)
-		{
-			bool bKeystoneOk = false;
-			const FBuildingData KeyData = TableManager->GetBuildingData(Card.RowName, bKeystoneOk);
-			const bool bKeystone = bKeystoneOk && KeyData.KeystoneAura.bIsKeystone;
-			return (CardTabIndex == 0) ? bKeystone : !bKeystone;
-		});
-	}
 
 	// 플레이어 본사 레벨 (해금 판정용)
 	int32 PlayerHQLevel = 1;
@@ -547,6 +565,7 @@ void UBuildModalWidget::RefreshBuildingCards()
 		CardData->FootprintWidthCells = bBuildingDataOk ? BData.FootprintWidthCells : 1;
 		CardData->FootprintDepthCells = bBuildingDataOk ? BData.FootprintDepthCells : 1;
 		CardData->NewBuildEmployees = bBuildingDataOk ? BData.GetEmployeeCapacity(0) : 0;
+		CardData->IncomeBonusPercent = bBuildingDataOk ? BData.IncomeBonusPercent : 0.f;
 
 		if (bLocked)
 		{
@@ -557,6 +576,14 @@ void UBuildModalWidget::RefreshBuildingCards()
 
 		BuildItemListView->AddItem(CardData);
 	}
+	RefreshListChrome();
+}
+
+void UBuildModalWidget::RefreshListChrome()
+{
+	const int32 Count = BuildItemListView ? BuildItemListView->GetNumItems() : 0;
+	if (CatalogCount) CatalogCount->SetText(FText::Format(NSLOCTEXT("BuildModal", "CatalogCount", "{0}개"), FText::AsNumber(Count)));
+	ScheduleCatalogEdgeFade(this, BuildItemListView, GetWidgetFromName(TEXT("CatalogListFade")));
 }
 
 void UBuildModalWidget::OnCloseClicked()
@@ -581,16 +608,48 @@ void UBuildModalWidget::RefreshIndustryLocks()
 
 	for (UIndustryButtonWidget* Tile : AllTiles)
 	{
-		if (Tile)
+		if (!Tile) continue;
+
+		const ECompanyType Type = Tile->GetCompanyType();
+		const EIndustryTileState State = DecideIndustryTileState(
+			SaveMgr->IsIndustryAvailable(Type), SaveMgr->IsIndustryUnlocked(Type));
+
+		switch (State)
 		{
-			Tile->SetIndustryLocked(!SaveMgr->IsIndustryUnlocked(Tile->GetCompanyType()));
+		case EIndustryTileState::Hidden:
+			Tile->SetVisibility(ESlateVisibility::Collapsed);
+			// Collapsed 는 클릭만 막는다 — 그룹의 SelectButtonAtIndex 는 GetIsEnabled() 만 보므로
+			// (CommonButtonGroupBase.cpp:156) 프로그램 경로는 SetIsEnabled(false) 로 닫는다.
+			Tile->SetIsEnabled(false);
+			break;
+		case EIndustryTileState::Locked:
+			Tile->SetIsEnabled(true);
+			Tile->SetVisibility(ESlateVisibility::Visible);
+			Tile->SetIndustryLocked(true);
+			break;
+		case EIndustryTileState::Unlocked:
+			Tile->SetIsEnabled(true);
+			Tile->SetVisibility(ESlateVisibility::Visible);
+			Tile->SetIndustryLocked(false);
+			break;
 		}
 	}
 }
 
 void UBuildModalWidget::OnIndustryTileClicked(UIndustryButtonWidget* Tile)
 {
-	if (!Tile || !Tile->IsIndustryLocked()) return;
+	if (!Tile || !IsActivated()) return;
+	if (!Tile->IsIndustryLocked())
+	{
+		if (UGameInstance* GI = GetGameInstance())
+		{
+			if (UMissionManagerSubsystem* MissionMgr = GI->GetSubsystem<UMissionManagerSubsystem>())
+			{
+				MissionMgr->NotifyBuildIndustrySelected(this, Tile->GetCompanyType());
+			}
+		}
+		return;
+	}
 
 	USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>();
 	UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();

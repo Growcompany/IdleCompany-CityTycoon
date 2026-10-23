@@ -105,6 +105,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "UpgradeBtn")
 	void SetCost(int64 Cost, EResourceType ResourceType, bool bCheckAfford = true);
 
+	// 비용 표시는 유지하고, 해당 재화의 잔량 변화만 구매 가능 상태에 반영한다.
+	void RefreshAffordability(EResourceType ResourceType, int64 AvailableAmount);
+
 	// 구매 가능 여부 상태 세터. 잠금(SetEnabled)과 분리된 축 — 부족해도 버튼은 살아 있고,
 	// 탭하면 왜 못 사는지 안내한다.
 	UFUNCTION(BlueprintCallable, Category = "UpgradeBtn")
@@ -114,12 +117,24 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "UpgradeBtn")
 	void SetMaxLevelState(bool bInIsMaxLevel);
 
+	// 비용이 없는 행동 버튼(공장 재고 수령 등) — 비용 칩만 접고 라벨은 남긴다.
+	// MaxLevel 축과 분리: 만렙은 "더 못 올림", 이건 "애초에 값을 안 치름"이라 의미가 다르다.
+	UFUNCTION(BlueprintCallable, Category = "UpgradeBtn")
+	void SetCostVisible(bool bVisible);
+
+	// 비용 칸에 금액 대신 문구(돈이 들지 않는 책상 강화의 「무료」 등). 빈 문구면 금액 표시로 돌아간다
+	void SetCostLabel(const FText& Label);
+
 	// 홀드 중 억제 — 초당 N회 펀치 노이즈 차단. 홀드 시작/종료에서 쌍으로 토글할 것
 	UFUNCTION(BlueprintCallable, Category = "UpgradeBtn")
 	void SetPunchSuppressed(bool bInSuppressed);
 
 	UFUNCTION(BlueprintCallable, Category = "UpgradeBtn")
 	bool CanAfford() const { return bLastCanAfford; }
+
+	// 자동 플레이 경제 기록 — 부족 대기 중 「필요/보유」를 남긴다
+	int64 GetCurrentCost() const { return CurrentCost; }
+	EResourceType GetCurrentCostResource() const { return CurrentResourceType; }
 
 	UFUNCTION(BlueprintCallable, Category = "UpgradeBtn")
 	UButton* GetButton() const { return UpgradeButton; }
@@ -147,6 +162,7 @@ private:
 
 	EResourceType CurrentResourceType = EResourceType::Money;
 	int64 CurrentCost = 0;
+	bool bCheckCurrentCostAffordability = false;
 
 	bool bLastCanAfford = true;
 	bool bAffordInitialized = false;
@@ -155,6 +171,8 @@ private:
 	bool bExplicitEnableOverride = false;
 
 	float LastRejectFeedbackTime = -1000.f;
+	// 같은 탭의 누름이 이미 받아들여졌는가 ― 누름에서 산 뒤 오른 값으로 클릭을 다시 판정해 부족 안내를 띄우지 않게
+	bool bPressAcceptedThisTap = false;
 
 	// 마지막으로 실제 렌더(Tick)된 시각. 오래 안 그려졌다 갱신되면 = 패널 오픈 프레임 → silent init
 	float LastTickTimeSeconds = -1000.f;

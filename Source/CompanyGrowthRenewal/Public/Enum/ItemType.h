@@ -30,15 +30,19 @@ enum class EItemType : uint8
 	BusinessCardBlack       UMETA(DisplayName = "블랙 명함"),
 
 	// 건물 특성 뽑기권 (2026-05-21 BUILDING_TRAIT_SYSTEM v1.1)
-	BuildingTraitTicketNormal   UMETA(DisplayName = "일반 특성 뽑기권"),
-	BuildingTraitTicketAdvanced UMETA(DisplayName = "고급 특성 뽑기권"),
+	BuildingTraitTicketNormal   UMETA(DisplayName = "일반 특성 상자"),
+	BuildingTraitTicketAdvanced UMETA(DisplayName = "고급 특성 상자"),
+	// 스카이라인 보스 층 전담 — 출처를 한 곳으로 묶어 두려고 다른 모듈에는 넣지 않는다 (DECISION_RECORDS §13.4)
+	BuildingTraitTicketMythic   UMETA(DisplayName = "신화 특성 뽑기권"),
 
 	// 건물 스킨 뽑기권 (특성과 동일 모델 — 2티어 독립 천장)
-	SkinTicketNormal            UMETA(DisplayName = "일반 스킨 뽑기권"),
-	SkinTicketAdvanced          UMETA(DisplayName = "고급 스킨 뽑기권"),
+	SkinTicketNormal            UMETA(DisplayName = "일반 스킨 상자"),
+	SkinTicketAdvanced          UMETA(DisplayName = "고급 스킨 상자"),
 
-	// 트렌드 갱신 (기획 보드 — 산업 트렌드 소재 재추첨 소모, 다이아 상점 판매)
-	PitchRefreshScroll          UMETA(DisplayName = "트렌드 갱신 스크롤"),
+	EmployeeEquipmentTicketNormal UMETA(DisplayName = "일반 장비 상자"),
+	EmployeeEquipmentTicketAdvanced UMETA(DisplayName = "고급 장비 상자"),
+	EmployeeEquipmentTicketPremium UMETA(DisplayName = "최고급 장비 상자"),
+	EmployeeEquipmentCore UMETA(DisplayName = "장비 코어"),
 
 	Count UMETA(Hidden)
 };
@@ -65,11 +69,15 @@ inline FText GetItemTypeDisplayName(EItemType ItemType)
 	case EItemType::AdditionalReroll:            return FText::FromString(TEXT("추가옵션 재설정권"));
 	case EItemType::BusinessCardGold:            return FText::FromString(TEXT("골드 명함"));
 	case EItemType::BusinessCardBlack:           return FText::FromString(TEXT("블랙 명함"));
-	case EItemType::BuildingTraitTicketNormal:   return FText::FromString(TEXT("일반 특성 뽑기권"));
-	case EItemType::BuildingTraitTicketAdvanced: return FText::FromString(TEXT("고급 특성 뽑기권"));
-	case EItemType::SkinTicketNormal:            return FText::FromString(TEXT("일반 스킨 뽑기권"));
-	case EItemType::SkinTicketAdvanced:          return FText::FromString(TEXT("고급 스킨 뽑기권"));
-	case EItemType::PitchRefreshScroll:          return FText::FromString(TEXT("트렌드 갱신 스크롤"));
+	case EItemType::BuildingTraitTicketNormal:   return FText::FromString(TEXT("일반 특성 상자"));
+	case EItemType::BuildingTraitTicketAdvanced: return FText::FromString(TEXT("고급 특성 상자"));
+	case EItemType::BuildingTraitTicketMythic:   return FText::FromString(TEXT("신화 특성 뽑기권"));
+	case EItemType::SkinTicketNormal:            return FText::FromString(TEXT("일반 스킨 상자"));
+	case EItemType::SkinTicketAdvanced:          return FText::FromString(TEXT("고급 스킨 상자"));
+	case EItemType::EmployeeEquipmentTicketNormal: return FText::FromString(TEXT("일반 장비 상자"));
+	case EItemType::EmployeeEquipmentTicketAdvanced: return FText::FromString(TEXT("고급 장비 상자"));
+	case EItemType::EmployeeEquipmentTicketPremium: return FText::FromString(TEXT("최고급 장비 상자"));
+	case EItemType::EmployeeEquipmentCore: return FText::FromString(TEXT("장비 코어"));
 	default:                                     return FText::GetEmpty();
 	}
 }

@@ -38,11 +38,16 @@ public:
 	float GetCurrentNightIntensity() const { return CurrentNightIntensity; }
 
 private:
+	void BindVisualTimeManager();
+	void RefreshNightIntensity();
+	UFUNCTION()
+	void HandleVisualTimeChanged();
+
 	// 시간 기반 Night Intensity 계산 (0~1)
 	float CalculateNightIntensity(float CurrentHour) const;
 
 	// MPC 파라미터 업데이트
-	void UpdateMPCParameter();
+	bool UpdateMPCParameter();
 
 	// MPC 런타임 로드
 	void LoadMPC();
@@ -53,15 +58,17 @@ private:
 
 	// TimeCycleManager 캐싱 (성능 최적화)
 	UPROPERTY()
-	ATimeCycleManager* CachedTimeCycleManager = nullptr;
+	TWeakObjectPtr<ATimeCycleManager> CachedTimeCycleManager;
+	TWeakObjectPtr<ATimeCycleManager> BoundVisualTimeManager;
 
 	// 현재 Night Intensity (0~1)
 	float CurrentNightIntensity = 0.5f;
 
 	// 초기화 완료 여부 (Tick 활성화 조건)
 	bool bIsInitialized = false;
+	bool bHasAppliedMPCParameter = false;
 
 	// Tick 간격 제어 (0.1초마다 업데이트)
-	float TickAccumulator = 0.0f;
+	float TickAccumulator = 0.1f;
 	float TickInterval = 0.1f;
 };

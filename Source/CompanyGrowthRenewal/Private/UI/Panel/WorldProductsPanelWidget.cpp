@@ -10,7 +10,7 @@
 #include "Table/ProjectDataTable.h"
 #include "Enum/CompanyType.h"
 #include "Enum/QualityGrade.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Player/MainMapPlayerController.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"

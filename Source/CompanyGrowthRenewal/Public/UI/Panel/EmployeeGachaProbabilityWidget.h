@@ -13,7 +13,7 @@ class UTextBlock;
  * 가챠 확률표 모달 — 3티어 등급별 % + 천장 규칙.
  * 자체 딤 + 중앙 패널 + 닫기(LaunchConfirm 골격 클론).
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UEmployeeGachaProbabilityWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()

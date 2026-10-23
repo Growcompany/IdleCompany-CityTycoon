@@ -84,17 +84,6 @@ void UOfficeEventRailWidget::AddEventCard(UUserWidget* Card)
 	AppendEntry(Card);
 }
 
-void UOfficeEventRailWidget::AddTransientCard(UUserWidget* Card)
-{
-	if (!RailBox || !Card || Entries.Contains(Card))
-	{
-		return;
-	}
-
-	TransientEntries.Add(Card);
-	AppendEntry(Card);
-}
-
 void UOfficeEventRailWidget::RemoveEventCard(UUserWidget* Card)
 {
 	if (!Card)
@@ -180,7 +169,6 @@ void UOfficeEventRailWidget::DetachEntry(UUserWidget* Entry)
 
 	// 목록에서 먼저 뺀다 — RemoveFromParent 가 카드의 NativeDestruct(미해결 정산 → 다시 RemoveEventCard)를
 	// 되부를 수 있어, 순서를 바꾸면 같은 엔트리를 두 번 타고 들어간다.
-	TransientEntries.Remove(Entry);
 	Entries.Remove(Entry);
 	Entry->RemoveFromParent();
 
@@ -205,7 +193,7 @@ void UOfficeEventRailWidget::TrimToMax()
 		int32 VictimIndex = INDEX_NONE;
 		for (int32 i = 0; i < Entries.Num(); ++i)
 		{
-			if (Entries[i] && (Entries[i]->IsA<UNotificationElementWidget>() || TransientEntries.Contains(Entries[i])))
+			if (Entries[i] && Entries[i]->IsA<UNotificationElementWidget>())
 			{
 				VictimIndex = i;
 				break;

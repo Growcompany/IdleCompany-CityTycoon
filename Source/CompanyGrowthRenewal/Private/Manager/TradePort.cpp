@@ -13,16 +13,33 @@
 #include "Engine/GameInstance.h"
 #include "Manager/BuildingTraitManagerSubsystem.h"
 #include "Enum/BuildingTraitTarget.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Manager/MissionManagerSubsystem.h"
+#include "Data/CloudEconomyData.h"
+
+namespace
+{
+	// 서버 카탈로그 source — creditRules.json 과 바이트 단위로 같아야 한다(다르면 400)
+	const FName CreditSource_TradeDiamond(TEXT("trade.diamond"));
+}
 
 // ─────────────────────────────────────────────
 // 기본 단가 공식
 // ─────────────────────────────────────────────
-int64 UTradePort::GetBasePrice(ECompanyType /*Company*/, int32 ProjectIndex) const
+int64 UTradePort::GetBasePrice(ECompanyType Company, int32 ProjectIndex) const
 {
-	// MVP: 후반부로 갈수록 단가가 의미있게 상승하도록 2차 곡선 채택
-	// Base = 100 + 50 * Idx^2  (Idx=1 → 150, Idx=10 → 5100, Idx=50 → 125100, Idx=100 → 500100)
-	const int64 Idx = FMath::Max<int64>(1, static_cast<int64>(ProjectIndex));
-	return FMath::Max<int64>(100, 100 + 50 * Idx * Idx);
+	const UGameInstance* GI = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	bool bRecipeOk = false;
+	const FProductRecipeTable Recipe = TableMgr ? TableMgr->GetProductRecipe(Company, ProjectIndex, bRecipeOk)
+		: FProductRecipeTable();
+	if (!bRecipeOk || Recipe.BaseSalePrice <= 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TradePort] Missing/invalid sale price: Company=%d Project=%d Price=%lld"),
+			static_cast<int32>(Company), ProjectIndex, Recipe.BaseSalePrice);
+		return 0;
+	}
+	return Recipe.BaseSalePrice;
 }
 
 float UTradePort::GetPortPriceMultiplier(ECountryType Port) const
@@ -110,6 +127,60 @@ FSellResult UTradePort::PreviewSell(ECountryType Port, ECompanyType Company, int
 // ─────────────────────────────────────────────
 // 내부 공통 계산
 // ─────────────────────────────────────────────
+FName UTradePort::GetDiamondCreditSource()
+{
+	return CreditSource_TradeDiamond;
+}
+
+FString UTradePort::OrderClaimKey(int32 OrderId)
+{
+	return FString::Printf(TEXT("trade.order.%d"), OrderId);
+}
+
+void UTradePort::RequestDiamondBonusCredit(int32 OrderId, int32 Amount)
+{
+	if (Amount <= 0)
+	{
+		return;
+	}
+
+	UGameInstance* GI = GetGameInstance();
+	UCloudEconomySubsystem* Cloud = GI ? GI->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[TradePort] 보석 보너스 지급 실패 - CloudEconomySubsystem 없음. Order=%d Amount=%d"),
+			OrderId, Amount);
+		return;
+	}
+
+	// 주문이 없는 지급은 claimKey 근거가 없다 — 계약상 DiamondGained>0 은 완전 충족된 주문뿐이다
+	if (OrderId == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[TradePort] 보석 보너스 지급 취소 - OrderId 없음(Amount=%d)"), Amount);
+		return;
+	}
+
+	Cloud->RequestCredit(GetDiamondCreditSource(), OrderClaimKey(OrderId), Amount,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[OrderId, Amount](const FCloudOpResult& OpResult)
+	{
+		if (!OpResult.bOk)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[TradePort] trade.diamond 실패 - Order=%d Amount=%d Code=%s Http=%d"),
+				OrderId, Amount, *OpResult.Code.ToString(), OpResult.HttpStatus);
+			return;
+		}
+
+		// 캡에 걸리면 거절이 아니라 클램프다 — 요청액을 믿지 말고 서버가 인정한 액수를 남긴다
+		const int32 Credited = UCloudEconomySubsystem::ReadCreditedAmount(OpResult, Amount);
+		if (Credited < Amount)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[TradePort] trade.diamond 클램프 - Order=%d 요청=%d 지급=%d (일일 캡)"),
+				OrderId, Amount, Credited);
+		}
+	}));
+}
+
 FSellResult UTradePort::ComputeSell(ECountryType Port, ECompanyType Company, int32 ProjectIndex, int64 RequestedQty, bool bApply)
 {
 	FSellResult Result;
@@ -147,6 +218,11 @@ FSellResult UTradePort::ComputeSell(ECountryType Port, ECompanyType Company, int
 
 	// 4. 기본 단가
 	const int64 Base = GetBasePrice(Company, ProjectIndex);
+	if (Base <= 0)
+	{
+		if (bApply) OnSaleFailed.Broadcast(Key, TEXT("판매가 데이터 없음"));
+		return Result;
+	}
 
 	// 5. 주문서 매칭 (VIP > Urgent > Normal) — 허브에서만 시도
 	bool bMatched = false;
@@ -260,13 +336,19 @@ FSellResult UTradePort::ComputeSell(ECountryType Port, ECompanyType Company, int
 			{
 				ResourceMgr->StoreResource(EResourceType::MarketCap, MarketCapGain);
 			}
-			if (Result.DiamondGained > 0)
-			{
-				ResourceMgr->StoreResource(EResourceType::Diamond, Result.DiamondGained);
-			}
+		}
+
+		// Diamond 는 서버 권위 — 지갑은 응답이 적용한다(캡 초과는 클램프). 로컬 StoreResource 금지
+		if (Result.DiamondGained > 0)
+		{
+			RequestDiamondBonusCredit(Result.MatchedOrderId, Result.DiamondGained);
 		}
 
 		OnProductSold.Broadcast(Port, Key, Result);
+		if (UMissionManagerSubsystem* Missions = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
+		{
+			Missions->NotifyManufacturedProductSold(Result.QuantitySold);
+		}
 	}
 	else
 	{

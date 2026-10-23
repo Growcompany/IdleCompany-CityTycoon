@@ -1,12 +1,20 @@
 #include "UI/Element/Common/GuideTooltipWidget.h"
 
 #include "CommonTextBlock.h"
+#include "CommonRichTextBlock.h"
 #include "Components/Image.h"
 #include "Components/SizeBox.h"
 #include "Components/CanvasPanelSlot.h"
 
-void UGuideTooltipWidget::SetContent(const FText& Eyebrow, const FText& Body)
+bool UGuideTooltipWidget::SetContent(const FText& Eyebrow, const FText& Body)
 {
+	if (CurrentEyebrow.EqualTo(Eyebrow) && CurrentBody.EqualTo(Body))
+	{
+		return false;
+	}
+	CurrentEyebrow = Eyebrow;
+	CurrentBody = Body;
+	bRevealPending = true;
 	if (EyebrowText)
 	{
 		EyebrowText->SetText(Eyebrow);
@@ -17,6 +25,35 @@ void UGuideTooltipWidget::SetContent(const FText& Eyebrow, const FText& Body)
 	{
 		BodyText->SetText(Body);
 	}
+	return true;
+}
+
+void UGuideTooltipWidget::AdvanceReveal(float DeltaSeconds)
+{
+	if (!bRevealPending && RevealElapsed >= 0.26f
+		&& GetVisibility() == ESlateVisibility::HitTestInvisible)
+	{
+		return;
+	}
+	if (bRevealPending || GetVisibility() == ESlateVisibility::Collapsed)
+	{
+		RevealElapsed = -0.08f;
+		bRevealPending = false;
+		SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
+	RevealElapsed = FMath::Min(RevealElapsed + DeltaSeconds, 0.26f);
+	const float Progress = FMath::Clamp(RevealElapsed / 0.26f, 0.f, 1.f);
+	const float Eased = 1.f - FMath::Pow(1.f - Progress, 3.f);
+	SetRenderOpacity(Eased);
+	SetRenderTranslation(FVector2D(0.f, 7.f * (1.f - Eased)));
+}
+
+void UGuideTooltipWidget::HideGuide()
+{
+	SetVisibility(ESlateVisibility::Collapsed);
+	bRevealPending = true;
+	SetRenderOpacity(0.f);
+	SetRenderTranslation(FVector2D::ZeroVector);
 }
 
 void UGuideTooltipWidget::SetTail(EGuideTooltipDir Dir, float Offset)

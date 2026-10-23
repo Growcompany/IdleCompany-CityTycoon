@@ -3,9 +3,12 @@
 // Unreal Engine Headers
 #include "Camera/CameraComponent.h"
 #include "Components/SphereComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "GameFramework/FloatingPawnMovement.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
+#include "Misc/ScopeExit.h"
 
 // Enhanced Input
 #include "EnhancedInputComponent.h"
@@ -19,13 +22,15 @@
 #include "Player/Components/PlacementHandler.h"
 #include "Player/Components/FocusOcclusionHandler.h"
 #include "Core/CGGameInstance.h"
+#include "GameMode/CGGameModeBase.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Entity/InteractableBaseActor.h"
 #include "Entity/Building/BuildingBaseActor.h"
+#include "Entity/Factory/BrickFactory.h"
 #include "Table/BuildingData.h"          // FBuildingData (footprint 칸수)
 #include "Table/BuildableCardTable.h"    // FBuildableCardTable
 
-DEFINE_LOG_CATEGORY(InputKey);
+DEFINE_LOG_CATEGORY(LogInputKey);
 
 APlayerCamera::APlayerCamera()
 {
@@ -82,12 +87,22 @@ void APlayerCamera::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
+    const float DT = FMath::Min(DeltaTime, 1.f / 10.f);
+    HorizontalProjectionOffset = FMath::FInterpTo(
+        HorizontalProjectionOffset, TargetHorizontalProjectionOffset, DT, CameraTransitionSpeed);
+
+    if (MovementInputHandler && MovementInputHandler->bConstrainCameraView)
+    {
+        if (bIsTransitioningCamera) ConstrainFocusDestination();
+        if (!bIsTransitioningCamera) MovementInputHandler->ApplyZoomSettings();
+    }
+
     // 건물 포커스를 위한 카메라 전환 처리
     if (bIsTransitioningCamera && MovementInputHandler)
     {
         // 히치 프레임(모바일 콜드 로드/최초 PSO 컴파일 등)의 큰 DeltaTime이 VInterpTo alpha를 포화(>=1)시켜 카메라가 순간이동하는 것 방지 — 보간에만 상한
-        const float DT = FMath::Min(DeltaTime, 1.f / 30.f);
-
+        // 30fps 상한은 상시 19fps 기기에서 매 프레임 걸려 글라이드가 1.58배 느려진다.
+        // 10fps 로 낮춰도 0.1 * CameraTransitionSpeed(3.0) = 0.3 이라 alpha 포화 방어는 유지된다.
         // 경과는 벽시계여야 한다 — 상한 DT 로 누적하면 히치 프레임에서 도착 판정이 그만큼 늦어진다
         FocusGlideElapsed += DeltaTime;
 
@@ -100,22 +115,34 @@ void APlayerCamera::Tick(float DeltaTime)
         float CurrentZoomValue = MovementInputHandler->GetZoomValue();
         float NewZoomValue = FMath::FInterpTo(CurrentZoomValue, TargetZoomValue, DT, CameraTransitionSpeed);
         MovementInputHandler->SetZoomValue(NewZoomValue);
-        MovementInputHandler->ApplyZoomSettings(); // ZoomValue를 SpringArm 등에 적용 (값 변경 안 함)
+        MovementInputHandler->ApplyZoomSettings();
 
         // 전환 완료 확인
-        float LocationDist = FVector::Dist(NewLocation, TargetCameraLocation);
-        float ZoomValueDiff = FMath::Abs(NewZoomValue - TargetZoomValue);
+        float LocationDist = FVector::Dist(GetActorLocation(), TargetCameraLocation);
+        float ZoomValueDiff = FMath::Abs(MovementInputHandler->GetZoomValue() - TargetZoomValue);
 
         if (LocationDist < 0.1f && ZoomValueDiff < 0.001f)
         {
             SetActorLocation(TargetCameraLocation);
             MovementInputHandler->SetZoomValue(TargetZoomValue);
             MovementInputHandler->ApplyZoomSettings();
+            HorizontalProjectionOffset = TargetHorizontalProjectionOffset;
             bIsTransitioningCamera = false;
 
             UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] Camera transition complete"));
         }
     }
+}
+
+void APlayerCamera::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
+{
+    Super::CalcCamera(DeltaTime, OutResult);
+    OutResult.OffCenterProjectionOffset.X = HorizontalProjectionOffset;
+    if (const ACGGameModeBase* CityMode = GetWorld() ? GetWorld()->GetAuthGameMode<ACGGameModeBase>() : nullptr)
+    {
+        if (CityMode->TryGetCityOpeningView(OutResult)) return;
+    }
+    if (MovementInputHandler) MovementInputHandler->ConstrainCameraView(OutResult);
 }
 
 void APlayerCamera::OnBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
@@ -263,36 +290,33 @@ void APlayerCamera::EndBuild()
 
 void APlayerCamera::StartBuildingRelocation(AInteractableBaseActor* ExistingBuilding)
 {
-    AMainMapPlayerController* PC = GetPlayerController();
-    if (PC)
-    {
-        PC->GoToBuildPlaceMode();
-    }
-
-    // Building 타입 체크
     ABuildingBaseActor* buildingActor = Cast<ABuildingBaseActor>(ExistingBuilding);
-    if (!buildingActor)
+    ABrickFactory* Factory = Cast<ABrickFactory>(ExistingBuilding);
+    if (!IsValid(ExistingBuilding) || !PlacementHandler || (!buildingActor && !Factory))
     {
-        UE_LOG(LogTemp, Error, TEXT("StartBuildingRelocation called with non-Building actor"));
+        UE_LOG(LogTemp, Error, TEXT("StartBuildingRelocation requires a building or factory"));
         return;
     }
+    if (Factory && !Factory->BeginRelocation()) return;
 
-    // **기존 건물을 그대로 PlacementTarget으로 사용**
-    PlacementHandler->SetExistingBuildingAsTarget(buildingActor);
+    AMainMapPlayerController* PC = GetPlayerController();
+    if (PC) PC->GoToBuildPlaceMode();
 
     // 원래 위치 저장 (Cancel용)
     FVector originalPosition = ExistingBuilding->GetActorLocation();
     PlacementHandler->SetOriginalPosition(originalPosition);
 
+    // **기존 건물을 그대로 PlacementTarget으로 사용**
+    PlacementHandler->SetExistingBuildingAsTarget(ExistingBuilding);
+
     // 건물 떠오르기 효과
-    UE_LOG(LogTemp, Warning, TEXT("[PlayerCamera] Calling StartFloating on %s"), *buildingActor->GetName());
-    buildingActor->StartFloating(500.0f);
+    if (buildingActor) buildingActor->StartFloating(500.0f);
 
     // 건물 클릭 시 카메라 포커싱
     StopCameraTransition();
-    FocusOnBuilding(buildingActor, 50.f, 50.f, 0.5f);
-    // 재배치도 같은 부지 격자 세션 — FocusOnBuildingForPlacement 과 동일하게 고스트를 겹치지 않는다
-    ClearFocusTarget();
+    // 재배치도 새 배치와 같이 앞 건물을 고스트로 비켜 준다 — 해제는 Normal 복귀 시 안전망이 맡는다
+    if (buildingActor) FocusOnBuilding(buildingActor, 50.f, 50.f, 0.5f);
+    else FocusOnActor(Factory, 0.5f, /*bTrackOcclusion=*/true, 15000.f);
     UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] StartBuildingRelocation - Camera focusing on building"));
 }
 
@@ -325,8 +349,22 @@ void APlayerCamera::StopCameraTransition()
 
 void APlayerCamera::BeginCameraTransition()
 {
+    if (!ConstrainFocusDestination()) return;
     bIsTransitioningCamera = true;
     FocusGlideElapsed = 0.f;
+}
+
+bool APlayerCamera::ConstrainFocusDestination()
+{
+    if (!MovementInputHandler || MovementInputHandler->TryConstrainCameraPose(
+        TargetCameraLocation, TargetZoomValue, TargetHorizontalProjectionOffset)) return true;
+
+    TargetCameraLocation = GetActorLocation();
+    TargetZoomValue = MovementInputHandler->GetZoomValue();
+    TargetHorizontalProjectionOffset = HorizontalProjectionOffset;
+    bIsTransitioningCamera = false;
+    UE_LOG(LogTemp, Warning, TEXT("[CityCamera] Focus rejected: destination height and lens cannot fit the playable area."));
+    return false;
 }
 
 bool APlayerCamera::IsFocusVisuallySettled(float LocationTolerance, float ZoomTolerance) const
@@ -347,8 +385,44 @@ bool APlayerCamera::IsFocusVisuallySettled(float LocationTolerance, float ZoomTo
         FMath::Abs(MovementInputHandler->GetZoomValue() - TargetZoomValue), ZoomTolerance);
 }
 
+FOfficeCameraViewState APlayerCamera::CaptureViewState() const
+{
+    FOfficeCameraViewState State;
+    if (!MovementInputHandler)
+    {
+        return State;
+    }
+    State.Location = bIsTransitioningCamera ? TargetCameraLocation : GetActorLocation();
+    State.Zoom = bIsTransitioningCamera ? TargetZoomValue : MovementInputHandler->GetZoomValue();
+    State.Yaw = GetActorRotation().Yaw;
+    State.bValid = true;
+    return State;
+}
+
+void APlayerCamera::RestoreViewState(const FOfficeCameraViewState& State)
+{
+    if (!State.bValid || !MovementInputHandler)
+    {
+        return;
+    }
+    if (!FMath::IsNearlyEqual(FRotator::NormalizeAxis(GetActorRotation().Yaw - State.Yaw), 0.f, 0.1f))
+    {
+        SetActorRotation(FRotator(0.f, State.Yaw, 0.f));
+    }
+    TargetCameraLocation = State.Location;
+    TargetZoomValue = State.Zoom;
+    BeginCameraTransition();
+}
+
+void APlayerCamera::SetFramingCenterRatioX(float Ratio)
+{
+    // FocusOnBuilding 과 같은 부호 규약 — 엔진이 NDC X 에서 오프셋을 빼므로 화면 비율 q 는 1-2q
+    TargetHorizontalProjectionOffset = 1.f - 2.f * FMath::Clamp(Ratio, 0.f, 1.f);
+}
+
 void APlayerCamera::ClearFocusTarget()
 {
+    TargetHorizontalProjectionOffset = 0.f;
     if (FocusOcclusionHandler)
     {
         FocusOcclusionHandler->ClearFocusTarget();
@@ -357,6 +431,11 @@ void APlayerCamera::ClearFocusTarget()
 
 void APlayerCamera::RestoreFocusTarget(AActor* Target)
 {
+    if (Target)
+    {
+        TargetHorizontalProjectionOffset = ProjectionFocusTarget.Get() == Target
+            ? FocusHorizontalProjectionOffset : 0.f;
+    }
     // null 을 넘기면 SetFocusTarget 이 해제로 동작한다 — 복원 호출이 조용히 해제가 되지 않도록 여기서 막는다
     if (FocusOcclusionHandler && Target)
     {
@@ -364,24 +443,16 @@ void APlayerCamera::RestoreFocusTarget(AActor* Target)
     }
 }
 
-// 영향권 반경 R 원을 좁은 FOV(~20도) 화면에 담는 데 필요한 팔길이 배수. FocusOnAreaRadius / FocusOnBuildingOrAura 공용.
-static constexpr float KeystoneAuraZoomFactor = 5.5f;
-
 float APlayerCamera::FocusOnBuilding(ABuildingBaseActor* Building, float TopPadding, float BottomPadding, float ScreenCenterRatioX, float ScreenHeightRatioScale)
 {
-    if (!Building || !SpringArm || !CameraComponent)
+    if (!Building || !SpringArm || !CameraComponent || !MovementInputHandler)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerCamera] FocusOnBuilding: Invalid parameters"));
         return 0.f;
     }
 
-    // 건물 경계 (Base와 Top 위치) 가져오기
-    FVector BuildingLocation = Building->GetActorLocation();
-    float BuildingHeight = Building->GetTotalBuildingHeight();  // Top Module 포함한 전체 높이
-    FVector BasePosition = BuildingLocation;
-    FVector TopPosition = BuildingLocation + FVector(0, 0, BuildingHeight);
-
-    // 뷰포트 크기 가져오기
+    const FVector BasePosition = Building->GetPlacementFootprintCenter();
+    const float BuildingHeight = Building->GetTotalBuildingHeightWorld();
     APlayerController* PC = GetWorld()->GetFirstPlayerController();
     if (!PC)
     {
@@ -389,95 +460,49 @@ float APlayerCamera::FocusOnBuilding(ABuildingBaseActor* Building, float TopPadd
         return 0.f;
     }
 
-    int32 ViewportSizeX, ViewportSizeY;
-    PC->GetViewportSize(ViewportSizeX, ViewportSizeY);
-
-    // 목표 화면 위치 계산
-    float TargetScreenX = ViewportSizeX * ScreenCenterRatioX; // 화면 가로 위치 (0.0=왼쪽, 0.5=중앙, 1.0=오른쪽)
-
-    // 1단계: 목표 화면 비율 결정
-    // BuildingHeight는 이미 위에서 GetTotalBuildingHeight()로 계산됨 (건물 바닥~꼭대기 높이)
-    // 뷰포트 0x0(로딩 중 호출) → 0 나눗셈 NaN 방지, 폴백 16:9 (FocusOnActor와 동일 가드)
-    float AspectRatio = (ViewportSizeY > 0) ? (float)ViewportSizeX / (float)ViewportSizeY : (16.f / 9.f);
-
-    // 건물이 화면에서 차지하는 위치를 직접 정의하는 방식
-    // 화면 좌표: 0.0 = 하단, 0.5 = 중앙, 1.0 = 상단
-    float MidHeight = 20000.0f; // 전환 기준 높이 (40000까지는 괜찮았음)
-
-    // 건물 Top/Bottom의 화면 위치 결정
-    float TopScreenPosition;    // 건물 꼭대기가 화면에서 위치
-    float BottomScreenPosition; // 건물 하단이 화면에서 위치
-
-    if (BuildingHeight <= MidHeight)
-    {
-        // 낮은 건물: Top 0.55, Bottom 0.45에 위치
-        // → 건물이 화면 중간에 작게 배치 (화면의 10% 차지)
-        // 높아질수록: Top이 상단 1/10, Bottom이 하단 1/10으로 이동
-        // → 건물이 화면의 80% 차지
-        float Factor = BuildingHeight / MidHeight;
-        TopScreenPosition = FMath::Lerp(0.6f, 0.9f, Factor);    // 중간 상단 → 상단 1/10
-        BottomScreenPosition = FMath::Lerp(0.4f, 0.1f, Factor); // 중간 하단 → 하단 1/10
-    }
-    else
-    {
-        // 높은 건물: Bottom을 하단 1/10에 고정, Top은 화면 밖으로 나가도 OK
-        TopScreenPosition = 0.9f;    // 상단 1/10 (하지만 실제론 화면 밖)
-        BottomScreenPosition = 0.1f; // 하단 1/10 고정
-    }
-
-    // 건물이 화면에서 차지하는 비율 계산 (스케일이 작을수록 카메라가 멀리 = 줌인 약함)
-    float DesiredScreenHeightRatio = (TopScreenPosition - BottomScreenPosition) * FMath::Clamp(ScreenHeightRatioScale, 0.1f, 1.0f);
-
-    // 건물의 실제 월드 좌표
-    FVector BuildingBottomWorld = BasePosition;
-    FVector BuildingTopWorld = BasePosition + FVector(0.f, 0.f, BuildingHeight);
-
-    UE_LOG(LogTemp, Warning, TEXT("[FocusOnBuilding] Height=%.1f, Ratio=%.1f%%, TopScreen=%.3f, BottomScreen=%.3f, BottomWorld=(%.1f,%.1f,%.1f), TopWorld=(%.1f,%.1f,%.1f)"),
-        BuildingHeight, DesiredScreenHeightRatio * 100.0f, TopScreenPosition, BottomScreenPosition,
-        BuildingBottomWorld.X, BuildingBottomWorld.Y, BuildingBottomWorld.Z,
-        BuildingTopWorld.X, BuildingTopWorld.Y, BuildingTopWorld.Z);
-
-    // 2단계: 목표 ZoomValue — 순수 리그 모델 위에서 1-D 이분법(컴포넌트 미접촉, 실제 적용은 Tick 보간)
-    if (!MovementInputHandler)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[PlayerCamera] FocusOnBuilding: No MovementInputHandler"));
-        return 0.f;
-    }
+    // 화면 좌표는 아래 0, 위 1. 저층도 지정한 상·하 여백 사이의 중심에 배치한다.
+    constexpr float FitScreenTop = 0.80f;
+    constexpr float FitScreenBottom = 0.10f;
+    constexpr float FitScreenCenter = (FitScreenTop + FitScreenBottom) * 0.5f;
+    const float FitRatio = (FitScreenTop - FitScreenBottom) * FMath::Clamp(ScreenHeightRatioScale, 0.1f, 1.0f);
     const FZoomRigParams Rig = MovementInputHandler->GetZoomRigParams();
     const auto CurveEval = [this](float Zoom) { return MovementInputHandler->EvaluateZoomKey(Zoom); };
-    TargetZoomValue = CameraFramingMath::SolveZoomForHeight(Rig, CurveEval, BuildingHeight, DesiredScreenHeightRatio);
+
+    // 기본 줌 범위 안에서만 탐색한다. 상한에서 넘치는 건물은 꼭대기를 상단 여백에 건다.
+    TargetZoomValue = CameraFramingMath::SolveZoomForHeight(Rig, CurveEval, BuildingHeight, FitRatio, FitScreenCenter);
     const FZoomRigSample Target = MovementInputHandler->EvaluateZoomRig(TargetZoomValue);
-    const float ActualDistance = Target.ArmLength;
+    const float CameraDistance = Target.ArmLength + Rig.CameraPullBackCm;
+    const FVerticalFramingResult Framing = CameraFramingMath::SolveVerticalFraming(
+        BuildingHeight, CameraDistance, Target.PitchDeg, Target.HorizontalFOVDeg,
+        Rig.CameraAspectRatio, FitRatio, FitScreenTop, /*bAnchorOverflowToTop=*/true, FitScreenCenter);
 
-    // 3단계: 수평 오프셋 — 수직 FOV 고정(MaintainYFOV), 수평 반각 = 수직 반각 × 뷰포트 종횡비. 화면 폭 = 2·D·tan
-    const FVector CameraRight = GetActorRightVector();
-    const float ScreenOffsetRatio = ScreenCenterRatioX - 0.5f; // 0.5=중앙, 0.3=왼쪽 20%
-    const float HorizontalHalfTan = CameraFramingMath::HorizontalHalfTangent(Target.HorizontalFOVDeg, Rig.CameraAspectRatio, AspectRatio);
-    const float HorizontalOffset = ScreenOffsetRatio * 2.f * ActualDistance * HorizontalHalfTan;
+    const FVector FocusPivotWorld = BasePosition + FVector(0.f, 0.f, Framing.PivotHeight);
 
-    // 4단계: 카메라 위치 — 건물 중심이 화면 세로 (Top+Bottom)/2 에 오도록
-    const float VerticalHalfTan = CameraFramingMath::VerticalHalfTangent(Target.HorizontalFOVDeg, Rig.CameraAspectRatio);
-    const float VisibleHeight = 2.f * ActualDistance * VerticalHalfTan;
-    const float BuildingCenterScreenPosition = (TopScreenPosition + BottomScreenPosition) * 0.5f;
-    const FVector BuildingCenterWorld = BasePosition + FVector(0.f, 0.f, BuildingHeight * 0.5f);
-    const float CameraHeightOffset = VisibleHeight * (0.5f - BuildingCenterScreenPosition);
-    TargetCameraLocation = BuildingCenterWorld + FVector(0.f, 0.f, CameraHeightOffset) - CameraRight * HorizontalOffset;
-
-    // Tick()에서 부드러운 보간 시작
+    // 소켓의 수직 오프셋만큼 시선 중심선이 올라가므로 피벗에서 회전된 오프셋을 뺀다.
+    const FQuat RigRotation = FRotator(Target.PitchDeg, GetActorRotation().Yaw, 0.f).Quaternion();
+    const FVector SocketRiseWorld = RigRotation.RotateVector(FVector(0.f, 0.f, SpringArm->SocketOffset.Z));
+    TargetCameraLocation = FocusPivotWorld - SocketRiseWorld;
+    // 엔진의 투영 행렬은 NDC X에서 OffCenterProjectionOffset.X를 빼므로 화면 비율 q는 1-2q다.
+    TargetHorizontalProjectionOffset = 1.f - 2.f * FMath::Clamp(ScreenCenterRatioX, 0.f, 1.f);
     BeginCameraTransition();
+    if (!bIsTransitioningCamera) return 0.f;
+    FocusHorizontalProjectionOffset = TargetHorizontalProjectionOffset;
+    ProjectionFocusTarget = Building;
 
     if (FocusOcclusionHandler)
     {
         FocusOcclusionHandler->SetFocusTarget(Building);
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] FocusOnBuilding: Height=%.1f, Ratio=%.1f%%, Zoom=%.4f, Pitch=%.1f, hFOV=%.1f, Arm=%.1f"),
-        BuildingHeight, DesiredScreenHeightRatio * 100.0f, TargetZoomValue, Target.PitchDeg, Target.HorizontalFOVDeg, ActualDistance);
-
-    return ActualDistance;
+    UE_LOG(LogTemp, Log, TEXT("[FocusOnBuilding] Height=%.1f, Fit=%s, Ratio=%.1f%%(목표 %.1f%%), Top=%.3f, Bottom=%.3f, Zoom=%.4f, Pitch=%.1f, hFOV=%.1f, Arm=%.1f"),
+        BuildingHeight, Framing.bFitsInFrame ? TEXT("전체") : TEXT("위기준"),
+        (Framing.TopScreenPosition - Framing.BottomScreenPosition) * 100.f, FitRatio * 100.f,
+        Framing.TopScreenPosition, Framing.BottomScreenPosition,
+        TargetZoomValue, Target.PitchDeg, Target.HorizontalFOVDeg, Target.ArmLength);
+    return MovementInputHandler->EvaluateZoomRig(TargetZoomValue).ArmLength;
 }
 
-void APlayerCamera::FocusOnBuildingForPlacement(ABuildingBaseActor* Building, float TopPadding, float BottomPadding, float ScreenHeightRatioScale)
+void APlayerCamera::FocusOnBuildingForPlacement(ABuildingBaseActor* Building, float DesiredDistanceCm)
 {
     // 1. 진행 중인 카메라 전환 중단
     StopCameraTransition();
@@ -485,9 +510,8 @@ void APlayerCamera::FocusOnBuildingForPlacement(ABuildingBaseActor* Building, fl
     // 2. 건물에 카메라 포커싱
     if (Building)
     {
-        FocusOnBuilding(Building, TopPadding, BottomPadding, 0.5f, ScreenHeightRatioScale);
-        // 배치 중에는 부지 격자 하이라이트가 화면을 쓰므로 고스트를 겹치지 않는다
-        ClearFocusTarget();
+        // 배치 중인 건물을 가리는 앞 건물은 고스트로 비켜 준다 — 끌어서 옮기면 주기 갱신이 따라간다
+        FocusOnActor(Building, 0.5f, /*bTrackOcclusion=*/true, DesiredDistanceCm);
         UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] FocusOnBuildingForPlacement: Building=%s"), *Building->GetName());
     }
 
@@ -499,7 +523,91 @@ void APlayerCamera::FocusOnBuildingForPlacement(ABuildingBaseActor* Building, fl
     }
 }
 
-void APlayerCamera::FocusOnActor(AActor* Actor, float ScreenCenterRatioX, bool bTrackOcclusion)
+void APlayerCamera::RefreshCameraRigTransforms()
+{
+    if (!SpringArm || !CameraComponent)
+    {
+        return;
+    }
+
+    SpringArm->UpdateComponentToWorld();
+    SpringArm->TickComponent(0.f, LEVELTICK_All, nullptr);
+    CameraComponent->UpdateComponentToWorld();
+}
+
+void APlayerCamera::SettleFocusImmediately()
+{
+    // 패널을 열지 않는 포커스라 가림 고스트는 켜지 않는다.
+    // 로딩 직후면 뷰포트가 0x0 일 수 있어 가림 트레이스 자체가 무의미하다.
+    if (FocusOcclusionHandler)
+    {
+        FocusOcclusionHandler->ClearFocusTarget();
+    }
+    StopCameraTransition();
+    HorizontalProjectionOffset = TargetHorizontalProjectionOffset;
+
+    // 랙이 켜진 채 순간이동하면 스폰 지점에서 목표까지 카메라가 끌려오는 몇 프레임이 보인다 —
+    // 정착 중에만 끄고, 최종 pose 에서 랙 캐시를 갱신한 뒤 원래 설정으로 되돌린다
+    const bool bSavedCameraLag = SpringArm->bEnableCameraLag;
+    const bool bSavedCameraRotationLag = SpringArm->bEnableCameraRotationLag;
+    SpringArm->bEnableCameraLag = false;
+    SpringArm->bEnableCameraRotationLag = false;
+    ON_SCOPE_EXIT
+    {
+        SpringArm->bEnableCameraLag = bSavedCameraLag;
+        SpringArm->bEnableCameraRotationLag = bSavedCameraRotationLag;
+    };
+
+    SetActorLocation(TargetCameraLocation);
+    MovementInputHandler->SetZoomValue(TargetZoomValue);
+    MovementInputHandler->ApplyZoomSettings();
+    RefreshCameraRigTransforms();
+}
+
+bool APlayerCamera::SnapFocusOnBuilding(ABuildingBaseActor* Building, float ScreenCenterRatioX)
+{
+    if (!Building || !MovementInputHandler || !SpringArm || !CameraComponent)
+    {
+        return false;
+    }
+
+    // 프레이밍 계산은 글라이드 경로와 공유 — 목표 pose(TargetCameraLocation/TargetZoomValue)만 받아 쓴다
+    if (FocusOnBuilding(Building, 50.f, 50.f, ScreenCenterRatioX) <= 0.f)
+    {
+        return false;
+    }
+
+    SettleFocusImmediately();
+
+    UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] SnapFocusOnBuilding: %s, Loc=(%.1f, %.1f, %.1f), Zoom=%.4f"),
+        *Building->GetName(), TargetCameraLocation.X, TargetCameraLocation.Y, TargetCameraLocation.Z, TargetZoomValue);
+    return true;
+}
+
+bool APlayerCamera::SnapFocusOnActor(AActor* Actor, float ScreenCenterRatioX, float DesiredDistanceCm, float DesiredScreenHeightRatio)
+{
+    if (!Actor || !MovementInputHandler || !SpringArm || !CameraComponent)
+    {
+        return false;
+    }
+
+    // FocusOnActor 는 void 라 성공 여부를 안 돌려준다 — 전환 플래그를 내려놓고 부른 뒤
+    // 그게 켜졌는지로 "목표 pose 가 실제로 계산됐는가" 를 읽는다(조기 반환 경로는 플래그를 안 켠다)
+    StopCameraTransition();
+    FocusOnActor(Actor, ScreenCenterRatioX, /*bTrackOcclusion=*/false, DesiredDistanceCm, DesiredScreenHeightRatio);
+    if (!bIsTransitioningCamera)
+    {
+        return false;
+    }
+
+    SettleFocusImmediately();
+
+    UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] SnapFocusOnActor: %s, Loc=(%.1f, %.1f, %.1f), Zoom=%.4f"),
+        *Actor->GetName(), TargetCameraLocation.X, TargetCameraLocation.Y, TargetCameraLocation.Z, TargetZoomValue);
+    return true;
+}
+
+void APlayerCamera::FocusOnActor(AActor* Actor, float ScreenCenterRatioX, bool bTrackOcclusion, float DesiredDistanceCm, float DesiredScreenHeightRatio)
 {
     if (!Actor || !SpringArm || !CameraComponent)
     {
@@ -523,7 +631,7 @@ void APlayerCamera::FocusOnActor(AActor* Actor, float ScreenCenterRatioX, bool b
 
     int32 ViewportSizeX, ViewportSizeY;
     PC->GetViewportSize(ViewportSizeX, ViewportSizeY);
-    // 모바일 시작 포커스는 로딩 화면 중(StopLoadingScreen 전) 뷰포트가 0x0 → 0 나눗셈 NaN → 카메라 못 도달. 폴백 16:9.
+    // 모바일 시작 포커스는 맵 로딩 중 뷰포트가 0x0 → 0 나눗셈 NaN → 카메라 못 도달. 폴백 16:9.
     float AspectRatio = (ViewportSizeY > 0) ? (float)ViewportSizeX / (float)ViewportSizeY : (16.f / 9.f);
 
     // 화면에서 Actor가 차지할 비율 계산
@@ -543,7 +651,15 @@ void APlayerCamera::FocusOnActor(AActor* Actor, float ScreenCenterRatioX, bool b
         BottomScreenPosition = 0.1f;
     }
 
-    float DesiredScreenHeightRatio = TopScreenPosition - BottomScreenPosition;
+    // 호출부가 점유율을 지정하면 내부 곡선을 덮는다 — 그 곡선은 200m 초고층 기준이라 짧은 액터에 안 맞는다
+    if (DesiredScreenHeightRatio > 0.f)
+    {
+        const float Clamped = FMath::Clamp(DesiredScreenHeightRatio, 0.05f, 1.0f);
+        const float Margin = (1.f - Clamped) * 0.5f;
+        TopScreenPosition = 1.f - Margin;
+        BottomScreenPosition = Margin;
+    }
+    const float TargetScreenHeightRatio = TopScreenPosition - BottomScreenPosition;
 
     if (!MovementInputHandler)
     {
@@ -552,23 +668,50 @@ void APlayerCamera::FocusOnActor(AActor* Actor, float ScreenCenterRatioX, bool b
     }
     const FZoomRigParams Rig = MovementInputHandler->GetZoomRigParams();
     const auto CurveEval = [this](float Zoom) { return MovementInputHandler->EvaluateZoomKey(Zoom); };
-    TargetZoomValue = CameraFramingMath::SolveZoomForHeight(Rig, CurveEval, ActorHeight, DesiredScreenHeightRatio);
+    // DesiredDistanceCm 은 **카메라~피사체 거리**다 — 팔길이로 역산하면 SocketOffset 후퇴만큼 실제로 더 멀어진다.
+    TargetHorizontalProjectionOffset = 0.f;
+    ProjectionFocusTarget.Reset();
+    TargetZoomValue = DesiredDistanceCm > 0.f
+        ? CameraFramingMath::SolveZoomForArmLength(Rig, CurveEval, FMath::Max(1.f, DesiredDistanceCm - Rig.CameraPullBackCm))
+        : CameraFramingMath::SolveZoomForHeight(Rig, CurveEval, ActorHeight, TargetScreenHeightRatio);
     const FZoomRigSample Target = MovementInputHandler->EvaluateZoomRig(TargetZoomValue);
     const float ActualDistance = Target.ArmLength;
+    const float CameraDistance = ActualDistance + Rig.CameraPullBackCm;
 
     const FVector CameraRight = GetActorRightVector();
     const float ScreenOffsetRatio = ScreenCenterRatioX - 0.5f;
     const float HorizontalHalfTan = CameraFramingMath::HorizontalHalfTangent(Target.HorizontalFOVDeg, Rig.CameraAspectRatio, AspectRatio);
-    const float HorizontalOffset = ScreenOffsetRatio * 2.f * ActualDistance * HorizontalHalfTan;
+    const float HorizontalOffset = ScreenOffsetRatio * 2.f * CameraDistance * HorizontalHalfTan;
 
-    const float VerticalHalfTan = CameraFramingMath::VerticalHalfTangent(Target.HorizontalFOVDeg, Rig.CameraAspectRatio);
-    const float VisibleHeight = 2.f * ActualDistance * VerticalHalfTan;
-    const float BuildingCenterScreenPosition = (TopScreenPosition + BottomScreenPosition) * 0.5f;
-    const FVector ActorCenterWorld = BasePosition + FVector(0.f, 0.f, ActorHeight * 0.5f);
-    const float CameraHeightOffset = VisibleHeight * (0.5f - BuildingCenterScreenPosition);
-    TargetCameraLocation = ActorCenterWorld + FVector(0.f, 0.f, CameraHeightOffset) - CameraRight * HorizontalOffset;
+    const FVerticalFramingResult Framing = CameraFramingMath::SolveVerticalFraming(
+        ActorHeight, CameraDistance, Target.PitchDeg, Target.HorizontalFOVDeg,
+        Rig.CameraAspectRatio, TargetScreenHeightRatio, TopScreenPosition, /*bAnchorOverflowToTop=*/false);
+    // 공장 단계별 외형의 바닥 외곽 중심을 시선 중심에 둔다. 예약 부지는 외형보다 넓을 수 있다.
+    const ABrickFactory* Factory = Cast<ABrickFactory>(Actor);
+    FVector FocusPivotWorld = BasePosition + FVector(0.f, 0.f, Framing.PivotHeight);
+    if (Factory)
+    {
+        FocusPivotWorld = Factory->GetPlacementFootprintCenter();
+        if (const UStaticMeshComponent* Body = Cast<UStaticMeshComponent>(Factory->GetMainMeshComponent()))
+        {
+            if (const UStaticMesh* Mesh = Body->GetStaticMesh())
+            {
+                const FBox LocalBounds = Mesh->GetBoundingBox();
+                const FVector LocalGroundCenter(LocalBounds.GetCenter().X, LocalBounds.GetCenter().Y, LocalBounds.Min.Z);
+                FocusPivotWorld = Body->GetComponentTransform().TransformPosition(LocalGroundCenter);
+            }
+        }
+    }
+
+    // FocusOnBuilding 과 같은 이유 — 시선 중심선이 폰 위치가 아니라 SocketOffset.Z 만큼 위를 지난다
+    const FQuat RigRotation = FRotator(Target.PitchDeg, GetActorRotation().Yaw, 0.f).Quaternion();
+    const FVector SocketRiseWorld = RigRotation.RotateVector(FVector(0.f, 0.f, SpringArm->SocketOffset.Z));
+
+    TargetCameraLocation = FocusPivotWorld
+        - SocketRiseWorld - CameraRight * HorizontalOffset;
 
     BeginCameraTransition();
+    if (!bIsTransitioningCamera) return;
 
     if (bTrackOcclusion && FocusOcclusionHandler)
     {
@@ -582,9 +725,10 @@ void APlayerCamera::FocusOnActor(AActor* Actor, float ScreenCenterRatioX, bool b
 void APlayerCamera::FocusOnLocation(const FVector& TargetLocation, float DesiredDistance)
 {
     StopCameraTransition();
+    TargetHorizontalProjectionOffset = 0.f;
+    ProjectionFocusTarget.Reset();
 
     TargetCameraLocation = TargetLocation;
-    BeginCameraTransition();
 
     if (MovementInputHandler)
     {
@@ -600,59 +744,8 @@ void APlayerCamera::FocusOnLocation(const FVector& TargetLocation, float Desired
         }
     }
 
+    BeginCameraTransition();
+
     UE_LOG(LogTemp, Log, TEXT("[PlayerCamera] FocusOnLocation: Target=(%.1f, %.1f, %.1f), Distance=%.1f"),
         TargetLocation.X, TargetLocation.Y, TargetLocation.Z, DesiredDistance);
-}
-
-void APlayerCamera::FocusOnAreaRadius(const FVector& Center, float WorldRadiusCm)
-{
-    if (!MovementInputHandler)
-    {
-        return;
-    }
-
-    // FOV가 좁아(~20도) 반경 R 원을 다 담으려면 팔길이 ≈ R * KeystoneAuraZoomFactor
-    const float DesiredArm = WorldRadiusCm * KeystoneAuraZoomFactor;
-
-    // 평소 MaxZoomDistance는 1회만 저장 (이미 확장 상태면 덮어쓰지 않음)
-    if (SavedMaxZoomDistance < 0.f)
-    {
-        SavedMaxZoomDistance = MovementInputHandler->MaxZoomDistance;
-    }
-
-    // 줌 트랜지션(이진 탐색)이 DesiredArm까지 도달하도록 상한을 일시 확장 (여유 10%)
-    MovementInputHandler->MaxZoomDistance = FMath::Max(SavedMaxZoomDistance, DesiredArm * 1.1f);
-
-    // 오른쪽 Manage 패널에 가리지 않게 — 시점 중심을 카메라 우측으로 옮겨 건물이 화면 좌측(~1/4)에 오도록.
-    const float ScreenShiftFactor = 0.08f; // 일반 건물 클릭 위치(화면 ~0.3)에 맞춤 — 좁은 FOV라 작은 값이 적당 (튜닝)
-    FVector RightGround = CameraComponent ? CameraComponent->GetRightVector() : FVector::RightVector;
-    RightGround.Z = 0.f;
-    RightGround.Normalize();
-    const FVector ShiftedCenter = Center + RightGround * (DesiredArm * ScreenShiftFactor);
-
-    FocusOnLocation(ShiftedCenter, DesiredArm);
-}
-
-void APlayerCamera::FocusOnBuildingOrAura(ABuildingBaseActor* Building, float TopPadding, float BottomPadding, float ScreenCenterRatioX, float AuraRadiusCm)
-{
-    // 기본은 건물 층수 비례 포커싱. 단, 영향권 반경이 그보다 더 줌아웃을 요구하면 반경이 다 보이게 더 넓게(둘 중 큰 줌).
-    const float BuildingArm = FocusOnBuilding(Building, TopPadding, BottomPadding, ScreenCenterRatioX);
-    if (Building && AuraRadiusCm > 0.f && AuraRadiusCm * KeystoneAuraZoomFactor > BuildingArm)
-    {
-        FocusOnAreaRadius(Building->GetActorLocation(), AuraRadiusCm);
-    }
-}
-
-void APlayerCamera::RestoreZoomRange()
-{
-    if (!MovementInputHandler)
-    {
-        return;
-    }
-
-    if (SavedMaxZoomDistance >= 0.f)
-    {
-        MovementInputHandler->MaxZoomDistance = SavedMaxZoomDistance;
-        SavedMaxZoomDistance = -1.f;
-    }
 }

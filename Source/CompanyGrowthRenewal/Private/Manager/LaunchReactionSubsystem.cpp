@@ -92,15 +92,13 @@ void ULaunchReactionSubsystem::PrepareReactions(int32 BuildingID, const FStagePr
 		R.Source = CriticNames[i];
 		R.Score = Score;
 		R.Comment = Pool->Pop();
-		R.Band = Band;
 		Queue.Items.Add(MoveTemp(R));
 	}
 
-	// SNS 3 — 품질등급 밴드 풀(SA/B/CD), 칩 색은 High/Mid/Low 로 사상
+	// SNS 3 — 품질등급 밴드 풀(SA/B/CD)
 	const EQualityGrade Grade = StageData.CalculateQualityGrade();
 	const FName SnsBand = (Grade == EQualityGrade::S || Grade == EQualityGrade::A) ? FName(TEXT("SA"))
 		: (Grade == EQualityGrade::B) ? FName(TEXT("B")) : FName(TEXT("CD"));
-	const FName SnsColorBand = (SnsBand == FName(TEXT("SA"))) ? FName(TEXT("High")) : (SnsBand == FName(TEXT("B"))) ? FName(TEXT("Mid")) : FName(TEXT("Low"));
 	TArray<FText> SnsNicks, SnsComments;
 	TableMgr->GetReviewComments(FName(TEXT("Sns")), StageData.CompanyType, SnsBand, Contexts, 3, Tokens, SnsNicks, SnsComments);
 	for (int32 i = 0; i < SnsNicks.Num() && i < SnsComments.Num(); ++i)
@@ -109,7 +107,6 @@ void ULaunchReactionSubsystem::PrepareReactions(int32 BuildingID, const FStagePr
 		R.Kind = FName(TEXT("Sns"));
 		R.Source = FText::FromString(FString::Printf(TEXT("@%s"), *SnsNicks[i].ToString()));
 		R.Comment = SnsComments[i];
-		R.Band = SnsColorBand;
 		Queue.Items.Add(MoveTemp(R));
 	}
 

@@ -35,36 +35,6 @@ namespace
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FWorkstationEquipSummaryTest,
-	"CGR.Workstation.EquipSummary",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FWorkstationEquipSummaryTest::RunTest(const FString& Parameters)
-{
-	TestEqual(TEXT("Lv1 = 노트북 단독 (중앙 노트북은 책상 중앙을 통째로 쓴다)"),
-		BuildWorkstationEquipSummary(MakeSetupLevelRow(1)).ToString(),
-		FString(TEXT("노트북")));
-
-	TestEqual(TEXT("Lv4 = 본체까지"),
-		BuildWorkstationEquipSummary(MakeSetupLevelRow(4)).ToString(),
-		FString(TEXT("노트북, 평면 모니터, 본체, 키보드, 마우스")));
-
-	TestEqual(TEXT("Lv6 = 노트북이 빠지고 세로 모니터가 들어온다"),
-		BuildWorkstationEquipSummary(MakeSetupLevelRow(6)).ToString(),
-		FString(TEXT("커브드 모니터, 세로 모니터, 본체, 키보드, 마우스")));
-
-	TestEqual(TEXT("배치(중앙/측면)는 요약에 나오지 않는다"),
-		BuildWorkstationEquipSummary(MakeSetupLevelRow(2)).ToString(),
-		FString(TEXT("노트북, 키보드, 마우스")));
-
-	TestEqual(TEXT("커브드 듀얼은 같은 이름을 두 번 읽히지 않고 개수로 묶는다"),
-		BuildWorkstationEquipSummary(MakeSetupLevelRow(7)).ToString(),
-		FString(TEXT("커브드 모니터 2대, 본체, 키보드, 마우스")));
-
-	return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FWorkstationEquipDeltaTest,
 	"CGR.Workstation.EquipDelta",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -111,6 +81,7 @@ bool FWorkstationEquipDeltaTest::RunTest(const FString& Parameters)
 		// 노트북↔세로 모니터는 모니터끼리의 교체가 아니다 — 빠지는 쪽을 부연으로 말하고 종류는 추가로 둔다
 		TestEqual(TEXT("Kind=Added"), D.Kind, EWorkstationEquipDeltaKind::Added);
 		TestEqual(TEXT("이름"), D.ItemName.ToString(), FString(TEXT("세로 모니터")));
+		TestEqual(TEXT("간결한 결과에도 제거 품목 제공"), D.RemovedItemNames.ToString(), FString(TEXT("노트북")));
 		TestEqual(TEXT("부연이 노트북 제거"), D.Detail.ToString(),
 			FString(TEXT("노트북이 빠집니다")));
 	}

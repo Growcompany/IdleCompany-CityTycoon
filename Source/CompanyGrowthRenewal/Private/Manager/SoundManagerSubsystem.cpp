@@ -388,6 +388,7 @@ void USoundManagerSubsystem::SetMasterVolume(float Volume)
 	UpdateMusicVolume();
 	OnVolumeChanged.Broadcast(ESoundCategory::Master, AudioSettings.MasterVolume);
 	UE_LOG(LogTemp, Log, TEXT("Master volume set to: %f"), AudioSettings.MasterVolume);
+	PushAudioToSaveCache();
 }
 
 void USoundManagerSubsystem::SetCategoryVolume(ESoundCategory Category, float Volume)
@@ -415,6 +416,7 @@ void USoundManagerSubsystem::SetCategoryVolume(ESoundCategory Category, float Vo
 
 	OnVolumeChanged.Broadcast(Category, Volume);
 	UE_LOG(LogTemp, Log, TEXT("Category %s volume set to: %f"), *EnumToString(Category), Volume);
+	PushAudioToSaveCache();
 }
 
 void USoundManagerSubsystem::SetMuted(bool bMute)
@@ -423,6 +425,7 @@ void USoundManagerSubsystem::SetMuted(bool bMute)
 	UpdateMusicVolume();
 	OnVolumeChanged.Broadcast(ESoundCategory::Master, bMute ? 0.0f : AudioSettings.MasterVolume);
 	UE_LOG(LogTemp, Log, TEXT("Muted: %s"), bMute ? TEXT("true") : TEXT("false"));
+	PushAudioToSaveCache();
 }
 
 float USoundManagerSubsystem::GetCategoryVolume(ESoundCategory Category) const
@@ -435,6 +438,7 @@ void USoundManagerSubsystem::SetCategoryMuted(ESoundCategory Category, bool bMut
 	AudioSettings.SetCategoryMuted(Category, bMute);
 	UpdateMusicVolume();
 	OnVolumeChanged.Broadcast(Category, AudioSettings.GetVolumeForCategory(Category));
+	PushAudioToSaveCache();
 }
 
 bool USoundManagerSubsystem::IsCategoryMuted(ESoundCategory Category) const
@@ -447,6 +451,23 @@ void USoundManagerSubsystem::ApplyAudioSettings(const FGameAudioSettings& NewSet
 	AudioSettings = NewSettings;
 	UpdateMusicVolume();
 	UE_LOG(LogTemp, Log, TEXT("Audio settings applied"));
+}
+
+void USoundManagerSubsystem::PushAudioToSaveCache()
+{
+	if (USaveLoadManager* SaveLoadManager = GetGameInstance()->GetSubsystem<USaveLoadManager>())
+	{
+		if (USaveGame_GameData* SaveData = SaveLoadManager->GetCurrentSaveData())
+		{
+			SaveData->GameData.AudioSettings = AudioSettings;   // 디스크 쓰기는 하지 않는다
+		}
+	}
+}
+
+void USoundManagerSubsystem::CollectSaveData(FGameSaveData& OutData) const
+{
+	// 첫 실행에는 세이브 슬롯이 없어 PushAudioToSaveCache 가 조용히 no-op 한다 ― 스냅샷이 직접 받아간다.
+	OutData.AudioSettings = AudioSettings;
 }
 
 void USoundManagerSubsystem::SaveAudioSettings()

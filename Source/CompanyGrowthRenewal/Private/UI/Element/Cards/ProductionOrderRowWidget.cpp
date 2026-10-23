@@ -3,7 +3,6 @@
 #include "UI/Element/Cards/ProductionOrderRowWidget.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Table/ProjectDataTable.h"
-#include "Table/ProductRecipeTable.h"
 #include "Table/ResourceInfo.h"
 #include "Global/GlobalUtilFunctions.h"
 #include "CommonTextBlock.h"
@@ -44,7 +43,8 @@ void UProductionOrderRowWidget::HandleClicked()
 }
 
 void UProductionOrderRowWidget::SetOrderData(const FProductionOrder& InOrder, int32 InMaxProducible,
-	EResourceType InBottleneck, bool bInMaterialBound)
+	EResourceType InBottleneck, bool bInSupplyBound, const FText& InProductInputName,
+	float InEffectiveTimePerUnitSec)
 {
 	CachedOrderID = InOrder.OrderID;
 
@@ -78,31 +78,40 @@ void UProductionOrderRowWidget::SetOrderData(const FProductionOrder& InOrder, in
 		GradeBorder->SetBrushColor(GetGradeColor(InOrder.Grade));
 	}
 
-	if (MetaText)
-	{
-		float PerUnitSec = 0.0f;
-		if (UGameInstance* GI = GetGameInstance())
-		{
-			if (UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>())
-			{
-				bool bRecipeOk = false;
-				const FProductRecipeTable Recipe = TableMgr->GetProductRecipe(InOrder.CompanyType, InOrder.ProjectIndex, bRecipeOk);
-				if (bRecipeOk) PerUnitSec = Recipe.ProductionTimeSec;
-			}
-		}
-		MetaText->SetText(FText::Format(
-			NSLOCTEXT("ProductionOrderRow", "MetaFmt", "남은 {0}개 · {1} / 개"),
-			FText::AsNumber(InOrder.RemainingQuantity),
-			UGlobalUtilFunctions::FormatDurationKorean(PerUnitSec)));
-	}
+	// 1개 시간은 고른 뒤 상세에서 보여 준다 ― 레일 줄은 등급·남은 수량만(spec §2.10)
+	(void)InEffectiveTimePerUnitSec;
+	CachedGrade = InOrder.Grade;
+	CachedRemaining = InOrder.RemainingQuantity;
 
-	UpdateCapacityHint(InMaxProducible, InBottleneck, bInMaterialBound);
+	UpdateCapacityHint(InMaxProducible, InBottleneck, bInSupplyBound, InProductInputName);
 	LoadCoverAsync(InOrder.CompanyType, InOrder.ProjectIndex);
 }
 
-void UProductionOrderRowWidget::UpdateCapacityHint(int32 InMaxProducible, EResourceType InBottleneck,
-	bool bInMaterialBound)
+void UProductionOrderRowWidget::ApplyMetaLine(int32 InMaxProducible, EResourceType InBottleneck, bool bInSupplyBound,
+	const FText& InProductInputName)
 {
+	if (!MetaText) return;
+	if (InMaxProducible <= 0)
+	{
+		// 칩이 막으면 「재료」라고 하지 않는다 ― 광석을 캐러 가게 된다
+		const bool bPartBound = bInSupplyBound && InBottleneck == EResourceType::None && !InProductInputName.IsEmpty();
+		MetaText->SetText(bPartBound
+			? NSLOCTEXT("ProductionOrderRow", "PartShort", "부품 부족")
+			: NSLOCTEXT("ProductionOrderRow", "MaterialShort", "재료 부족"));
+		MetaText->SetColorAndOpacity(MetaInkBlocked);
+		return;
+	}
+	const UEnum* GradeEnum = StaticEnum<EQualityGrade>();
+	MetaText->SetText(FText::Format(NSLOCTEXT("ProductionOrderRow", "MetaGradeFmt", "{0} 등급 · 남은 {1}개"),
+		FText::FromString(GradeEnum ? GradeEnum->GetNameStringByValue(static_cast<int64>(CachedGrade)) : TEXT("?")),
+		FText::AsNumber(CachedRemaining)));
+	MetaText->SetColorAndOpacity(MetaInk);
+}
+
+void UProductionOrderRowWidget::UpdateCapacityHint(int32 InMaxProducible, EResourceType InBottleneck,
+	bool bInSupplyBound, const FText& InProductInputName)
+{
+	ApplyMetaLine(InMaxProducible, InBottleneck, bInSupplyBound, InProductInputName);
 	if (!HintText) return;
 
 	// 조사 폴백 "이(가)" 금지 — 조사가 필요 없는 어순으로 쓴다
@@ -120,21 +129,50 @@ void UProductionOrderRowWidget::UpdateCapacityHint(int32 InMaxProducible, EResou
 		}
 	}
 
+	// 자원 이름이 비는 것은 제품 입력(칩)이 상한을 정했다는 신호다 — 호출부가 그 때만 이름을 넘긴다.
+	// 여기서 "재료"라고 말하면 칩이 모자란 플레이어가 광석을 캐러 간다.
+	const bool bProductBound = bInSupplyBound
+		&& (InBottleneck == EResourceType::None) && !InProductInputName.IsEmpty();
+
 	if (InMaxProducible <= 0)
 	{
 		HintText->SetVisibility(ESlateVisibility::HitTestInvisible);
 		HintText->SetColorAndOpacity(HintInkBlocked);
-		HintText->SetText(Bottleneck.IsEmpty()
-			? NSLOCTEXT("ProductionOrderRow", "BlockedPlain", "재료 부족 ― 1개도 못 만듭니다")
-			: FText::Format(NSLOCTEXT("ProductionOrderRow", "BlockedFmt", "{0} 부족 ― 1개도 못 만듭니다"), Bottleneck));
+		FText Label = bProductBound ? InProductInputName : Bottleneck;
+		if (Label.IsEmpty())
+		{
+			// 이름을 못 구한 자리는 무엇이 막았는지만 — 칩 병목에 "재료"를 쓰지 않는다
+			Label = (bInSupplyBound && InBottleneck == EResourceType::None)
+				? NSLOCTEXT("ProductionOrderRow", "PartWord", "부품")
+				: NSLOCTEXT("ProductionOrderRow", "MaterialWord", "재료");
+		}
+		HintText->SetText(FText::Format(
+			NSLOCTEXT("ProductionOrderRow", "BlockedFmt", "{0} 부족 ― 1개도 못 만듭니다"), Label));
 	}
-	else if (bInMaterialBound)
+	else if (bInSupplyBound)
 	{
 		HintText->SetVisibility(ESlateVisibility::HitTestInvisible);
 		HintText->SetColorAndOpacity(HintInkTight);
-		HintText->SetText(FText::Format(
-			NSLOCTEXT("ProductionOrderRow", "TightFmt", "재료로 {0}개까지 ― 상한 {1}"),
-			FText::AsNumber(InMaxProducible), Bottleneck));
+		const FText Label = bProductBound ? InProductInputName : Bottleneck;
+		if (Label.IsEmpty())
+		{
+			// 빈 이름을 슬롯에 그대로 넣으면 "상한 " 으로 끝나는 매달린 문장이 나온다 — 수치만 쓴다
+			HintText->SetText(FText::Format(
+				NSLOCTEXT("ProductionOrderRow", "TightPlainFmt", "{0}개까지 만들 수 있습니다"),
+				FText::AsNumber(InMaxProducible)));
+		}
+		else if (bProductBound)
+		{
+			HintText->SetText(FText::Format(
+				NSLOCTEXT("ProductionOrderRow", "TightPartFmt", "부품으로 {0}개까지 ― 상한 {1}"),
+				FText::AsNumber(InMaxProducible), Label));
+		}
+		else
+		{
+			HintText->SetText(FText::Format(
+				NSLOCTEXT("ProductionOrderRow", "TightFmt", "재료로 {0}개까지 ― 상한 {1}"),
+				FText::AsNumber(InMaxProducible), Label));
+		}
 	}
 	else
 	{

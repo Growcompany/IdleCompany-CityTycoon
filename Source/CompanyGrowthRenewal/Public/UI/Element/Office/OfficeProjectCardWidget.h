@@ -18,7 +18,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnStopOperationClicked);
  * - 4개 단계별 StatRow (기획/개발/QA/출시)
  * - 4개 단계 선택 버튼
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOfficeProjectCardWidget : public UUserWidget
 {
 	GENERATED_BODY()

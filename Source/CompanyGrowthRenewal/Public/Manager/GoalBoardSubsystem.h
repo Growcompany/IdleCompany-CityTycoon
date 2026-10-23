@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Ticker.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Table/GoalTable.h"
 #include "GoalBoardSubsystem.generated.h"
@@ -8,7 +9,7 @@
 struct FGameSaveData;
 class UTableManagerSubsystem;
 
-enum class EGoalState : uint8 { Locked, InProgress, Claimable, Claimed };
+enum class EGoalState : uint8 { Locked, InProgress, ReadyToClaim, Completed };
 
 // 보드/트래커 UI 용 미션 스냅샷
 struct FGoalBoardEntry
@@ -18,6 +19,9 @@ struct FGoalBoardEntry
 	EGoalState State = EGoalState::InProgress;
 	int64 ProgressCurrent = 0;
 	int64 ProgressTarget = 0;
+	bool bRecommendable = true;
+	bool bPracticed = false;
+	int32 ClaimCount = 0;
 };
 
 DECLARE_MULTICAST_DELEGATE(FOnGoalBoardChanged);
@@ -26,9 +30,7 @@ DECLARE_MULTICAST_DELEGATE(FOnGoalBoardChanged);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnTrackedGoalChanged, FName);
 
 /**
- * 미션판 — 체인 종료 후 동시 노출·자유 순서 미션 (스펙 2026-08-02 §5).
- * MissionManager 의 OnConditionSignal 구독으로 판정. 이벤트형=래치 / 도달형=절대값 평가.
- * 수령은 전건 수동: 조건 달성 시 Claimable 로 래치하고 트래커의 수령 동작에서만 보상을 지급한다.
+ * 튜토리얼 이후 성장 안내. 실제 행동 신호와 도달 조건을 판정해 완료한다.
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UGoalBoardSubsystem : public UGameInstanceSubsystem
@@ -49,15 +51,24 @@ public:
 
 	// DT_Goal 행 순서 스냅샷 (보드 리스트)
 	void GetBoardEntries(TArray<FGoalBoardEntry>& OutEntries) const;
+	EGoalState GetGoalState(FName GoalID, const FGoalTable& Row) const;
 
-	// [수령] — Claimable(충족+선행 수령)에서만 지급. 성공 시 세이브 + 밴드 토스트 + 브로드캐스트.
-	bool ClaimGoal(FName GoalID);
+	// 준비된 성장 목표 한 건. 안내 시작 여부와 별개라 임의로 스포트라이트를 켜지 않는다.
+	FName GetRecommendedGoalID() const;
+	bool SetActiveGoal(FName GoalID);
+	bool ClaimGoal(FName GoalID, int32 ExpectedClaimCount);
+	int32 GetGuideBuildingIndex(FName GoalID) const;
+	// 직접 따라가는 부서 채용 안내의 대상 회사에서만 제한한다. Count는 자유 채용이다.
+	EProductionDiscipline GetGuidedRecruitDiscipline(int32 BuildingIndex) const;
+
+	// 이 세션에는 선택한 안내를 다시 자동 추천하지 않는다.
+	void DismissGoal(FName GoalID);
 
 	// ===== 미션판 표시 상태 (전부 transient — 세이브 안 함) =====
 
 	// 안내(가이드 점등) 중인 미션. NAME_None = 없음
 	FName GetTrackedGoalID() const { return TrackedGoalID; }
-	// 안내 대상 지정 — NAME_None 이면 해제. Locked/Claimed 미션은 거부(무시)한다.
+	// 안내 대상 지정 — NAME_None 이면 해제. 진행 중인 안내만 지정한다.
 	// 한 번에 1건만: 다른 미션을 지정하면 기존 추적은 자동으로 풀린다
 	void SetTrackedGoal(FName GoalID);
 
@@ -70,13 +81,7 @@ public:
 	bool AreRowsExpanded() const { return bRowsExpanded; }
 	void SetRowsExpanded(bool bInExpanded);
 
-	// 미션판 첫 등장 연출을 이번 세션에 아직 안 했으면 true 를 돌려주고 소진한다.
-	// transient 라 재접속마다 1회 재생된다 — 세이브 필드를 늘릴 값어치가 없는 미약한 연출이라 의도된 선택
-	bool ConsumeEntranceOnce();
-
-	// 트래커 표시 여부 — Claimed 가 아닌 항목이 하나라도 있으면 true.
-	// Locked 도 세는 것이 의도: 잠금 행도 리스트에 노출된다(대표 미션 기준과 다름)
-	bool HasAnyUnclaimedGoal() const;
+	bool HasAvailableGuide() const;
 
 	FOnTrackedGoalChanged OnTrackedGoalChanged;
 
@@ -92,9 +97,15 @@ public:
 private:
 #if WITH_DEV_AUTOMATION_TESTS
 	friend struct FGoalBoardEntryOrderTestAccessor;
+	friend struct FGuideQuestTestAccessor;
 #endif
 
-	void HandleConditionSignal(EMissionConditionType Type);
+	void HandleConditionSignal(EMissionConditionType Type, int64 Amount);
+	void HandleResourceChanged(EResourceType Type, int64 NewValue);
+	void RefreshRecommendation();
+	bool TickReadiness(float DeltaTime);
+	bool IsGoalAvailable(const FGoalTable& Row) const;
+	bool IsGoalReady(FName GoalID, const FGoalTable& Row) const;
 	void HandleGameDataLoaded();
 	void HandlePostLoadEvaluationSave();
 	void BuildBoardEntriesFromTableManager(
@@ -103,25 +114,36 @@ private:
 
 	// 도달형과 카운트 이벤트 조건의 현재/목표. 단발 이벤트형은 false를 반환한다.
 	bool GetConditionProgress(FName GoalID, const FGoalTable& Row, int64& OutCurrent, int64& OutTarget) const;
-	EGoalState GetGoalState(FName GoalID, const FGoalTable& Row) const;
 	// 미충족 미션 1건 판정 — 이벤트형은 bFromEvent 일 때만, 도달형은 절대값. 충족 시 래치+브로드캐스트. 반환값=이번 호출에서 새로 래치했는지(호출부가 저장 여부 결정)
 	bool EvaluateGoal(FName GoalID, const FGoalTable& Row, bool bFromEvent, bool bShouldBroadcast = true);
 	// 전수 재평가 (언락/로드 직후 — 자유플레이 선충족 구제. 스펙 §5.1)
 	bool EvaluateAllGoals(bool bShouldSave = true, bool bShouldBroadcast = true);
 
 	bool bUnlocked = false;
+
+	// 세이브 핸드오프 전 CollectSaveData 가 기본값을 내보내 진행도를 덮는 것을 막는다.
+	bool bLoadedFromSave = false;
 	bool bUnlockNotificationPending = false;
 	bool bPreparedUnlockRollbackAvailable = false;
 	bool bUnlockedBeforePreparedUnlock = false;
 	TArray<FName> CompletedGoalIDsBeforePreparedUnlock;
 	TMap<FName, int64> GoalEventProgressBeforePreparedUnlock;
-	TArray<FName> ClaimedGoalIDsBeforePreparedUnlock;
+	TMap<FName, int32> GoalSuccessCountsBeforePreparedUnlock;
+	TArray<FName> ReadyGoalIDsBeforePreparedUnlock;
+	FName ActiveGuideGoalBeforePreparedUnlock;
 	TArray<FName> CompletedGoalIDs;
 	TMap<FName, int64> GoalEventProgressByID;
-	TArray<FName> ClaimedGoalIDs;
+	TMap<FName, int32> GoalSuccessCountsByID;
+	TArray<FName> ReadyGoalIDs;
+	FName ActiveGuideGoalID;
+	bool bClaimInProgress = false;
+	TSet<FName> DismissedGoalIDs;
+	FTSTicker::FDelegateHandle ReadinessTickerHandle;
 
 	FName TrackedGoalID = NAME_None;
+	int32 TrackedRecruitBuildingIndex = INDEX_NONE;
+	FName LastRecommendedGoalID = NAME_None;
+	TArray<FName> LastAvailableGoalIDs;
 	bool bTrackerFolded = false;
 	bool bRowsExpanded = false;
-	bool bEntrancePlayed = false;
 };

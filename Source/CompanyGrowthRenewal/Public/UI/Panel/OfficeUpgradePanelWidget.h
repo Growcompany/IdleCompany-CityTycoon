@@ -11,7 +11,7 @@
 class UButton;
 class UTextBlock;
 class UUpgradeSlot;
-class UCloseButtonWidget;
+class UPanelHeaderWidget;
 
 /**
  * 오피스 확장 하단 시트
@@ -31,7 +31,7 @@ protected:
 	// ========== 공통 UI ==========
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UCloseButtonWidget* UIE_CloseButton;
+	TObjectPtr<UPanelHeaderWidget> PanelHeader;
 
 	// 시트 바깥 풀스크린 투명 버튼 — 탭 = 닫기
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -64,6 +64,9 @@ private:
 	void OnExpandRightClicked();
 
 	void OnResourceChanged(EResourceType Type, int64 NewValue);
+
+	// 경제 잠금/해제 — 해제 시 서버값으로 정정된 잔액으로 비용 행 재계산
+	void HandleEconomyReady(bool bReady);
 
 	// ========== 갱신/결제 ==========
 

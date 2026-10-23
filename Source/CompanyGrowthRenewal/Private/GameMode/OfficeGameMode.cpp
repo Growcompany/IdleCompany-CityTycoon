@@ -10,24 +10,23 @@
 #include "Kismet/GameplayStatics.h"
 #include "Util/CoordinateUtils.h"
 #include "Manager/EmployeeManager.h"
-#include "Entity/Officeworker/ModularOfficeworker.h"
-#include "Entity/Officeworker/OfficeworkerMale.h"
-#include "Entity/Officeworker/OfficeworkerFemale.h"
-#include "Entity/Officeworker/StickOfficeworker.h"
+#include "Entity/Officeworker/FunnyOfficeworker.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
 #include "Entity/Building/BuildingBaseActor.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "NavigationSystem.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "Office/OfficeInterior.h"
+#include "Office/OfficeExteriorShell.h"
 #include "Office/OfficeManager.h"
 #include "Office/WorkstationActorBase.h"
-#include "AsyncLoadingScreenLibrary.h"
+#include "MoviePlayer.h"
 #include "Manager/OfficeStageProgressManager.h"
 #include "Manager/ProjectOperationManager.h"
 #include "Manager/ResourceItemManager.h"
 #include "Data/EntitySaveData.h"
 #include "UI/Panel/OfficeLayerWidget.h"
+#include "Components/CapsuleComponent.h"
 
 AOfficeGameMode::AOfficeGameMode()
 {
@@ -77,6 +76,7 @@ void AOfficeGameMode::FindAndCacheOfficeInterior()
 	if (FoundActors.Num() > 0)
 	{
 		CachedOfficeInterior = Cast<AOfficeInterior>(FoundActors[0]);
+		CachedOfficeInterior->ApplyPresentationScale();
 		UE_LOG(LogTemp, Log, TEXT("[OfficeGameMode] OfficeInterior cached: %s (%p)"),
 			*CachedOfficeInterior->GetName(), CachedOfficeInterior);
 	}
@@ -108,6 +108,18 @@ void AOfficeGameMode::StartPlay()
 		// 게임 데이터 로드 (Office 확장, Decoration, Workstation 복원)
 		// 직원 스폰보다 먼저 수행해야 OfficeInterior 상태가 올바르게 설정됨
 		GameInstance->LoadGameAfterLevelStart();
+
+		// 저장된 실내 footprint 복원 뒤 입장 시점의 도시 전망을 최종 동기화한다.
+		if (IsValid(CachedOfficeInterior))
+		{
+			CachedOfficeInterior->SynchronizeCityBackdrop();
+		}
+		TArray<AActor*> ExteriorActors;
+		UGameplayStatics::GetAllActorsOfClass(GetWorld(), AOfficeExteriorShell::StaticClass(), ExteriorActors);
+		for (AActor* ExteriorActor : ExteriorActors)
+		{
+			CastChecked<AOfficeExteriorShell>(ExteriorActor)->SynchronizeToInterior();
+		}
 
 		int32 BuildingIndexAfter = GameInstance->GetCurrentManagedBuildingIndex();
 		UE_LOG(LogTemp, Warning, TEXT("[OfficeGameMode] After Load - ManagedBuildingIndex: %d"), BuildingIndexAfter);
@@ -145,7 +157,10 @@ void AOfficeGameMode::StartPlay()
 	SpawnEmployeesInOffice();
 
 	// 스테이지 진행 상태 로드
-	LoadStageProgressFromSave();
+	if (CurrentMode != EOfficeMode::Skyline)
+	{
+		LoadStageProgressFromSave();
+	}
 
 	// 미션 가이드(트래커/오버레이) 재구축은 UIManager::OnLevelLayerReady 신호(ShowOfficeUI 레이어 생성 후)가 구동 —
 	// 여기서 직접 호출하지 않는다(레이어 준비 전 빌드되던 경쟁/깜빡임 제거).
@@ -177,28 +192,16 @@ void AOfficeGameMode::SwitchOfficeMode(EOfficeMode NewMode)
 
 void AOfficeGameMode::ReturnToMainMap()
 {
+	UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
+	if (!GameInstance || GameInstance->IsLevelTransitionActive()) return;
+
 	UE_LOG(LogTemp, Log, TEXT("[OfficeGameMode] Returning to Main Map"));
 
 	// 스테이지 진행 상태 저장
 	SaveStageProgressToSave();
 
-	// GameInstance 초기화 (다음 진입을 위해)
-	UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
-	if (GameInstance)
-	{
-		// 레벨 전환 전 현재 데이터 저장
-		if (USaveLoadManager* SaveMgr = GameInstance->GetSubsystem<USaveLoadManager>())
-		{
-			SaveMgr->SaveGameData();
-			UE_LOG(LogTemp, Warning, TEXT("[OfficeGameMode] Game data saved before returning to MainMap"));
-		}
-
-		GameInstance->SetOfficeMode(EOfficeMode::Normal);
-		GameInstance->SetCurrentManagedBuilding(nullptr);
-
-		// MainMap으로 전환 (TransitionToLevel 사용해서 MapType 설정)
-		GameInstance->TransitionToLevel(TEXT("MainMap"));
-	}
+	// 관리 건물과 모드는 저장 완료까지 GameInstance가 유지한다.
+	GameInstance->TransitionToLevel(TEXT("MainMap_City"));
 }
 
 
@@ -213,6 +216,9 @@ void AOfficeGameMode::SpawnEmployeesInOffice()
 	if (!GameInstance)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[OfficeGameMode] GameInstance is null!"));
+		GetMoviePlayer()->StopMovie();
+		bOfficeEmployeesReady = true;
+		OnOfficeEmployeesReady.Broadcast();
 		return;
 	}
 
@@ -220,6 +226,9 @@ void AOfficeGameMode::SpawnEmployeesInOffice()
 	if (BuildingIndex == INDEX_NONE)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[OfficeGameMode] No building is currently managed (BuildingIndex is INDEX_NONE)"));
+		GetMoviePlayer()->StopMovie();
+		bOfficeEmployeesReady = true;
+		OnOfficeEmployeesReady.Broadcast();
 		return;
 	}
 
@@ -231,17 +240,26 @@ void AOfficeGameMode::SpawnEmployeesInOffice()
 	if (!EmployeeManager)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[OfficeGameMode] EmployeeManager is null!"));
+		GetMoviePlayer()->StopMovie();
+		bOfficeEmployeesReady = true;
+		OnOfficeEmployeesReady.Broadcast();
 		return;
 	}
 
-	TArray<FEmployeeInstance> Employees = EmployeeManager->GetEmployeesInBuilding(BuildingIndex);
+	// 스카이라인 판정은 배치 팀 전체를 사용한다. 실제 오피스의 같은 직원·좌석으로 표시한다.
+	TArray<FEmployeeInstance> Employees = CurrentMode == EOfficeMode::Skyline
+		? EmployeeManager->GetEmployeesInBuilding(BuildingIndex)
+		: EmployeeManager->GetActiveEmployeesInBuilding(BuildingIndex);
 
-	UE_LOG(LogTemp, Log, TEXT("[OfficeGameMode] Found %d employees in building %d"), Employees.Num(), BuildingIndex);
+	UE_LOG(LogTemp, Log, TEXT("[OfficeGameMode] Found %d active employees in building %d"), Employees.Num(), BuildingIndex);
 
 	if (Employees.Num() == 0)
 	{
 		// 직원이 없어도 로딩 화면 종료
-		UAsyncLoadingScreenLibrary::StopLoadingScreen();
+		GetMoviePlayer()->StopMovie();
+		bOfficeEmployeesReady = true;
+		OnOfficeEmployeesReady.Broadcast();
+		if (CurrentMode == EOfficeMode::Skyline) return;
 
 		// 직원 없어도 1초 후 수익 수집 체크
 		GetWorld()->GetTimerManager().SetTimer(
@@ -263,7 +281,7 @@ void AOfficeGameMode::SpawnEmployeesInOffice()
 	CurrentSpawnIndex = 0;
 
 	// 로딩 화면 먼저 종료 (World Timer가 작동하려면 로딩 화면이 꺼져야 함)
-	UAsyncLoadingScreenLibrary::StopLoadingScreen();
+	GetMoviePlayer()->StopMovie();
 	UE_LOG(LogTemp, Log, TEXT("[OfficeGameMode] Loading screen stopped, starting distributed spawn"));
 
 	// 로딩 화면 종료 후 다음 프레임에서 스폰 시작
@@ -337,6 +355,7 @@ void AOfficeGameMode::SpawnNextEmployee()
 
 		// 운영 수익률 라이브 동기화 — ActualRevenuePerSecond 는 감쇠/변동으로 매초 변하는데
 		// 배포가 입장 1회뿐이면 직원 플로팅 합이 표시 수익/초와 어긋남 → 1초마다 재배포
+		if (CurrentMode != EOfficeMode::Skyline)
 		{
 			FTimerHandle IncomeSyncTimerHandle;
 			GetWorld()->GetTimerManager().SetTimer(
@@ -377,6 +396,9 @@ void AOfficeGameMode::SpawnNextEmployee()
 					}
 				}
 				UE_LOG(LogTemp, Log, TEXT("[OfficeGameMode] All %d employees now visible"), SpawnedEmployees.Num());
+				bOfficeEmployeesReady = true;
+				OnOfficeEmployeesReady.Broadcast();
+				if (CurrentMode == EOfficeMode::Skyline) return;
 
 				// 직원 표시 후 1초 뒤 수익 수집 연출 트리거
 				GetWorld()->GetTimerManager().SetTimer(
@@ -390,57 +412,99 @@ void AOfficeGameMode::SpawnNextEmployee()
 	}
 }
 
+bool AOfficeGameMode::CanStartSkylineDevelopment() const
+{
+	const UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	const UOfficeManager* OfficeMgr = GetWorld()->GetSubsystem<UOfficeManager>();
+	const UEmployeeManager* EmployeeMgr = GI ? GI->GetSubsystem<UEmployeeManager>() : nullptr;
+	if (CurrentMode != EOfficeMode::Skyline || !bOfficeEmployeesReady || !GI || !EmployeeMgr
+		|| !OfficeMgr || !OfficeMgr->IsInteriorRestored() || SpawnedEmployees.IsEmpty()) return false;
+
+	const TArray<FEmployeeInstance> Team = EmployeeMgr->GetEmployeesInBuilding(GI->GetCurrentManagedBuildingIndex());
+	if (Team.Num() != SpawnedEmployees.Num()) return false;
+	for (const FEmployeeInstance& Employee : Team)
+	{
+		const AOfficeworker* Worker = FindEmployeeActorByID(Employee.EmployeeID);
+		const AWorkstationActorBase* Desk = Worker ? Worker->GetAssignedWorkstation() : nullptr;
+		if (!IsValid(Worker) || !Worker->BehaviorComponent || !IsValid(Desk)
+			|| Worker->GetAssignedSeatIndex() < 0 || Worker->GetAssignedSeatIndex() >= Desk->GetChairCount()
+			|| Desk->GetAssignedEmployeeID(Worker->GetAssignedSeatIndex()) != Employee.EmployeeID) return false;
+	}
+	return true;
+}
+
+void AOfficeGameMode::SetSkylineEmployeesWorking(bool bWorking)
+{
+	if (CurrentMode != EOfficeMode::Skyline) return;
+	for (AOfficeworker* Worker : SpawnedEmployees)
+	{
+		if (!IsValid(Worker) || !Worker->BehaviorComponent || !Worker->GetAssignedWorkstation()) continue;
+		UEmployeeBehaviorComponent* Behavior = Worker->BehaviorComponent;
+		if (bWorking)
+		{
+			Behavior->SetBehaviorMode(EEmployeeBehaviorMode::Stage);
+		}
+		else if (Behavior->GetBehaviorMode() == EEmployeeBehaviorMode::Stage)
+		{
+			Behavior->StartCheerSitting();
+		}
+	}
+}
+
+void AOfficeGameMode::SetSkylineClimbFloors(const int32 ClearedCount)
+{
+	if (CurrentMode != EOfficeMode::Skyline) return;
+
+	const int32 Count = FMath::Max(0, ClearedCount);
+	if (AOfficeCameraPawn* Camera = Cast<AOfficeCameraPawn>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0)))
+	{
+		Camera->SetSkylineClimbFloors(Count);
+	}
+	TArray<AActor*> ExteriorActors;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AOfficeExteriorShell::StaticClass(), ExteriorActors);
+	for (AActor* ExteriorActor : ExteriorActors)
+	{
+		CastChecked<AOfficeExteriorShell>(ExteriorActor)->SetSkylineClimbLift(Count * 400.f);
+	}
+}
+
+void AOfficeGameMode::ResetSkylineClimbPresentation()
+{
+	SetSkylineClimbFloors(0);
+}
+
 void AOfficeGameMode::SpawnSingleEmployee(const FEmployeeInstance& Employee)
 {
-	UEmployeeManager* EmployeeManager = GetGameInstance()->GetSubsystem<UEmployeeManager>();
-	if (!EmployeeManager)
-	{
-		return;
-	}
-
-	// EmployeeManager에서 외형 데이터 가져오기
-	FCharacterAppearance EmployeeAppearance = EmployeeManager->GetEmployeeAppearance(Employee.EmployeeID);
-
 	// EnhancementLevel에서 Rank 계산
 	EEmployeeRank CurrentRank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee.EnhancementLevel);
 
-	// 클래스 선택: 스틱맨(신규) vs 성별 모듈러(구). 구 경로는 그대로 보존.
-	TSubclassOf<AOfficeworker> OfficeworkerClass;
-	if (ShouldUseStickWorker(Employee))
+	// BP_FunnyOfficeworker 단일 경로 — BP 에서 튜닝한 기본값(BodyScale/코스메틱 트랜스폼)이 적용돼야 하므로 C++ 클래스 폴백을 두지 않는다.
+	// 1회만 해석해 캐시 — 매 스폰 동기 로드/재해석 제거.
+	if (!ResolvedStickWorkerClass)
 	{
-		// BP_StickOfficeworker 우선 — BP 에서 튜닝한 기본값(BodyScale/페이스 플레인 트랜스폼)이 적용되도록.
-		// BP 미존재 시 C++ 클래스로 폴백(기능 동일, 튜닝 기본값만 없음). 1회만 해석해 캐시 — 매 스폰 동기 로드/재해석 제거.
-		if (!ResolvedStickWorkerClass)
-		{
-			static const TSoftClassPtr<AOfficeworker> StickBPClass(
-				FSoftObjectPath(TEXT("/Game/CompanyGrowth/Characters/StickmanCG/BP_StickOfficeworker.BP_StickOfficeworker_C")));
-			UClass* LoadedBP = StickBPClass.LoadSynchronous();
-			ResolvedStickWorkerClass = LoadedBP ? LoadedBP : AStickOfficeworker::StaticClass();
-		}
-		OfficeworkerClass = ResolvedStickWorkerClass;
+		static const TSoftClassPtr<AOfficeworker> FunnyBPClass(
+			FSoftObjectPath(TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/BP_FunnyOfficeworker.BP_FunnyOfficeworker_C")));
+		ResolvedStickWorkerClass = FunnyBPClass.LoadSynchronous();
 	}
-	else if (Employee.Gender == EEmployeeGender::Male)
+	if (!ResolvedStickWorkerClass)
 	{
-		OfficeworkerClass = AOfficeworkerMale::StaticClass();
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeGameMode] BP_FunnyOfficeworker 로드 실패 — 직원 %d 스폰 취소"), Employee.EmployeeID);
+		return;
 	}
-	else
-	{
-		OfficeworkerClass = AOfficeworkerFemale::StaticClass();
-	}
+	const TSubclassOf<AOfficeworker> OfficeworkerClass = ResolvedStickWorkerClass;
 
 	// OfficeInterior 바닥 영역 내 랜덤 위치에서 스폰
 	FVector SpawnLocation;
 	if (CachedOfficeInterior)
 	{
 		SpawnLocation = CachedOfficeInterior->GetRandomFloorLocation();
-		// Capsule 반 높이만큼 Z 조정 (캐릭터가 바닥에 서도록)
-		SpawnLocation.Z += 92.04f;
+		// 최종 BodyScale 초기화 뒤 실제 캡슐 높이로 바닥에 맞춘다.
 		UE_LOG(LogTemp, Log, TEXT("[OfficeGameMode] Spawn location from OfficeInterior: %s"), *SpawnLocation.ToString());
 	}
 	else
 	{
 		// OfficeInterior 없으면 폴백: 일렬 배치
-		SpawnLocation = FVector(200.f + CurrentSpawnIndex * 200.f, -400.f, 92.04f);
+		SpawnLocation = FVector(200.f + CurrentSpawnIndex * 200.f, -400.f, 0.f);
 		UE_LOG(LogTemp, Warning, TEXT("[OfficeGameMode] OfficeInterior not found, using fallback location for employee %d"), Employee.EmployeeID);
 	}
 
@@ -466,24 +530,19 @@ void AOfficeGameMode::SpawnSingleEmployee(const FEmployeeInstance& Employee)
 
 		// 모든 초기화 완료 후 스폰 완료 처리
 		SpawnedWorker->FinishSpawning(FTransform(Rotation, SpawnLocation));
+		if (CachedOfficeInterior)
+		{
+			SpawnedWorker->SetActorScale3D(SpawnedWorker->GetActorScale3D() * CachedOfficeInterior->GetActorScale3D());
+		}
+		SpawnLocation.Z += SpawnedWorker->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+		SpawnedWorker->SetActorLocation(SpawnLocation);
 
 		// 코스메틱은 FinishSpawning '이후'에 적용 — PostInitializeComponents(코스메틱 컴포넌트 이름 재연결)+컴포넌트 등록이 끝나야
 		// 타이/헤어 MID·바디 슬롯 MID 가 유효·등록된 컴포넌트에 적용된다. 이전엔 deferred 창에서 호출돼 멤버 null/미등록 → 색 미적용. (2026-06-12)
-		if (AStickOfficeworker* StickWorker = Cast<AStickOfficeworker>(SpawnedWorker))
+		if (AFunnyOfficeworker* FunnyWorker = Cast<AFunnyOfficeworker>(SpawnedWorker))
 		{
-			// 신규 경로: 데이터 모델 → 색/안경 코스메틱 (헤어/모프 파이프라인 미사용)
 			const EGachaTier Tier = ResolveGachaTier(Employee);
-			StickWorker->ApplyWorkerCosmetics(Employee.Department, CurrentRank, Tier, Employee.EmployeeID);
-		}
-		else if (AModularOfficeworker* ModularWorker = Cast<AModularOfficeworker>(SpawnedWorker))
-		{
-			// 구 경로: 모듈러 외형 (SetCharacterAppearance 내부에서 이미 hair 설정됨)
-			ModularWorker->SetCharacterAppearance(
-				EmployeeAppearance,
-				CurrentRank,
-				Employee.Gender,
-				Employee.EmployeeID
-			);
+			FunnyWorker->ApplyWorkerCosmetics(Employee.Department, CurrentRank, Tier, Employee.EmployeeID, Employee.Gender);
 		}
 
 		// Workstation 할당 찾기 (이미 배정된 좌석이 있으면 참조 설정)
@@ -547,36 +606,21 @@ void AOfficeGameMode::SpawnWorkerForAssignment(const FEmployeeInstance& Employee
 		return;
 	}
 
-	UEmployeeManager* EmployeeManager = GetGameInstance()->GetSubsystem<UEmployeeManager>();
-	if (!EmployeeManager)
-	{
-		return;
-	}
-
-	FCharacterAppearance EmployeeAppearance = EmployeeManager->GetEmployeeAppearance(Employee.EmployeeID);
 	EEmployeeRank CurrentRank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee.EnhancementLevel);
 
-	// 클래스 선택: SpawnSingleEmployee 와 동일 규칙 (스틱맨 신규 / 성별 모듈러 구)
-	TSubclassOf<AOfficeworker> OfficeworkerClass;
-	if (ShouldUseStickWorker(Employee))
+	// 클래스 선택: SpawnSingleEmployee 와 동일 규칙 (BP_FunnyOfficeworker 단일 경로)
+	if (!ResolvedStickWorkerClass)
 	{
-		if (!ResolvedStickWorkerClass)
-		{
-			static const TSoftClassPtr<AOfficeworker> StickBPClass(
-				FSoftObjectPath(TEXT("/Game/CompanyGrowth/Characters/StickmanCG/BP_StickOfficeworker.BP_StickOfficeworker_C")));
-			UClass* LoadedBP = StickBPClass.LoadSynchronous();
-			ResolvedStickWorkerClass = LoadedBP ? LoadedBP : AStickOfficeworker::StaticClass();
-		}
-		OfficeworkerClass = ResolvedStickWorkerClass;
+		static const TSoftClassPtr<AOfficeworker> FunnyBPClass(
+			FSoftObjectPath(TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/BP_FunnyOfficeworker.BP_FunnyOfficeworker_C")));
+		ResolvedStickWorkerClass = FunnyBPClass.LoadSynchronous();
 	}
-	else if (Employee.Gender == EEmployeeGender::Male)
+	if (!ResolvedStickWorkerClass)
 	{
-		OfficeworkerClass = AOfficeworkerMale::StaticClass();
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeGameMode] BP_FunnyOfficeworker 로드 실패 — 직원 %d 배정 스폰 취소"), Employee.EmployeeID);
+		return;
 	}
-	else
-	{
-		OfficeworkerClass = AOfficeworkerFemale::StaticClass();
-	}
+	const TSubclassOf<AOfficeworker> OfficeworkerClass = ResolvedStickWorkerClass;
 
 	// 좌석 위치에 스폰 — 여기는 NavMesh 밖(책상 구멍)이라 AI 이동 시작점으로 쓸 수 없다
 	const FVector SeatLocation = Workstation->GetSeatLocation(SeatIndex);
@@ -600,17 +644,22 @@ void AOfficeGameMode::SpawnWorkerForAssignment(const FEmployeeInstance& Employee
 
 	// 즉시 등장 (로드 시 일괄 스폰의 GPU Skin Cache 지연-표시 처리는 단건 배정에는 불필요)
 	SpawnedWorker->FinishSpawning(FTransform(Rotation, SeatLocation));
+	if (CachedOfficeInterior)
+	{
+		SpawnedWorker->SetActorScale3D(SpawnedWorker->GetActorScale3D() * CachedOfficeInterior->GetActorScale3D());
+	}
+	FVector StandingLocation = SeatLocation;
+	StandingLocation.Z = (CachedOfficeInterior
+		? CachedOfficeInterior->GetActorTransform().TransformPosition(FVector(0.f, 0.f, CachedOfficeInterior->GetStructuralFloorZLocal())).Z
+		: Workstation->GetActorLocation().Z) + SpawnedWorker->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	SpawnedWorker->SetActorLocation(StandingLocation);
 
 	// 코스메틱은 FinishSpawning '이후' — PostInitializeComponents(컴포넌트 재연결)+등록 완료 후라야 타이/헤어 MID·바디 슬롯 색이
 	// 유효 컴포넌트에 적용된다. 이전엔 deferred 창에서 호출돼 멤버 null/미등록 → 신규 배정 직원 색 미적용. (2026-06-12)
-	if (AStickOfficeworker* StickWorker = Cast<AStickOfficeworker>(SpawnedWorker))
+	if (AFunnyOfficeworker* FunnyWorker = Cast<AFunnyOfficeworker>(SpawnedWorker))
 	{
 		const EGachaTier Tier = ResolveGachaTier(Employee);
-		StickWorker->ApplyWorkerCosmetics(Employee.Department, CurrentRank, Tier, Employee.EmployeeID);
-	}
-	else if (AModularOfficeworker* ModularWorker = Cast<AModularOfficeworker>(SpawnedWorker))
-	{
-		ModularWorker->SetCharacterAppearance(EmployeeAppearance, CurrentRank, Employee.Gender, Employee.EmployeeID);
+		FunnyWorker->ApplyWorkerCosmetics(Employee.Department, CurrentRank, Tier, Employee.EmployeeID, Employee.Gender);
 	}
 
 	// 좌석 참조 설정 → BehaviorComponent 가 좌석으로 이동/착석 처리
@@ -652,16 +701,10 @@ void AOfficeGameMode::DespawnWorkerByID(int32 EmployeeID, AWorkstationActorBase*
 	Worker->Destroy();
 }
 
-bool AOfficeGameMode::ShouldUseStickWorker(const FEmployeeInstance& /*Employee*/) const
-{
-	// v1: 전역 토글. 추후 "신규 채용만" 등 조건 확장 여지 (Employee 인자 사용).
-	return bUseStickWorkers;
-}
-
 EGachaTier AOfficeGameMode::ResolveGachaTier(const FEmployeeInstance& Employee)
 {
-	// 변환 로직은 AStickOfficeworker 로 일원화 (스폰/뽑기/초상화 공용 단일 진실).
-	return AStickOfficeworker::ResolveGachaTier(Employee);
+	// 변환 로직은 AFunnyOfficeworker 로 일원화 (스폰/뽑기/초상화 공용 단일 진실).
+	return AFunnyOfficeworker::ResolveGachaTier(Employee);
 }
 
 bool AOfficeGameMode::GetRandomSpawnLocationOnNavMesh(FVector& OutLocation)
@@ -737,8 +780,7 @@ void AOfficeGameMode::StartPortraitCapture(int32 BuildingIndex)
 
 	for (FEmployeeInstance& Emp : Employees)
 	{
-		FString PortraitPath = FPaths::ProjectSavedDir() / TEXT("Portraits") / FString::FromInt(Emp.EmployeeID) + TEXT(".png");
-		if (!FPaths::FileExists(PortraitPath))
+		if (!EmpMgr->IsPortraitCurrent(Emp.EmployeeID))
 		{
 			PendingPortraitCards.Add(new FEmployeeInstance(Emp));
 		}
@@ -797,11 +839,8 @@ void AOfficeGameMode::CaptureNextPortrait()
 
 	EmpMgr->CaptureEmployeePortrait(
 		FString::FromInt(Card->EmployeeID),
-		Card->Appearance,
 		Rank,
 		Card->Gender,
-		Card->Appearance.HairCombinationType,
-		Card->Appearance.HairRandomSeed,
 		Card->Department,
 		ResolveGachaTier(*Card)
 	);

@@ -1,12 +1,21 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+// Fill out your copyright notice in the Description page of Project Settings.
 
 
 #include "Manager/EmployeeManager.h"
+#include "Manager/GameClockSubsystem.h"
+#include "Manager/EmployeeEquipmentManagerSubsystem.h"
+#include "Manager/MissionManagerSubsystem.h"
+#include "Utils/EmployeeEquipmentAppearanceResolver.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Engine/AssetManager.h"
+#include "Engine/StreamableManager.h"
 #include "Core/CGGameInstance.h"
 #include "Data/BuildingEnhancementData.h"
 #include "Data/EmployeeTypes.h"
 #include "Data/EmployeeStatsData.h"
 #include "Data/EmployeePotentialData.h"
+#include "Utils/EmployeeEquipmentEffectEvaluator.h"
 
 #include "Manager/TableManagerSubsystem.h"
 #include "Table/EmployeeNameTable.h"
@@ -14,20 +23,29 @@
 #include "Manager/ResourceItemManager.h"
 #include "Manager/ItemInventoryManager.h"
 #include "Manager/SaveLoadManager.h"
+#include "Manager/ManufacturingDevelopmentManager.h"
+#include "Manager/EmployeeEquipmentManagerSubsystem.h"
 #include "Manager/RecruitmentManagerSubsystem.h"
 #include "Manager/UIManagerSubsystem.h"
 #include "Data/GameSaveData.h"
 #include "Data/EntitySaveData.h"
 #include "Table/BuildingData.h"
 #include "Manager/ProjectOperationManager.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Data/CloudEconomyData.h"
+#include "Dom/JsonObject.h"
+
+namespace
+{
+    // 서버 카탈로그 reason — spendRules.json / consumeRules.json 과 바이트 단위로 같아야 한다(다르면 400)
+    const FName ConsumeReason_PotentialReroll(TEXT("employee.potentialReroll"));
+}
 #include "Office/OfficeManager.h"
 #include "Office/WorkstationActorBase.h"
 #include "GameMode/OfficeGameMode.h"
 
-#include "Entity/Officeworker/ModularOfficeworker.h"
-#include "Entity/Officeworker/OfficeworkerMale.h"
-#include "Entity/Officeworker/OfficeworkerFemale.h"
-#include "Entity/Officeworker/StickOfficeworker.h"
+#include "Entity/Officeworker/FunnyOfficeworker.h"
+#include "Entity/Officeworker/FunnyPartPicker.h"
 #include "Components/SceneCaptureComponent2D.h"
 
 #include "Engine/World.h"
@@ -38,18 +56,84 @@
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
 #include "Enum/NotificationType.h"
+#include "ShaderCompiler.h"
+#include "MaterialShared.h"
+#include "Engine/Texture2D.h"
+
+namespace
+{
+    // 에디터 빌드는 셰이더가 덜 찬 머티리얼을 처음 그릴 때에야 컴파일에 넣고, 그 사이 기본 격자 머티리얼로 그린다.
+    // 빈 사무실의 첫 촬영에서 얼굴·상의만 회색으로 찍힌 원인이라 촬영 전에 리그의 머티리얼을 먼저 컴파일에 넣고 기다린다.
+    bool ArePortraitMaterialsRenderReady(AActor* Actor, FString& OutPending)
+    {
+        const UWorld* World = Actor ? Actor->GetWorld() : nullptr;
+        if (!World) { return true; }
+
+        TInlineComponentArray<UPrimitiveComponent*> Primitives(Actor);
+        for (UPrimitiveComponent* Primitive : Primitives)
+        {
+            if (!Primitive || !Primitive->IsRegistered() || !Primitive->IsVisible()) { continue; }
+            // 쿠킹 빌드에서는 PSO 준비 전 부위가 기본 머티리얼로 그려지거나 빠진다.
+            if (Primitive->CheckPSOPrecachingAndBoostPriority())
+            {
+                OutPending += Primitive->GetName() + TEXT("(PSO) ");
+            }
+            TArray<UMaterialInterface*> Materials;
+            Primitive->GetUsedMaterials(Materials);
+            for (UMaterialInterface* Material : Materials)
+            {
+                FMaterialResource* Resource = Material ? Material->GetMaterialResource(World->GetFeatureLevel()) : nullptr;
+                if (Resource && !Resource->IsGameThreadShaderMapComplete())
+                {
+#if WITH_EDITOR
+                    Resource->SubmitCompileJobs_GameThread(EShaderCompileJobPriority::High);
+#endif
+                    OutPending += Material->GetName() + TEXT(" ");
+                }
+                // 리그는 맵 밖이라 스트리머가 낮은 밉만 올린다 — 얼굴 판 눈·입 그림이 회색 덩어리로 찍혀 전 밉이 올라올 때까지 기다린다
+                TArray<UTexture*> Textures;
+                if (Material) { Material->GetUsedTextures(Textures, EMaterialQualityLevel::Num, true, World->GetFeatureLevel(), false); }
+                for (UTexture* Texture : Textures)
+                {
+                    UTexture2D* Texture2D = Cast<UTexture2D>(Texture);
+                    if (Texture2D && !Texture2D->IsFullyStreamedIn())
+                    {
+                        Texture2D->SetForceMipLevelsToBeResident(5.f);
+                        OutPending += Texture2D->GetName() + TEXT("(mip) ");
+                    }
+                }
+            }
+        }
+        return OutPending.IsEmpty();
+    }
+}
 
 void UEmployeeManager::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
+
+    Collection.InitializeDependency<UEmployeeEquipmentManagerSubsystem>();
+    if (UEmployeeEquipmentManagerSubsystem* Equipment = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>())
+    {
+        Equipment->OnEquipmentChanged.AddUObject(this, &UEmployeeManager::HandleEquipmentAppearanceChanged);
+    }
 
     WorldCleanupHandle = FWorldDelegates::OnWorldCleanup.AddUObject(this, &UEmployeeManager::HandleWorldCleanup);
 }
 
 void UEmployeeManager::Deinitialize()
 {
+    if (UEmployeeEquipmentManagerSubsystem* Equipment = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>())
+    {
+        Equipment->OnEquipmentChanged.RemoveAll(this);
+    }
     FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
     WorldCleanupHandle.Reset();
+
+    if (UWorld* CurrentWorld = GetWorld()) CurrentWorld->GetTimerManager().ClearTimer(PortraitPreparationTimer);
+    if (PortraitLoadHandle) PortraitLoadHandle->CancelHandle();
+    PortraitLoadHandle.Reset();
+    PortraitAssetPaths.Reset();
 
     Super::Deinitialize();
 }
@@ -73,6 +157,11 @@ void UEmployeeManager::HandleWorldCleanup(UWorld* World, bool /*bSessionEnded*/,
     bPortraitCapturing = false;
     bInPortraitCompletion = false;
     PendingPortraitQueue.Empty();
+    World->GetTimerManager().ClearTimer(PortraitPreparationTimer);
+    if (PortraitLoadHandle) PortraitLoadHandle->CancelHandle();
+    PortraitLoadHandle.Reset();
+    PortraitAssetPaths.Reset();
+    StickPortraitWorker = nullptr;
 }
 
 UTableManagerSubsystem* UEmployeeManager::GetTableManager() const
@@ -126,30 +215,15 @@ bool UEmployeeManager::HireEmployee(EEmployeeDepartment Department, int32 Enhanc
 
     EmployeeList.Add(NewInstance);
 
-    // 2. 외모 데이터 생성
+    // 2. Portrait 촬영
     EEmployeeRank Rank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(NewInstance.EnhancementLevel);
-    FCharacterAppearance RandomAppearance = GenerateRandomAppearance(Rank, NewInstance.Gender);
-
-    // 3. HairRandomSeed 생성 (GenerateRandomAppearance에서는 0으로 초기화됨)
-    RandomAppearance.HairRandomSeed = FMath::Rand();
-
-    FEmployeeAppearanceData AppearanceData;
-    AppearanceData.Appearance = RandomAppearance;
-    AppearanceData.CurrentRank = Rank;
-
-    EmployeeAppearances.Add(NewInstance.EmployeeID, AppearanceData);
-
-    // 4. Portrait 촬영 (FCharacterAppearance에서 정보 추출)
     FString EmployeeIDStr = FString::FromInt(NewInstance.EmployeeID);
     CaptureEmployeePortrait(
         EmployeeIDStr,
-        RandomAppearance,
         Rank,
         NewInstance.Gender,
-        RandomAppearance.HairCombinationType,
-        RandomAppearance.HairRandomSeed,
         Department,
-        AStickOfficeworker::ResolveGachaTier(NewInstance)
+        AFunnyOfficeworker::ResolveGachaTier(NewInstance)
     );
     UE_LOG(LogTemp, Warning, TEXT("Employee hired: Department=%d, EmployeeID=%d"),
         static_cast<int32>(Department), NewInstance.EmployeeID);
@@ -185,6 +259,20 @@ int32 UEmployeeManager::GetEmployeeCountInBuilding(int32 BuildingIndex) const
 int32 UEmployeeManager::GetBuildingEmployeeCapacity(int32 BuildingIndex, bool bLogIfZero) const
 {
     return GetBuildingEmployeeCapacityAtFloors(BuildingIndex, INDEX_NONE, bLogIfZero);
+}
+
+ECompanyType UEmployeeManager::GetCompanyTypeForBuilding(int32 BuildingIndex) const
+{
+    USaveLoadManager* SaveMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<USaveLoadManager>() : nullptr;
+    const USaveGame_GameData* SaveData = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr;
+    if (SaveData)
+    {
+        for (const FBuildingEntitySaveData& Building : SaveData->GameData.Buildings)
+        {
+            if (Building.BuildingIndex == BuildingIndex) { return Building.BuildingData.CompanyType; }
+        }
+    }
+    return ECompanyType::None;
 }
 
 int32 UEmployeeManager::GetBuildingEmployeeCapacityAtFloors(int32 BuildingIndex, int32 AddedFloors, bool bLogIfZero) const
@@ -249,8 +337,14 @@ bool UEmployeeManager::CanHireIntoBuilding(int32 BuildingIndex) const
 
 bool UEmployeeManager::HireEmployeeFromCard(const FEmployeeInstance& CardData, int32 BuildingIndex, bool bShouldSave)
 {
-    // 캡처 진행 중이면 거부 (대기 큐 잔량 포함 — 배치 뽑기의 나머지 초상화가 아직 남아 있을 수 있음)
-    if (IsPortraitCapturing())
+    return HireEmployeeFromCardInternal(CardData, BuildingIndex, bShouldSave, false);
+}
+
+bool UEmployeeManager::HireEmployeeFromCardInternal(const FEmployeeInstance& CardData, int32 BuildingIndex,
+    bool bShouldSave, bool bBatchHire)
+{
+    // 배치는 루프 진입 전에 캡처 큐를 검사한다. 첫 직원 등록 이벤트가 시작한 촬영은 같은 배치의 나머지 등록을 막지 않는다.
+    if (!bBatchHire && IsPortraitCapturing())
     {
         UE_LOG(LogTemp, Warning, TEXT("Cannot hire from card: Portrait capture in progress"));
         if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
@@ -260,7 +354,7 @@ bool UEmployeeManager::HireEmployeeFromCard(const FEmployeeInstance& CardData, i
         return false;
     }
 
-    // 인원 상한 게이트 최후 방어선 — 채용 진입 사전차단(OfficeRecruitmentPanelWidget)을 뚫고 온 경로까지 막는다
+    // 인원 상한 게이트 최후 방어선 — 채용 진입 사전차단(OfficeRecruitmentModalWidget)을 뚫고 온 경로까지 막는다
     if (!CanHireIntoBuilding(BuildingIndex))
     {
         UE_LOG(LogTemp, Warning, TEXT("[EmployeeManager] Hire blocked: building %d at employee capacity (%d/%d)"),
@@ -275,6 +369,12 @@ bool UEmployeeManager::HireEmployeeFromCard(const FEmployeeInstance& CardData, i
     // 카드 데이터 복사 (카드 생성 시 할당된 ID를 그대로 사용)
     FEmployeeInstance NewEmployee = CardData;
 
+    if (NewEmployee.DisciplinePoints.Num() != GetDisciplineCountForCompany(GetCompanyTypeForBuilding(BuildingIndex)))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[EmployeeManager] Hire blocked: discipline profile size mismatches building %d"), BuildingIndex);
+        return false;
+    }
+
     // 소속 건물은 고정, 좌석은 미점유(미배치 풀) — 좌석 배정은 책상 패널이 담당 (pull-to-pool)
     NewEmployee.AssignedBuildingIndex = BuildingIndex;
     NewEmployee.bIsAssigned = false;
@@ -282,13 +382,6 @@ bool UEmployeeManager::HireEmployeeFromCard(const FEmployeeInstance& CardData, i
 
     // EmployeeList에 추가
     EmployeeList.Add(NewEmployee);
-
-    // 외모 데이터 저장 (카드의 Appearance 사용)
-    EEmployeeRank Rank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(NewEmployee.EnhancementLevel);
-    FEmployeeAppearanceData AppearanceData;
-    AppearanceData.Appearance = CardData.Appearance;
-    AppearanceData.CurrentRank = Rank;
-    EmployeeAppearances.Add(NewEmployee.EmployeeID, AppearanceData);
 
     // 초상화는 뽑기 시점(RecruitmentManager::ExecuteGachaPull)에 이미 촬영됨 → 여기선 중복 촬영 안 함.
     // (촬영 누락 시 안전망: 오피스 입장 StartPortraitCapture 가 PNG 없는 직원을 backfill.)
@@ -306,6 +399,12 @@ bool UEmployeeManager::HireEmployeeFromCard(const FEmployeeInstance& CardData, i
         }
     }
 
+    // 신입 장비는 여기서만 굴린다. EmployeeList 등재 뒤라 장비 트랜잭션의 직원 존재 검사를 통과한다.
+    if (UEmployeeEquipmentManagerSubsystem* EquipmentMgr = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>())
+    {
+        EquipmentMgr->TryGrantRecruitmentGift(NewEmployee.EmployeeID);
+    }
+
     // 기대 수익 갱신 — 직원 배치 변화 즉시 반영
     if (BuildingIndex != INDEX_NONE)
     {
@@ -315,67 +414,65 @@ bool UEmployeeManager::HireEmployeeFromCard(const FEmployeeInstance& CardData, i
         }
     }
 
-    // 벤치 적립 완료 → 로스터 변경 알림 (책상 패널이 가려진 채로도 RefreshRosterPicker 됨 — 가챠 채용 즉시 반영)
-    OnEmployeeRosterChanged.Broadcast();
+    // 일괄 채용의 로스터 알림은 전체 등록과 착석이 끝난 뒤 호출자가 한 번 보낸다.
+    if (!bBatchHire)
+    {
+        OnEmployeeRosterChanged.Broadcast();
+    }
 
     return true;
 }
 
 bool UEmployeeManager::FireEmployee(int32 EmployeeInstanceID)
 {
-    for (int32 i = 0; i < EmployeeList.Num(); i++)
+    const int32 EmployeeIndex = EmployeeList.IndexOfByPredicate([EmployeeInstanceID](const FEmployeeInstance& Entry) { return Entry.EmployeeID == EmployeeInstanceID; });
+    if (EmployeeIndex == INDEX_NONE) return false;
+    USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>();
+    UEmployeeEquipmentManagerSubsystem* EquipmentMgr = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>();
+    if (!SaveMgr || !EquipmentMgr || !SaveMgr->CanCommitEquipmentTransaction()) return false;
+    FGameSaveData Candidate;
+    if (!SaveMgr->BuildCurrentSnapshot(Candidate)) return false;
+    const int32 FiredBuildingIndex = EmployeeList[EmployeeIndex].AssignedBuildingIndex;
+    Candidate.EmployeeList.RemoveAll([EmployeeInstanceID](const FEmployeeInstance& Entry) { return Entry.EmployeeID == EmployeeInstanceID; });
+    for (auto& OfficePair : Candidate.OfficeDataMap)
     {
-        if (EmployeeList[i].EmployeeID == EmployeeInstanceID)
+        OfficePair.Value.EmployeeList.RemoveAll([EmployeeInstanceID](const FEmployeeInstance& Entry) { return Entry.EmployeeID == EmployeeInstanceID; });
+        for (FWorkstationSaveData& WorkstationData : OfficePair.Value.OfficeWorkstations)
+            for (FChairSlotState& Chair : WorkstationData.ChairStates)
+                if (Chair.OccupantEmployeeID == EmployeeInstanceID) Chair.OccupantEmployeeID = INDEX_NONE;
+    }
+    EquipmentMgr->RemoveEmployeeFromCandidate(EmployeeInstanceID, Candidate);
+    const bool bWasSelected = SelectedEmployeeID == EmployeeInstanceID;
+    if (!SaveMgr->CommitEquipmentSnapshot(Candidate,
+        [this, EmployeeInstanceID, bWasSelected]()
         {
-            // 해고 전에 소속 빌딩 기록 — 제거 후 접근 불가하므로 복사
-            const int32 FiredBuildingIndex = EmployeeList[i].AssignedBuildingIndex;
-
-            UE_LOG(LogTemp, Warning, TEXT("Employee Fired: (ID: %d)"), EmployeeInstanceID);
-
-            // 좌석/카운터/워커 액터 정리 — 목록에서 지우기 전에 해야 책상을 역참조할 수 있다
-            if (UWorld* World = GetGameInstance()->GetWorld())
+            // 배열 인덱스를 콜백 경계 너머 보관하지 않는다. 워커 종료 콜백도 삭제된 로스터를 본다.
+            EmployeeList.RemoveAll([EmployeeInstanceID](const FEmployeeInstance& Entry) { return Entry.EmployeeID == EmployeeInstanceID; });
+            if (bWasSelected) SelectedEmployeeID = INDEX_NONE;
+            if (UWorld* GameWorld = GetWorld())
             {
-                if (UOfficeManager* OfficeMgr = World->GetSubsystem<UOfficeManager>())
+                if (UOfficeManager* OfficeMgr = GameWorld->GetSubsystem<UOfficeManager>())
                 {
                     if (AWorkstationActorBase* Seated = OfficeMgr->FindWorkstationByEmployeeID(EmployeeInstanceID))
-                    {
-                        OfficeMgr->UnseatEmployee(Seated, EmployeeInstanceID);
-                    }
+                        OfficeMgr->UnseatEmployee(Seated, EmployeeInstanceID, false, false);
                 }
-
-                // UnseatEmployee 는 책상이 있을 때만 도는 경로라, 벤치 직원의 잔존 액터는 여기서 직접 거둔다
-                if (AOfficeGameMode* OfficeGM = World->GetAuthGameMode<AOfficeGameMode>())
-                {
-                    OfficeGM->DespawnWorkerByID(EmployeeInstanceID);
-                }
+                if (AOfficeGameMode* OfficeGM = GameWorld->GetAuthGameMode<AOfficeGameMode>()) OfficeGM->DespawnWorkerByID(EmployeeInstanceID);
             }
-
-            // 목록에서 제거
-            EmployeeList.RemoveAt(i);
-
-            // Employee 해고 시 즉시 저장
-            if (USaveLoadManager* SaveLoadManager = GetGameInstance()->GetSubsystem<USaveLoadManager>())
-            {
-                SaveLoadManager->SaveGameData();
-                UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] Game data saved after firing employee"));
-            }
-
-            // 기대 수익 갱신 — 이전 소속 빌딩 수익보너스 평균 바뀜
+        },
+        [this, EquipmentMgr, EmployeeInstanceID, FiredBuildingIndex, bWasSelected]()
+        {
             if (FiredBuildingIndex != INDEX_NONE)
-            {
-                if (UProjectOperationManager* OpMgr = GetGameInstance()->GetSubsystem<UProjectOperationManager>())
-                {
-                    OpMgr->InvalidateStatBonusCache(FiredBuildingIndex);
-                }
-            }
-
-            // 벤치 적립 경로와 같은 규약 — 직원창 로스터/책상 도크가 가려진 채로도 스스로 갱신
+                if (UProjectOperationManager* OpMgr = GetGameInstance()->GetSubsystem<UProjectOperationManager>()) OpMgr->InvalidateStatBonusCache(FiredBuildingIndex);
+            if (bWasSelected) OnEmployeeSelectionChanged.Broadcast(EmployeeInstanceID, INDEX_NONE);
+            EquipmentMgr->OnEquipmentChanged.Broadcast();
             OnEmployeeRosterChanged.Broadcast();
-
-            return true;
-        }
+        }))
+    {
+        UE_LOG(LogTemp, Error, TEXT("[EmployeeManager] FireEmployee save failed; employee and equipment unchanged: %d"), EmployeeInstanceID);
+        return false;
     }
-    return false;
+    UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] Fired employee and returned equipment atomically: %d"), EmployeeInstanceID);
+    return true;
 }
 
 FEmployeeInstance UEmployeeManager::CreateEmployeeInstance(EEmployeeDepartment Department)
@@ -397,9 +494,7 @@ FEmployeeInstance UEmployeeManager::CreateEmployeeInstance(EEmployeeDepartment D
 	// 초기 스탯 — 총량 30 랜덤 분배(최소 3). 등급은 관여하지 않는다(뾰족함은 직능 총량 전담).
 	Instance.Stats = FEmployeeStats();
 	ApplyStatProfile(Instance.Stats, MakeStatProfile());
-	Instance.InvestedDisciplinePoints.Init(0, static_cast<int32>(EProductionDiscipline::Count));
     Instance.Level = 1;
-    Instance.Experience = 0.0f;
     Instance.EnhancementLevel = 0;  // 0 = 인턴부터 시작
     Instance.HiredDate = FDateTime::Now();
 
@@ -421,6 +516,16 @@ bool UEmployeeManager::AssignEmployeeToBuilding(int32 EmployeeID, int32 Building
                 UE_LOG(LogTemp, Warning, TEXT("[EmployeeManager] Assign blocked: building %d at employee capacity (%d/%d), Employee=%d"),
                     BuildingIndex, GetEmployeeCountInBuilding(BuildingIndex), GetBuildingEmployeeCapacity(BuildingIndex), EmployeeID);
                 return false;
+            }
+
+            if (BuildingIndex != INDEX_NONE && OldBuildingIndex != BuildingIndex)
+            {
+                const int32 TargetCount = GetDisciplineCountForCompany(GetCompanyTypeForBuilding(BuildingIndex));
+                if (!Employee.DisciplinePoints.IsEmpty() && !ReshapeDisciplineProfile(Employee, TargetCount))
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("[EmployeeManager] Assign blocked: Employee %d has invalid discipline profile"), EmployeeID);
+                    return false;
+                }
             }
 
             Employee.AssignedBuildingIndex = BuildingIndex;
@@ -520,6 +625,24 @@ TArray<FEmployeeInstance> UEmployeeManager::GetUnassignedEmployeesInBuilding(int
     return List;
 }
 
+TArray<FEmployeeInstance> UEmployeeManager::GetActiveEmployeesInBuilding(int32 BuildingIndex) const
+{
+    // 서버 시각이 무효면 로컬 UTC 로 떨어진다(GetServerNowUnix 계약). 여기서는 관대한 쪽이 안전하다 —
+    // 서버가 영영 안 오면 직원이 책상에 못 돌아오는 것보다, 기여가 일찍 살아나는 편이 낫다. 수령은 어차피 잠긴다.
+    int64 NowUnix = 0;
+    if (const UGameInstance* GI = GetGameInstance())
+    {
+        if (const UGameClockSubsystem* Clock = GI->GetSubsystem<UGameClockSubsystem>()) NowUnix = Clock->GetServerNowUnix();
+    }
+
+    TArray<FEmployeeInstance> Active;
+    for (const FEmployeeInstance& Employee : GetEmployeesInBuilding(BuildingIndex))
+    {
+        if (!UEmployeeTypeHelper::IsOnBusinessTrip(Employee, NowUnix)) Active.Add(Employee);
+    }
+    return Active;
+}
+
 TArray<FEmployeeInstance> UEmployeeManager::GetEmployeesInBuilding(int32 BuildingIndex) const
 {
     TArray<FEmployeeInstance> BuildingEmployees;
@@ -534,6 +657,19 @@ TArray<FEmployeeInstance> UEmployeeManager::GetEmployeesInBuilding(int32 Buildin
 
     UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] Found %d employees in building index %d"), BuildingEmployees.Num(), BuildingIndex);
     return BuildingEmployees;
+}
+
+bool UEmployeeManager::HasAnyEmployeeInBuilding(int32 BuildingIndex) const
+{
+    // 「비었는지」만 보려고 GetEmployeesInBuilding 을 부르면 명부 전체를 값으로 복사하고 로그까지 찍는다.
+    for (const FEmployeeInstance& Employee : EmployeeList)
+    {
+        if (Employee.bIsAssigned && Employee.AssignedBuildingIndex == BuildingIndex)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 TArray<AOfficeworker*> UEmployeeManager::GetSpawnedWorkersInBuilding(int32 BuildingIndex) const
@@ -584,10 +720,48 @@ FEmployeeInstance* UEmployeeManager::FindEmployee(int32 InstanceID)
     return nullptr;
 }
 
+bool UEmployeeManager::HasBaseAppearance(int32 EmployeeID, EEmployeeEquipmentSlot EquipmentSlot)
+{
+    const UTableManagerSubsystem* Tables = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+    const FEmployeeInstance* Employee = FindEmployee(EmployeeID);
+    if (!Tables || !Employee) return false;
+
+    // 모자·가방은 기본 파츠 풀이 비어 있다(스킨 예약) — 그 두 자리는 장비만 채운다.
+    EFunnyPartSlot PartSlot;
+    switch (EquipmentSlot)
+    {
+    case EEmployeeEquipmentSlot::Outfit:  PartSlot = EFunnyPartSlot::Outerwear; break;
+    case EEmployeeEquipmentSlot::Feet:    PartSlot = EFunnyPartSlot::Shoe; break;
+    case EEmployeeEquipmentSlot::Hands:   PartSlot = EFunnyPartSlot::Glove; break;
+    case EEmployeeEquipmentSlot::Eyewear: PartSlot = EFunnyPartSlot::Glasses; break;
+    default: return false;
+    }
+    if (Tables->GetFunnyPartPool(PartSlot, Employee->Gender).IsEmpty()) return false;
+
+    // 안경만 풀 위에 직급 게이트가 한 겹 더 있다 — 실제 착용은 DT_FunnyWorkerCosmetic 이 정한다.
+    if (EquipmentSlot == EEmployeeEquipmentSlot::Eyewear)
+    {
+        bool bFound = false;
+        const FFunnyWorkerCosmeticTable Row = Tables->GetFunnyWorkerCosmeticData(
+            AFunnyOfficeworker::MakeCosmeticRowName(Employee->Department,
+                UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel),
+                AFunnyOfficeworker::ResolveGachaTier(*Employee)),
+            bFound);
+        return bFound && Row.bWearGlasses;
+    }
+    return true;
+}
+
 void UEmployeeManager::NotifyEmployeeDown(int32 EmployeeID, EWorkerDownReason Reason, float DisplayDuration)
 {
     const FEmployeeInstance* Employee = FindEmployee(EmployeeID);
     if (!Employee)
+    {
+        return;
+    }
+    // 필수 튜토리얼 중엔 안내 대상 밖을 누를 수 없다 ― 깨우라는 알림이 말풍선 옆에 끼어 엉뚱한 곳을 가리키게 된다
+    const UMissionManagerSubsystem* Missions = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr;
+    if (Missions && Missions->HasActiveMission() && Missions->IsHardGateMission())
     {
         return;
     }
@@ -715,19 +889,15 @@ FString UEmployeeManager::GetEmployeeFullName(int32 EmployeeID)
     FEmployeeInstance* Employee = FindEmployee(EmployeeID);
     if (!Employee) return TEXT("Unknown");
 
-    EEmployeeRank Rank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel);
-    FString RankName = GetRankDisplayName(Rank);
+    const FString TitleName = UEmployeeTypeHelper::GetJobTitleDisplayName(
+        UEmployeeTypeHelper::GetJobTitleFromLevel(Employee->Level));
 
-    return FString::Printf(TEXT("%s %s"), *Employee->EmployeeName, *RankName);
+    return FString::Printf(TEXT("%s %s"), *Employee->EmployeeName, *TitleName);
 }
 
 int32 UEmployeeManager::GetMaxExperienceForLevel(int32 Level) const
 {
-    // 레벨에 따른 필요 경험치 공식
-    // 예: Level 1 = 100, Level 2 = 150, Level 3 = 225...
-    // 공식: BaseExp * (Level * 1.5)
-    int32 BaseExp = 100;
-    return FMath::FloorToInt(BaseExp * Level * 1.5f);
+    return EmployeeTrainingRules::CostForLevel(Level);
 }
 
 // 강화 기본 확률 (레벨별) - 게이지 100%일 때 기준
@@ -931,172 +1101,25 @@ FString UEmployeeManager::PickSurname(const FString& Language, const FString& Ha
     return Filtered[FMath::RandRange(0, Filtered.Num() - 1)];
 }
 
-FCharacterAppearance UEmployeeManager::GenerateRandomAppearance(EEmployeeRank Rank, EEmployeeGender Gender)
-{
-    FCharacterAppearance Appearance;
-    UTableManagerSubsystem* TableMgr = GetTableManager();
-
-    if (!TableMgr) return Appearance;
-
-    // 1. 눈썹 랜덤
-    int32 EyebrowVariant = 0;
-    if (Gender == EEmployeeGender::Male)
-    {
-        EyebrowVariant = FMath::RandRange(1, 3);
-    }
-    else
-    {
-        EyebrowVariant = FMath::RandRange(1, 2);
-    }
-    Appearance.EyebrowsPartName = FString::Printf(TEXT("brows%d"), EyebrowVariant);
-
-    // 2. 머리 조합
-    if (Gender == EEmployeeGender::Male)
-    {
-        Appearance.HairCombinationType = FMath::RandRange(1, 7); // 남성: 1-7
-    }
-    else
-    {
-        Appearance.HairCombinationType = FMath::RandRange(1, 8); // 여성: 1-8
-    } // 머리 각 타입안에서 정해지는 랜덤시드 생성
-
-    // 3. 눈 색깔 TableManager에서 가져오기
-    if (FEyeColorTable* EyeData = TableMgr->GetRandomEyeColor())
-    {
-        Appearance.EyeColors = EyeData->ColorSet;
-    }
-
-    // 4. 피부 색깔 TableManager에서 가져오기
-    if (FSkinColorTable* SkinData = TableMgr->GetRandomSkinColor())
-    {
-        Appearance.SkinColors = SkinData->ColorSet;
-    }
-
-    // 머리색 랜덤 설정
-    if (FHairColorTable* HairColorData = TableMgr->GetRandomHairColor())
-    {
-        Appearance.HairColors = HairColorData->ColorSet;
-    }
-
-    // 5. 표정
-    Appearance.FacialExpression = GenerateRandomFacialExpression();
-
-    return Appearance;
-}
-
-FCharacterAppearance UEmployeeManager::GetEmployeeAppearance(int32 EmployeeID)
-{
-    if (FEmployeeAppearanceData* AppearanceData = EmployeeAppearances.Find(EmployeeID))
-    {
-        return AppearanceData->Appearance; // FCharacterAppearance 반환
-    }
-
-
-    FEmployeeInstance* Employee = FindEmployee(EmployeeID);
-    if (Employee)
-    {
-        EEmployeeRank CurrentRank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel);
-        FCharacterAppearance NewAppearance = GenerateRandomAppearance(CurrentRank, Employee->Gender);
-
-        FEmployeeAppearanceData NewData;
-        NewData.Appearance = NewAppearance;
-        NewData.CurrentRank = CurrentRank;
-        EmployeeAppearances.Add(EmployeeID, NewData);
-
-        return NewAppearance;
-    }
-
-    return FCharacterAppearance();
-}
-
-
-FMorphTargetSet UEmployeeManager::GenerateRandomFacialExpression()
-{
-    FMorphTargetSet Expression;
-
-    // 눈 표정 패턴 중 랜덤 선택
-    int32 EyePattern = FMath::RandRange(1, 4);
-
-    switch (EyePattern)
-    {
-    case 1: // 기본 눈 깜빡임
-        Expression.MorphValues.Add("left eye blink 01", FMath::RandRange(0, 4) * 0.1f);
-        Expression.MorphValues.Add("right eye blink 01", Expression.MorphValues["left eye blink 01"]);
-        break;
-
-    case 2: // 눈 크게 뜨기 + 깜빡임
-        Expression.MorphValues.Add("left eye widen 01", FMath::FRandRange(0.0f, 1.0f));
-        Expression.MorphValues.Add("right eye widen 01", Expression.MorphValues["left eye widen 01"]);
-        Expression.MorphValues.Add("left eye blink 01", FMath::RandRange(0, 5) * 0.1f);
-        Expression.MorphValues.Add("right eye blink 01", Expression.MorphValues["left eye blink 01"]);
-        break;
-
-    case 3: // 화난 눈 + 깜빡임
-        Expression.MorphValues.Add("left eye angry", FMath::FRandRange(0.0f, 1.0f));
-        Expression.MorphValues.Add("right eye angry", Expression.MorphValues["left eye angry"]);
-        Expression.MorphValues.Add("left eye blink 01", FMath::RandRange(0, 3) * 0.1f);
-        Expression.MorphValues.Add("right eye blink 01", Expression.MorphValues["left eye blink 01"]);
-        break;
-
-    case 4: // 처진 눈
-        Expression.MorphValues.Add("left eye droopy", FMath::FRandRange(0.0f, 1.0f));
-        Expression.MorphValues.Add("right eye droopy", Expression.MorphValues["left eye droopy"]);
-        break;
-    }
-
-    // 독립적인 아래 눈꺼풀
-    Expression.MorphValues.Add("left eye lower lid up", FMath::FRandRange(0.0f, 1.0f));
-    Expression.MorphValues.Add("right eye lower lid up", Expression.MorphValues["left eye lower lid up"]);
-
-    return Expression;
-}
-
 void UEmployeeManager::UpdateOfficeworkerAppearance(int32 EmployeeID)
 {
-    FCharacterAppearance Appearance = GetEmployeeAppearance(EmployeeID);
-
-    // 직원 wjdqh
     FEmployeeInstance* Employee = FindEmployee(EmployeeID);
     if (!Employee) return;
-
-    EEmployeeRank CurrentRank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel);
 
     UWorld* World = GetWorld();
     if (!World) return;
 
-    // Male과 Female 액터 각각 찾기
-    AOfficeworkerMale* MaleActor = nullptr;
-    AOfficeworkerFemale* FemaleActor = nullptr;
+    const EEmployeeRank CurrentRank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel);
+    const EGachaTier Tier = AFunnyOfficeworker::ResolveGachaTier(*Employee);
 
-    for (TActorIterator<AOfficeworkerMale> ActorItr(World); ActorItr; ++ActorItr)
+    // 초상화 리그(bIsPortraitMode)는 캡쳐 경로가 따로 관리하므로 제외 — 여기선 오피스에 서 있는 본체만 갱신.
+    for (TActorIterator<AFunnyOfficeworker> ActorItr(World); ActorItr; ++ActorItr)
     {
-        MaleActor = *ActorItr;
+        AFunnyOfficeworker* FunnyWorker = *ActorItr;
+        if (FunnyWorker->bIsPortraitMode || FunnyWorker->GetEmployeeID() != EmployeeID) continue;
+
+        FunnyWorker->ApplyWorkerCosmetics(Employee->Department, CurrentRank, Tier, EmployeeID, Employee->Gender);
         break;
-    }
-
-    for (TActorIterator<AOfficeworkerFemale> ActorItr(World); ActorItr; ++ActorItr)
-    {
-        FemaleActor = *ActorItr;
-        break;
-    }
-
-    if (!MaleActor || !FemaleActor) return;
-
-    // 위치로 표시/숨김
-    FVector CapturePosition = FVector(1000, 0, 0);
-    FVector HiddenPosition = FVector(0, 0, -10000);
-
-    if (Employee->Gender == EEmployeeGender::Male)
-    {
-        MaleActor->SetActorLocation(CapturePosition);
-        FemaleActor->SetActorLocation(HiddenPosition);
-        MaleActor->SetCharacterAppearance(Appearance, CurrentRank, Employee->Gender, EmployeeID);
-    }
-    else
-    {
-        MaleActor->SetActorLocation(HiddenPosition);
-        FemaleActor->SetActorLocation(CapturePosition);
-        FemaleActor->SetCharacterAppearance(Appearance, CurrentRank, Employee->Gender, EmployeeID);
     }
 }
 
@@ -1139,30 +1162,129 @@ void UEmployeeManager::ListEmployees()
     }
 }
 
+FString UEmployeeManager::GetPortraitAppearanceKey(int32 EmployeeID, const FPortraitCaptureRequest* Fallback) const
+{
+    const UEmployeeEquipmentManagerSubsystem* Equipment = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>();
+    const UTableManagerSubsystem* Tables = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+    FString Key = Equipment && Tables ? FEmployeeEquipmentAppearanceResolver::BuildKey(
+        Equipment->GetState(), Tables->GetEmployeeEquipmentDefinitions(), Tables->GetEmployeeEquipmentAppearances(), EmployeeID) : FString();
+    if (const FEmployeeInstance* Employee = EmployeeList.FindByPredicate([EmployeeID](const FEmployeeInstance& Entry) { return Entry.EmployeeID == EmployeeID; }))
+    {
+        Key += FString::Printf(TEXT("|%d:%d:%d:%d"), static_cast<int32>(Employee->Department),
+            static_cast<int32>(UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel)),
+            static_cast<int32>(Employee->Gender), static_cast<int32>(AFunnyOfficeworker::ResolveGachaTier(*Employee)));
+    }
+    else if (Fallback)
+    {
+        Key += FString::Printf(TEXT("|%d:%d:%d:%d"), static_cast<int32>(Fallback->Department),
+            static_cast<int32>(Fallback->Rank), static_cast<int32>(Fallback->Gender), static_cast<int32>(Fallback->Tier));
+    }
+    // 파이프라인 버전 토큰 — 외곽선처럼 외형이 그대로여도 산출물이 달라지면 전원 재촬영을 강제한다
+    Key += TEXT("|pipe:garment2-facefamilies1");
+    if (Tables)
+    {
+        const TArray<FFunnyFaceStyleTable>& FaceStyles = Tables->GetFunnyFaceStyles();
+        const int32 FaceStyleIndex = FFunnyPartPicker::PickFaceStyle(EmployeeID, FaceStyles.Num());
+        if (FaceStyles.IsValidIndex(FaceStyleIndex))
+        {
+            Key += TEXT("|face:") + FaceStyles[FaceStyleIndex].EyesAtlas.ToSoftObjectPath().ToString()
+                + TEXT(":") + FaceStyles[FaceStyleIndex].MouthAtlas.ToSoftObjectPath().ToString();
+        }
+    }
+    return Key;
+}
+
+bool UEmployeeManager::IsPortraitCurrent(int32 EmployeeID) const
+{
+    const FString Path = AOfficeworker::GetPortraitFilePathForEmployee(EmployeeID);
+    FString SavedKey;
+    return FPaths::FileExists(Path) && FFileHelper::LoadFileToString(SavedKey, *(Path + TEXT(".appearance")))
+        && SavedKey == GetPortraitAppearanceKey(EmployeeID);
+}
+
+bool UEmployeeManager::IsPortraitPending(int32 EmployeeID) const
+{
+    return (bPortraitCapturing && InFlightPortraitEmployeeID == EmployeeID)
+        || PendingPortraitQueue.ContainsByPredicate([EmployeeID](const FPortraitCaptureRequest& Pending)
+            { return FCString::Atoi(*Pending.EmployeeID) == EmployeeID; });
+}
+
+void UEmployeeManager::HandleEquipmentAppearanceChanged()
+{
+    // 강화/뽑기처럼 외형이 그대로인 거래는 촬영을 일으키지 않는다.
+    for (const FEmployeeInstance& Employee : EmployeeList)
+    {
+        const FString Key = GetPortraitAppearanceKey(Employee.EmployeeID);
+        const FString* Previous = LastRequestedPortraitKeys.Find(Employee.EmployeeID);
+        if ((!Previous || *Previous != Key) && !IsPortraitCurrent(Employee.EmployeeID))
+        {
+            RefreshEmployeePortrait(Employee.EmployeeID);
+        }
+        LastRequestedPortraitKeys.Add(Employee.EmployeeID, Key);
+    }
+}
+
+void UEmployeeManager::RefreshEmployeePortrait(int32 EmployeeID)
+{
+    const FEmployeeInstance* Employee = FindEmployee(EmployeeID);
+    if (!Employee) { return; }
+    UWorld* CurrentWorld = GetWorld();
+    if (!CurrentWorld) { return; }
+    if (!IsValid(StickPortraitWorker) || StickPortraitWorker->GetWorld() != CurrentWorld || !StickPortraitWorker->bIsPortraitMode)
+    {
+        StickPortraitWorker = nullptr;
+        for (TActorIterator<AFunnyOfficeworker> ActorItr(CurrentWorld); ActorItr; ++ActorItr)
+        {
+            if (ActorItr->bIsPortraitMode) { StickPortraitWorker = *ActorItr; break; }
+        }
+    }
+    // 장비는 촬영 리그가 없는 MainMap에서도 바뀐다. 현재 PNG/키를 보존하면 다음 Office 진입이 backfill한다.
+    if (!IsValid(StickPortraitWorker) || !StickPortraitWorker->FaceCaptureCamera || !StickPortraitWorker->FaceCaptureCamera->TextureTarget)
+    {
+        UE_LOG(LogTemp, Verbose, TEXT("[Portrait] Equipment refresh deferred until portrait rig is ready: %d"), EmployeeID);
+        return;
+    }
+    FPortraitCaptureRequest Request;
+    Request.EmployeeID = FString::FromInt(EmployeeID);
+    Request.Department = Employee->Department;
+    Request.Rank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel);
+    Request.Tier = AFunnyOfficeworker::ResolveGachaTier(*Employee);
+    Request.Gender = Employee->Gender;
+    Request.bNotifyHireCompletion = false;
+    Request.AppearanceKey = GetPortraitAppearanceKey(EmployeeID);
+    Request.AppearanceRevision = ++NextPortraitRevision;
+    PendingPortraitQueue.RemoveAll([EmployeeID](const FPortraitCaptureRequest& Pending)
+    {
+        return !Pending.bNotifyHireCompletion && FCString::Atoi(*Pending.EmployeeID) == EmployeeID;
+    });
+    LastRequestedPortraitKeys.Add(EmployeeID, Request.AppearanceKey);
+    if (bPortraitCapturing || bInPortraitCompletion) { PendingPortraitQueue.Add(Request); }
+    else { StartPortraitCapture(Request); }
+}
+
 void UEmployeeManager::CaptureEmployeePortrait(const FString& EmployeeID,
-    const FCharacterAppearance& Appearance,
     EEmployeeRank Rank,
     EEmployeeGender Gender,
-    int32 HairCombinationType,
-    int32 RandomSeed,
     EEmployeeDepartment Department,
     EGachaTier Tier)
 {
     FPortraitCaptureRequest Request;
     Request.EmployeeID = EmployeeID;
-    Request.Appearance = Appearance;
     Request.Rank = Rank;
     Request.Gender = Gender;
-    Request.HairCombinationType = HairCombinationType;
-    Request.RandomSeed = RandomSeed;
     Request.Department = Department;
     Request.Tier = Tier;
+    Request.AppearanceKey = GetPortraitAppearanceKey(FCString::Atoi(*EmployeeID), &Request);
+    Request.AppearanceRevision = ++NextPortraitRevision;
 
     // 캐릭터·카메라·RenderTarget 1세트 공유 → 동시 채용 직렬화
     // 완료 브로드캐스트 중 재진입 요청도 적재만 (워커 델리게이트 재바인딩 UB 방지, 시작은 다음 틱)
     if (bPortraitCapturing || bInPortraitCompletion)
     {
-        PendingPortraitQueue.Add(Request);
+        // 곧 공개할 채용 사진은 기존 직원의 백필보다 먼저 준비하되 채용 요청끼리는 순서를 지킨다.
+        const int32 BackgroundIndex = PendingPortraitQueue.IndexOfByPredicate(
+            [](const FPortraitCaptureRequest& Pending) { return !Pending.bNotifyHireCompletion; });
+        PendingPortraitQueue.Insert(Request, BackgroundIndex == INDEX_NONE ? PendingPortraitQueue.Num() : BackgroundIndex);
         return;
     }
 
@@ -1180,7 +1302,21 @@ void UEmployeeManager::DequeueNextPortraitCapture()
     }
 }
 
-void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Request)
+void UEmployeeManager::FinishPortraitPreparation(FPortraitCaptureRequest Request)
+{
+    if ((PortraitLoadHandle && !PortraitLoadHandle->HasLoadCompleted())
+        || !AFunnyOfficeworker::AreAppearanceAssetsReady(PortraitAssetPaths)) return;
+    if (UWorld* CurrentWorld = GetWorld()) CurrentWorld->GetTimerManager().ClearTimer(PortraitPreparationTimer);
+    StartPortraitCapture(Request, true);
+    if (!bPortraitCapturing)
+    {
+        PortraitLoadHandle.Reset();
+        PortraitAssetPaths.Reset();
+        DequeueNextPortraitCapture();
+    }
+}
+
+void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Request, bool bAssetsPrepared)
 {
     const FString& EmployeeID = Request.EmployeeID;
     const EEmployeeGender Gender = Request.Gender;
@@ -1189,78 +1325,40 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
 
     // 여기서부터 캡처 슬롯 점유. 이후 요청은 전부 큐로
     bPortraitCapturing = true;
+    InFlightPortraitEmployeeID = FCString::Atoi(*EmployeeID);
 
     UWorld* World = GetWorld();
     if (!World)
     {
         bPortraitCapturing = false;
+        if (Request.bNotifyHireCompletion) { OnEmployeeHireCompleted.Broadcast(EmployeeID); }
         return;
     }
 
+    // 캡쳐 워커 (유니섹스 — 성별 분기 없이 1개). bIsPortraitMode 로 레벨에 배치.
     // 캐싱된 Worker가 있으면 재사용 (레벨 전환 시 무효화될 수 있으므로 IsValid 체크)
-    AOfficeworker* Worker = nullptr;
-
-    // 1순위: 스틱맨 캡쳐 워커 (유니섹스 — 성별 분기 없이 1개). bIsPortraitMode 로 레벨에 배치.
     if (!IsValid(StickPortraitWorker))
     {
         StickPortraitWorker = nullptr;
-        for (TActorIterator<AStickOfficeworker> ActorItr(World); ActorItr; ++ActorItr)
+        for (TActorIterator<AFunnyOfficeworker> ActorItr(World); ActorItr; ++ActorItr)
         {
             if ((*ActorItr)->bIsPortraitMode)
             {
                 StickPortraitWorker = *ActorItr;
-                UE_LOG(LogTemp, Log, TEXT("[Portrait] Stick portrait worker found: %s"), *StickPortraitWorker->GetName());
+                UE_LOG(LogTemp, Log, TEXT("[Portrait] Portrait worker found: %s"), *StickPortraitWorker->GetName());
                 break;
             }
         }
     }
 
-    if (StickPortraitWorker)
-    {
-        Worker = StickPortraitWorker;
-    }
-    else if (Gender == EEmployeeGender::Female)
-    {
-        // 폴백: 구 모듈러 여성 캡쳐 워커 (스틱 미배치 시 — strangler-fig)
-        if (!IsValid(FemalePortraitWorker))
-        {
-            FemalePortraitWorker = nullptr;
-            for (TActorIterator<AOfficeworkerFemale> ActorItr(World); ActorItr; ++ActorItr)
-            {
-                if ((*ActorItr)->bIsPortraitMode)
-                {
-                    FemalePortraitWorker = *ActorItr;
-                    UE_LOG(LogTemp, Log, TEXT("[Portrait] Female portrait worker found: %s"), *FemalePortraitWorker->GetName());
-                    break;
-                }
-            }
-        }
-        Worker = FemalePortraitWorker;
-    }
-    else
-    {
-        // 폴백: 구 모듈러 남성 캡쳐 워커 (스틱 미배치 시 — strangler-fig)
-        if (!IsValid(MalePortraitWorker))
-        {
-            MalePortraitWorker = nullptr;
-            for (TActorIterator<AOfficeworkerMale> ActorItr(World); ActorItr; ++ActorItr)
-            {
-                if ((*ActorItr)->bIsPortraitMode)
-                {
-                    MalePortraitWorker = *ActorItr;
-                    UE_LOG(LogTemp, Log, TEXT("[Portrait] Male portrait worker found: %s"), *MalePortraitWorker->GetName());
-                    break;
-                }
-            }
-        }
-        Worker = MalePortraitWorker;
-    }
+    AOfficeworker* Worker = StickPortraitWorker;
 
     if (!Worker)
     {
-        UE_LOG(LogTemp, Error, TEXT("[Portrait] No portrait worker found for gender: %d"), (int32)Gender);
+        UE_LOG(LogTemp, Error, TEXT("[Portrait] No portrait worker found (bIsPortraitMode 리그 미배치, gender=%d)"), (int32)Gender);
         // 동기 실패 — 플래그만 내리면 Dequeue 루프가 다음 요청 처리
         bPortraitCapturing = false;
+        if (Request.bNotifyHireCompletion) { OnEmployeeHireCompleted.Broadcast(EmployeeID); }
         return;
     }
 
@@ -1273,39 +1371,83 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
         UE_LOG(LogTemp, Error, TEXT("[Portrait] FaceCaptureCamera/TextureTarget 미설정 — 캡쳐 스킵: %s"), *Worker->GetName());
         // 동기 실패 — 플래그만 내리면 Dequeue 루프가 다음 요청 처리
         bPortraitCapturing = false;
-        OnEmployeeHireCompleted.Broadcast(EmployeeID);
+        if (Request.bNotifyHireCompletion) { OnEmployeeHireCompleted.Broadcast(EmployeeID); }
+        return;
+    }
+
+    if (!bAssetsPrepared)
+    {
+        PortraitAssetPaths.Reset();
+        AFunnyOfficeworker::GatherAppearanceAssets(GetGameInstance(), FCString::Atoi(*EmployeeID),
+            Gender, PortraitAssetPaths);
+        if (AFunnyOfficeworker* FunnyWorker = Cast<AFunnyOfficeworker>(Worker))
+        {
+            const FSoftObjectPath PosePath = FunnyWorker->GetPortraitPoseAssetPath();
+            if (!PosePath.IsNull()) PortraitAssetPaths.AddUnique(PosePath);
+        }
+        PortraitLoadHandle = PortraitAssetPaths.IsEmpty() ? nullptr
+            : UAssetManager::GetStreamableManager().RequestAsyncLoad(PortraitAssetPaths);
+        World->GetTimerManager().SetTimer(PortraitPreparationTimer,
+            FTimerDelegate::CreateUObject(this, &UEmployeeManager::FinishPortraitPreparation, Request), 0.01f, true);
         return;
     }
 
     // 캡처 완료 후에만 다음 요청 시작. 큐 재순회는 이 람다뿐
-    Worker->OnPortraitCaptured.BindLambda([this](const FString& CompletedID)
+    const TWeakObjectPtr<UEmployeeManager> WeakManager(this);
+    Worker->CanCommitPortrait.BindLambda([WeakManager, Request]()
     {
-        bInPortraitCompletion = true;
-        bPortraitCapturing = false;
+        return WeakManager.IsValid() && Request.AppearanceKey == WeakManager->GetPortraitAppearanceKey(FCString::Atoi(*Request.EmployeeID), &Request);
+    });
+    Worker->OnPortraitCaptured.BindLambda([WeakManager, Request](const FString& CompletedID, bool bSaved)
+    {
+        if (!WeakManager.IsValid()) { return; }
+        UEmployeeManager* Manager = WeakManager.Get();
+        Manager->bInPortraitCompletion = true;
+        Manager->bPortraitCapturing = false;
+        Manager->PortraitLoadHandle.Reset();
+        Manager->PortraitAssetPaths.Reset();
         UE_LOG(LogTemp, Log, TEXT("Portrait capture completed: %s"), *CompletedID);
 
-        // 고용 완료 이벤트 브로드캐스트 (UI 쿨타임 종료용)
-        OnEmployeeHireCompleted.Broadcast(CompletedID);
-
-        bInPortraitCompletion = false;
+        const int32 CompletedEmployeeID = FCString::Atoi(*CompletedID);
+        if (bSaved && Request.AppearanceKey == Manager->GetPortraitAppearanceKey(CompletedEmployeeID, &Request))
+        {
+            const FString KeyPath = AOfficeworker::GetPortraitFilePathForEmployee(CompletedEmployeeID) + TEXT(".appearance");
+            if (FFileHelper::SaveStringToFile(Request.AppearanceKey, *KeyPath))
+            {
+                Manager->OnEmployeePortraitUpdated.Broadcast(CompletedEmployeeID, Request.AppearanceRevision);
+            }
+        }
+        else if (Manager->FindEmployee(CompletedEmployeeID) && Request.AppearanceKey != Manager->GetPortraitAppearanceKey(CompletedEmployeeID))
+        {
+            Manager->RefreshEmployeePortrait(CompletedEmployeeID);
+        }
+        if (Request.bNotifyHireCompletion) { Manager->OnEmployeeHireCompleted.Broadcast(CompletedID); }
+        Manager->bInPortraitCompletion = false;
 
         // 실행 중인 델리게이트를 같은 콜스택에서 재바인딩하면 UB → 한 틱 미룸
-        if (UWorld* CurWorld = GetWorld())
+        if (UWorld* CurWorld = Manager->GetWorld())
         {
             CurWorld->GetTimerManager().SetTimerForNextTick(
-                FTimerDelegate::CreateUObject(this, &UEmployeeManager::DequeueNextPortraitCapture));
+                FTimerDelegate::CreateUObject(Manager, &UEmployeeManager::DequeueNextPortraitCapture));
         }
-        else if (PendingPortraitQueue.Num() > 0)
+        else if (Manager->PendingPortraitQueue.Num() > 0)
         {
             // 월드 없음(레벨 전환 중) = 다음 틱 예약 불가 → 큐 비움 (채용 영구 차단만 방지, 초상화는 backfill)
-            UE_LOG(LogTemp, Error, TEXT("[Portrait] 월드 없음 — 대기 큐 %d건 폐기(backfill 로 복구)"), PendingPortraitQueue.Num());
-            PendingPortraitQueue.Empty();
+            UE_LOG(LogTemp, Error, TEXT("[Portrait] 월드 없음 — 대기 큐 %d건 폐기(backfill 로 복구)"), Manager->PendingPortraitQueue.Num());
+            Manager->PendingPortraitQueue.Empty();
         }
     });
 
     // 메시 로드 완료 델리게이트
-    Worker->OnMeshLoadCompleted.BindLambda([this, Worker]()
+    Worker->OnMeshLoadCompleted.BindLambda([this, Worker, EmployeeID]()
     {
+        const AFunnyOfficeworker* FunnyWorker = Cast<AFunnyOfficeworker>(Worker);
+        if (!FunnyWorker || !FunnyWorker->IsFaceSheetReady())
+        {
+            UE_LOG(LogTemp, Error, TEXT("[Portrait] Face sheet is not ready for employee %s; capture skipped"), *EmployeeID);
+            Worker->OnPortraitCaptured.ExecuteIfBound(EmployeeID, false);
+            return;
+        }
         UE_LOG(LogTemp, Log, TEXT("Mesh loaded, setting up capture..."));
         Worker->SetupFaceCapture();
 
@@ -1314,7 +1456,7 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
 
         TSharedPtr<FTimerHandle> MaterialCheckTimerPtr = MakeShared<FTimerHandle>();
         TSharedPtr<int32> MaterialCheckCountPtr = MakeShared<int32>(0);
-        const int32 MaxMaterialChecks = 15;  // 최대 1.5초
+        const int32 MaxMaterialChecks = 40;  // 최대 4초 (셰이더 컴파일 콜드 캐시 여유)
 
         GetWorld()->GetTimerManager().SetTimer(*MaterialCheckTimerPtr,
             [WeakWorker, MaterialCheckTimerPtr, MaterialCheckCountPtr, MaxMaterialChecks, this]()
@@ -1329,10 +1471,22 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
                 if (W->GetMesh() && W->GetMesh()->GetNumMaterials() > 0)
                 {
                     UMaterialInterface* Mat = W->GetMesh()->GetMaterial(0);
+                    FString PendingMaterials;
                     if (!Mat)
                     {
                         bMaterialsReady = false;
                         UE_LOG(LogTemp, Warning, TEXT("Material check %d: Materials not ready"), *MaterialCheckCountPtr);
+                    }
+                    else if (!ArePortraitMaterialsRenderReady(W, PendingMaterials))
+                    {
+                        bMaterialsReady = false;
+                        UE_LOG(LogTemp, Warning, TEXT("Material check %d: shader maps incomplete — %s"), *MaterialCheckCountPtr, *PendingMaterials);
+                    }
+                    // 머티리얼은 붙었어도 셰이더가 컴파일 중이면 캡처가 대체(회색) 셰이더를 찍는다 — 큐가 빌 때까지 대기
+                    else if (GShaderCompilingManager && GShaderCompilingManager->IsCompiling())
+                    {
+                        bMaterialsReady = false;
+                        UE_LOG(LogTemp, Warning, TEXT("Material check %d: shaders still compiling"), *MaterialCheckCountPtr);
                     }
                 }
                 else
@@ -1361,17 +1515,11 @@ void UEmployeeManager::StartPortraitCapture(const FPortraitCaptureRequest& Reque
             0.1f, true);  // 0.1초마다 체크
     });
 
-    // 외형 적용: 스틱 = 코스메틱 단일 진입점(메시 이미 로드 → OnMeshLoadCompleted 동기 발화),
-    //            구 모듈러 = 비동기 헤어/모프 후 로드 완료 시 발화. 두 경로 모두 위 바인딩을 트리거.
+    // 외형 적용: 코스메틱 단일 진입점(메시 이미 로드 → OnMeshLoadCompleted 동기 발화)이 위 바인딩을 트리거.
     int32 EmployeeIDInt = FCString::Atoi(*EmployeeID);
-    if (AStickOfficeworker* StickWorker = Cast<AStickOfficeworker>(Worker))
+    if (AFunnyOfficeworker* FunnyWorker = Cast<AFunnyOfficeworker>(Worker))
     {
-        StickWorker->ApplyCosmeticsForPortrait(Request.Department, Request.Rank, Request.Tier, EmployeeIDInt);
-    }
-    else if (AModularOfficeworker* ModularWorker = Cast<AModularOfficeworker>(Worker))
-    {
-        ModularWorker->ApplyAppearanceAndNotify(Request.Appearance, Request.Rank, Gender,
-            Request.HairCombinationType, Request.RandomSeed, EmployeeIDInt);
+        FunnyWorker->ApplyCosmeticsForPortrait(Request.Department, Request.Rank, Request.Tier, EmployeeIDInt, Gender);
     }
     else
     {
@@ -1396,25 +1544,6 @@ TArray<FEmployeeInstance> UEmployeeManager::GetEmployeesByBuilding(int32 Buildin
     }
 
     UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] GetEmployeesByBuilding(%d): Found %d employees"), BuildingIndex, Result.Num());
-    return Result;
-}
-
-TMap<int32, FCharacterAppearance> UEmployeeManager::GetAppearancesByBuilding(int32 BuildingIndex) const
-{
-    TMap<int32, FCharacterAppearance> Result;
-
-    for (const FEmployeeInstance& Employee : EmployeeList)
-    {
-        if (Employee.AssignedBuildingIndex == BuildingIndex)
-        {
-            if (const FEmployeeAppearanceData* AppData = EmployeeAppearances.Find(Employee.EmployeeID))
-            {
-                Result.Add(Employee.EmployeeID, AppData->Appearance);
-            }
-        }
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] GetAppearancesByBuilding(%d): Found %d appearances"), BuildingIndex, Result.Num());
     return Result;
 }
 
@@ -1454,42 +1583,8 @@ void UEmployeeManager::SetEmployeesForBuilding(int32 BuildingIndex, const TArray
         BuildingIndex, Employees.Num() - SkippedCount, SkippedCount);
 }
 
-void UEmployeeManager::SetAppearancesForBuilding(int32 BuildingIndex, const TMap<int32, FCharacterAppearance>& Appearances)
-{
-    for (const auto& Pair : Appearances)
-    {
-        FEmployeeAppearanceData AppData;
-        AppData.Appearance = Pair.Value;
-
-        // 직원의 현재 랭크 설정
-        if (FEmployeeInstance* Employee = FindEmployee(Pair.Key))
-        {
-            AppData.CurrentRank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel);
-        }
-
-        EmployeeAppearances.Add(Pair.Key, AppData);
-    }
-
-    UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] SetAppearancesForBuilding(%d): Set %d appearances"), BuildingIndex, Appearances.Num());
-}
-
 void UEmployeeManager::ClearEmployeesForBuilding(int32 BuildingIndex)
 {
-    // 해당 건물 직원들의 외모 데이터 제거
-    TArray<int32> EmployeeIDsToRemove;
-    for (const FEmployeeInstance& Employee : EmployeeList)
-    {
-        if (Employee.AssignedBuildingIndex == BuildingIndex)
-        {
-            EmployeeIDsToRemove.Add(Employee.EmployeeID);
-        }
-    }
-
-    for (int32 ID : EmployeeIDsToRemove)
-    {
-        EmployeeAppearances.Remove(ID);
-    }
-
     // 해당 건물 직원 제거
     int32 RemovedCount = EmployeeList.RemoveAll([BuildingIndex](const FEmployeeInstance& Emp)
     {
@@ -1517,59 +1612,165 @@ bool UEmployeeManager::AddExperience(int32 EmployeeID, float Amount)
         return false;
     }
 
-    if (Amount <= 0.0f)
+    if (!FMath::IsFinite(Amount) || Amount <= 0.0f)
     {
         return false;
     }
 
-    const float ExpMultiplier = GetExpGainMultiplier(*Employee);
-    float FinalAmount = Amount * ExpMultiplier;
+    return CommitResolvedExperience(EmployeeID, Amount * GetExpGainMultiplier(*Employee));
+}
 
+bool UEmployeeManager::CommitResolvedExperience(int32 EmployeeID, double FinalAmount)
+{
+    FEmployeeInstance* Employee = FindEmployee(EmployeeID);
+    if (!Employee || !FMath::IsFinite(FinalAmount) || FinalAmount <= 0.0
+        || !FMath::IsFinite(Employee->Experience) || Employee->Experience < 0.0
+        || !FMath::IsFinite(Employee->Experience + FinalAmount))
+    {
+        return false;
+    }
+    const UCGGameInstance* GameInst = Cast<UCGGameInstance>(GetGameInstance());
+    if (GameInst && GameInst->IsVisitMode()) { return false; }
     Employee->Experience += FinalAmount;
-
-    // 경험치 획득 이벤트 브로드캐스트
-    OnExperienceGained.Broadcast(EmployeeID, FinalAmount);
-
-    UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] Employee %d gained %.1f EXP (%.1f base x %.2f multiplier). Total: %.1f"),
-        EmployeeID, FinalAmount, Amount, ExpMultiplier, Employee->Experience);
-
-    // 레벨업 처리 (다중 레벨업 허용, MaxExp<=0 가드로 무한루프 방지)
-    bool bLeveledUp = false;
-    while (true)
+    if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
     {
-        const int32 MaxExp = GetMaxExperienceForLevel(Employee->Level);
-        if (MaxExp <= 0 || Employee->Experience < MaxExp)
-        {
-            break;
-        }
-
-        Employee->Experience -= MaxExp;  // 초과분 이월
-        Employee->Level++;
-
-        Employee->AvailableSkillPoints += SkillPointsPerLevel;   // 6직능 투자용 SP 적립
-
-        bLeveledUp = true;
-
-        UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] Employee %d leveled up to Lv.%d"), EmployeeID, Employee->Level);
+        SaveMgr->RequestDeferredSave();
     }
-
-    if (bLeveledUp)
-    {
-        const int32 FinalLevel = Employee->Level;
-        // 지연 저장 — XP 분배로 여러 직원이 연쇄 레벨업하는 경로, 즉시 저장이면 레벨업마다 히칭
-        if (USaveLoadManager* SaveLoadManager = GetGameInstance()->GetSubsystem<USaveLoadManager>())
-        {
-            SaveLoadManager->RequestDeferredSave();
-        }
-        OnEmployeeLevelUp.Broadcast(EmployeeID, FinalLevel);
-        OnEmployeeStatsChanged.Broadcast(EmployeeID);
-        PlayLevelUpEffects(EmployeeID, FinalLevel);
-    }
-
+    OnEmployeeExperienceChanged.Broadcast(EmployeeID);
+    OnExperienceGained.Broadcast(EmployeeID, static_cast<float>(FinalAmount));
     return true;
 }
 
-float UEmployeeManager::DistributeExperienceToBuilding(int32 BuildingIndex, float BaseAmount, EQualityGrade QualityGrade)
+double UEmployeeManager::GetExperience(int32 EmployeeID) const
+{
+    const FEmployeeInstance* Employee = EmployeeList.FindByPredicate(
+        [EmployeeID](const FEmployeeInstance& Value) { return Value.EmployeeID == EmployeeID; });
+    return Employee ? Employee->Experience : 0.0;
+}
+
+int32 UEmployeeManager::GetLevelUpCost(int32 EmployeeID) const
+{
+    const FEmployeeInstance* Employee = EmployeeList.FindByPredicate(
+        [EmployeeID](const FEmployeeInstance& Value) { return Value.EmployeeID == EmployeeID; });
+    return Employee ? EmployeeTrainingRules::CostForLevel(Employee->Level) : 0;
+}
+
+bool UEmployeeManager::CanLevelUpEmployee(int32 EmployeeID) const
+{
+    const UCGGameInstance* GameInst = Cast<UCGGameInstance>(GetGameInstance());
+    if (GameInst && GameInst->IsVisitMode()) { return false; }
+    const FEmployeeInstance* Employee = EmployeeList.FindByPredicate(
+        [EmployeeID](const FEmployeeInstance& Value) { return Value.EmployeeID == EmployeeID; });
+    return Employee && EmployeeTrainingRules::CanLevelUp(*Employee);
+}
+
+bool UEmployeeManager::LevelUpEmployee(int32 EmployeeID)
+{
+    if (bTrainingTransactionInProgress) { return false; }
+    TGuardValue<bool> TransactionGuard(bTrainingTransactionInProgress, true);
+    UGameInstance* GameInst = GetGameInstance();
+    if (!GameInst) { return false; }
+    USaveLoadManager* SaveMgr = GameInst->GetSubsystem<USaveLoadManager>();
+    if (!SaveMgr) { return false; }
+    if (UManufacturingDevelopmentManager* Development = GameInst->GetSubsystem<UManufacturingDevelopmentManager>())
+    {
+        Development->AccrueOnline();
+    }
+    if (!CanLevelUpEmployee(EmployeeID)) { return false; }
+    int32 NewLevel = 0;
+    {
+        FEmployeeInstance* Employee = FindEmployee(EmployeeID);
+        if (!Employee) { return false; }
+        const FEmployeeInstance Previous = *Employee;
+        if (!EmployeeTrainingRules::TryLevelUp(*Employee)) { return false; }
+        const double ExperienceAfterSpend = Employee->Experience;
+        NewLevel = Employee->Level;
+        // 저장 중 새로 발생한 업무 경험치는 유지하고 성장 결제만 되돌린다.
+        if (!SaveMgr->SaveGameData())
+        {
+            EmployeeTrainingRules::RollbackPreservingEarnedExperience(*Employee, Previous, ExperienceAfterSpend);
+            OnEmployeeExperienceChanged.Broadcast(EmployeeID);
+            return false;
+        }
+    }
+    OnEmployeeExperienceChanged.Broadcast(EmployeeID);
+    OnEmployeeLevelUp.Broadcast(EmployeeID, NewLevel);
+    OnEmployeeDisciplineChanged.Broadcast(EmployeeID);
+    OnEmployeeStatsChanged.Broadcast(EmployeeID);
+    PlayLevelUpEffects(EmployeeID, NewLevel);
+    return true;
+}
+
+int32 UEmployeeManager::GetAvailableStatPoints(int32 EmployeeID) const
+{
+    const FEmployeeInstance* Employee = EmployeeList.FindByPredicate(
+        [EmployeeID](const FEmployeeInstance& Value) { return Value.EmployeeID == EmployeeID; });
+    return Employee ? FMath::Max(0, Employee->UnspentStatPoints) : 0;
+}
+
+bool UEmployeeManager::CanAllocateStatPoint(int32 EmployeeID, EEmployeeStatIndex Stat) const
+{
+    const UCGGameInstance* GameInst = Cast<UCGGameInstance>(GetGameInstance());
+    if (GameInst && GameInst->IsVisitMode()) { return false; }
+    const FEmployeeInstance* Employee = EmployeeList.FindByPredicate(
+        [EmployeeID](const FEmployeeInstance& Value) { return Value.EmployeeID == EmployeeID; });
+    return Employee && EmployeeTrainingRules::CanAllocateStatPoint(*Employee, Stat);
+}
+
+bool UEmployeeManager::AllocateStatPoint(int32 EmployeeID, EEmployeeStatIndex Stat)
+{
+    if (bTrainingTransactionInProgress) { return false; }
+    TGuardValue<bool> TransactionGuard(bTrainingTransactionInProgress, true);
+    UGameInstance* GameInst = GetGameInstance();
+    if (!GameInst) { return false; }
+    USaveLoadManager* SaveMgr = GameInst->GetSubsystem<USaveLoadManager>();
+    if (!SaveMgr) { return false; }
+    if (UManufacturingDevelopmentManager* Development = GameInst->GetSubsystem<UManufacturingDevelopmentManager>())
+    {
+        Development->AccrueOnline();
+    }
+    if (!CanAllocateStatPoint(EmployeeID, Stat)) { return false; }
+    {
+        FEmployeeInstance* Employee = FindEmployee(EmployeeID);
+        if (!Employee) { return false; }
+        const FEmployeeInstance Previous = *Employee;
+        if (!EmployeeTrainingRules::TryAllocateStatPoint(*Employee, Stat)) { return false; }
+        const double ExperienceAfterSpend = Employee->Experience;
+        if (!SaveMgr->SaveGameData())
+        {
+            EmployeeTrainingRules::RollbackPreservingEarnedExperience(*Employee, Previous, ExperienceAfterSpend);
+            return false;
+        }
+    }
+    OnEmployeeStatsChanged.Broadcast(EmployeeID);
+    OnEmployeeStatPointAllocated.Broadcast(EmployeeID);
+    return true;
+}
+
+int32 UEmployeeManager::GetStatLevel(int32 EmployeeID, EEmployeeStatIndex Stat) const
+{
+    const FEmployeeInstance* Employee = EmployeeList.FindByPredicate(
+        [EmployeeID](const FEmployeeInstance& Value) { return Value.EmployeeID == EmployeeID; });
+    return Employee ? EmployeeTrainingRules::GetStatLevel(*Employee, Stat) : 0;
+}
+
+int32 UEmployeeManager::GetStatPointCost(int32 EmployeeID, EEmployeeStatIndex Stat) const
+{
+    const FEmployeeInstance* Employee = EmployeeList.FindByPredicate(
+        [EmployeeID](const FEmployeeInstance& Value) { return Value.EmployeeID == EmployeeID; });
+    return Employee ? EmployeeTrainingRules::StatPointCost(EmployeeTrainingRules::GetStatLevel(*Employee, Stat)) : 0;
+}
+
+bool UEmployeeManager::CanAllocateAnyStatPoint(int32 EmployeeID) const
+{
+    const UCGGameInstance* GameInst = Cast<UCGGameInstance>(GetGameInstance());
+    if (GameInst && GameInst->IsVisitMode()) { return false; }
+    const FEmployeeInstance* Employee = EmployeeList.FindByPredicate(
+        [EmployeeID](const FEmployeeInstance& Value) { return Value.EmployeeID == EmployeeID; });
+    return Employee && EmployeeTrainingRules::CanAllocateAnyStatPoint(*Employee);
+}
+
+float UEmployeeManager::ResolveBuildingExperienceAmount(int32 BuildingIndex, float BaseAmount, EQualityGrade QualityGrade) const
 {
     // 품질 등급에 따른 배율 적용
     float QualityMultiplier = GetQualityMultiplier(QualityGrade);
@@ -1599,8 +1800,14 @@ float UEmployeeManager::DistributeExperienceToBuilding(int32 BuildingIndex, floa
         AdjustedAmount *= GrowthMult;
     }
 
-    // 해당 빌딩의 모든 직원 가져오기
-    TArray<FEmployeeInstance> BuildingEmployees = GetEmployeesInBuilding(BuildingIndex);
+    return AdjustedAmount;
+}
+
+float UEmployeeManager::DistributeExperienceToBuilding(int32 BuildingIndex, float BaseAmount, EQualityGrade QualityGrade)
+{
+    const float AdjustedAmount = ResolveBuildingExperienceAmount(BuildingIndex, BaseAmount, QualityGrade);
+    // 출장 간 직원은 프로젝트에 기여하지 않았으므로 분배에서 뺀다
+    TArray<FEmployeeInstance> BuildingEmployees = GetActiveEmployeesInBuilding(BuildingIndex);
 
     if (BuildingEmployees.Num() == 0)
     {
@@ -1609,20 +1816,45 @@ float UEmployeeManager::DistributeExperienceToBuilding(int32 BuildingIndex, floa
     }
 
     int32 DistributedCount = 0;
+    double TotalGranted = 0.0;
     for (const FEmployeeInstance& Employee : BuildingEmployees)
     {
         // 큐브 ExpGain 줄 — 직원별 XP 배율
         const float ExpMult = UEmployeePotentialHelper::AggregateModifiers(Employee.PotentialAbility).ExpMult;
+        const double Before = GetExperience(Employee.EmployeeID);
         if (AddExperience(Employee.EmployeeID, AdjustedAmount * ExpMult))
         {
             DistributedCount++;
+            TotalGranted += GetExperience(Employee.EmployeeID) - Before;
         }
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] Distributed %.1f EXP (%.1f base x %.2f quality) to %d employees in building %d"),
-        AdjustedAmount, BaseAmount, QualityMultiplier, DistributedCount, BuildingIndex);
+    UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] Distributed %.1f EXP to %d employees in building %d"),
+        AdjustedAmount, DistributedCount, BuildingIndex);
 
-    return AdjustedAmount;
+    return static_cast<float>(TotalGranted);
+}
+
+float UEmployeeManager::DistributeEquipmentStageExperience(int32 BuildingIndex, float BaseAmount,
+    EQualityGrade QualityGrade, FEquipmentAttemptRuntime& Attempt, int32 BucketIndex, float SelfCapPercent)
+{
+    const float AdjustedAmount = ResolveBuildingExperienceAmount(BuildingIndex, BaseAmount, QualityGrade);
+    double TotalGranted = 0.0;
+    const TArray<FEmployeeInstance> Recipients = GetActiveEmployeesInBuilding(BuildingIndex);
+    for (const auto& Employee : Recipients)
+    {
+        const FEquipmentEmployeeRuntime* Participation = Attempt.Employees.Find(Employee.EmployeeID);
+        if (!Participation || (!Participation->bStartParticipant && Participation->TypedSeconds <= 0.0)) { continue; }
+        const float Baseline = AdjustedAmount * UEmployeePotentialHelper::AggregateModifiers(Employee.PotentialAbility).ExpMult
+            * GetExpGainMultiplier(Employee);
+        FEquipmentXPGrant Grant;
+        if (FEmployeeEquipmentEffectEvaluator::RecordBaselineXP(Attempt, Employee.EmployeeID, BucketIndex, Baseline, SelfCapPercent, Grant))
+        {
+            const double ResolvedAmount = static_cast<double>(Grant.BaselineAmount) + Grant.EquipmentAmount;
+            if (CommitResolvedExperience(Employee.EmployeeID, ResolvedAmount)) { TotalGranted += ResolvedAmount; }
+        }
+    }
+    return static_cast<float>(TotalGranted);
 }
 
 float UEmployeeManager::GetQualityMultiplier(EQualityGrade Grade) const
@@ -1678,86 +1910,6 @@ void UEmployeeManager::PlayLevelUpEffects(int32 EmployeeID, int32 NewLevel)
     }
 }
 
-bool UEmployeeManager::InvestDisciplinePoint(int32 EmployeeID, EProductionDiscipline Discipline)
-{
-    FEmployeeInstance* Employee = FindEmployee(EmployeeID);
-    if (!Employee || Employee->AvailableSkillPoints <= 0)
-    {
-        return false;
-    }
-
-    const int32 Idx = static_cast<int32>(Discipline);
-    const int32 N = static_cast<int32>(EProductionDiscipline::Count);
-    if (Idx < 0 || Idx >= N)
-    {
-        return false;
-    }
-
-    // 배열 크기 보정(방금 생성 직원의 미시딩 대비)
-    if (Employee->DisciplinePoints.Num() != N)          { Employee->DisciplinePoints.SetNumZeroed(N); }
-    if (Employee->InvestedDisciplinePoints.Num() != N)  { Employee->InvestedDisciplinePoints.SetNumZeroed(N); }
-
-    Employee->DisciplinePoints[Idx]         += 1;
-    Employee->InvestedDisciplinePoints[Idx] += 1;
-    Employee->AvailableSkillPoints          -= 1;
-    SyncDerivedDepartment(*Employee);
-
-    if (USaveLoadManager* SaveLoadManager = GetGameInstance()->GetSubsystem<USaveLoadManager>())
-    {
-        SaveLoadManager->RequestDeferredSave();
-    }
-
-    // G9 걸음 전이는 이 신호가 아니라 InvestedDisciplinePoints 파생값이 판정한다 (세이브를 타 재접속에도 유지)
-    OnEmployeeDisciplineChanged.Broadcast(EmployeeID);
-    return true;
-}
-
-bool UEmployeeManager::ResetDisciplinePoints(int32 EmployeeID)
-{
-    FEmployeeInstance* Employee = FindEmployee(EmployeeID);
-    if (!Employee)
-    {
-        return false;
-    }
-
-    const int32 N = static_cast<int32>(EProductionDiscipline::Count);
-    if (Employee->InvestedDisciplinePoints.Num() != N)
-    {
-        return false;   // 투자 이력 없음
-    }
-
-    int32 TotalInvested = 0;
-    for (int32 v : Employee->InvestedDisciplinePoints) { TotalInvested += v; }
-    if (TotalInvested <= 0)
-    {
-        return false;   // 되돌릴 것 없음 → 다이아 차감 안 함
-    }
-
-    UResourceItemManager* ResourceMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>();
-    if (!ResourceMgr || !ResourceMgr->HasResource(EResourceType::Diamond, DisciplineResetDiamondCost))
-    {
-        return false;
-    }
-
-    // bShouldSave=false + 지연 저장 (리롤과 동일 — 클릭당 전체 세이브 방지)
-    ResourceMgr->SpendResource(EResourceType::Diamond, DisciplineResetDiamondCost, /*bShouldSave=*/false);
-
-    for (int32 i = 0; i < N; ++i)
-    {
-        Employee->DisciplinePoints[i]        -= Employee->InvestedDisciplinePoints[i];   // 이너트 복원
-        Employee->AvailableSkillPoints       += Employee->InvestedDisciplinePoints[i];   // SP 반환
-        Employee->InvestedDisciplinePoints[i] = 0;
-    }
-    SyncDerivedDepartment(*Employee);
-
-    if (USaveLoadManager* SaveLoadManager = GetGameInstance()->GetSubsystem<USaveLoadManager>())
-    {
-        SaveLoadManager->RequestDeferredSave();
-    }
-    OnEmployeeDisciplineChanged.Broadcast(EmployeeID);
-    return true;
-}
-
 bool UEmployeeManager::RerollEmployeePotential(int32 EmployeeID, EItemType CubeType)
 {
     FEmployeeInstance* Employee = FindEmployee(EmployeeID);
@@ -1766,7 +1918,8 @@ bool UEmployeeManager::RerollEmployeePotential(int32 EmployeeID, EItemType CubeT
         return false;
     }
 
-    // 명함 3종 외 타입은 리롤 불가 (GetCubeCeiling 폴백값 Common과 구분해 여기서 명시적으로 걸러낸다)
+    // 명함 3종 외 타입은 리롤 불가 (GetCubeCeiling 폴백값 Common과 구분해 여기서 명시적으로 걸러낸다).
+    // 리터럴을 이 본문에 남긴다 — export_catalog.py 가 consumeRules.json 의 items 를 여기서 파싱한다
     if (CubeType != EItemType::BusinessCardPaper && CubeType != EItemType::BusinessCardGold && CubeType != EItemType::BusinessCardBlack)
     {
         return false;
@@ -1778,12 +1931,24 @@ bool UEmployeeManager::RerollEmployeePotential(int32 EmployeeID, EItemType CubeT
         return false;
     }
 
+    // bShouldSave=false + 지연 저장 — 리롤은 연타 경로, 기본값이면 클릭당 전체 세이브 2회
+    ItemMgr->SpendItem(CubeType, 1, /*bShouldSave=*/false);
+
+    return ApplyPotentialRerollEffect(EmployeeID, CubeType);
+}
+
+bool UEmployeeManager::ApplyPotentialRerollEffect(int32 EmployeeID, EItemType CubeType)
+{
+    FEmployeeInstance* Employee = FindEmployee(EmployeeID);
+    if (!Employee)
+    {
+        return false;
+    }
+
     const int32 Slots = UEmployeePotentialHelper::GetPotentialSlotsForRank(
         UEmployeeTypeHelper::GetRankFromEnhancementLevel(Employee->EnhancementLevel));
     const ELootBoxRarity Ceiling = UEmployeePotentialHelper::GetCubeCeiling(CubeType);
 
-    // bShouldSave=false + 지연 저장 — 리롤은 연타 경로, 기본값이면 클릭당 전체 세이브 2회
-    ItemMgr->SpendItem(CubeType, 1, /*bShouldSave=*/false);
     UEmployeePotentialHelper::ResetPotentialAbility(Employee->PotentialAbility, Slots, Ceiling);
 
     if (USaveLoadManager* SaveLoadManager = GetGameInstance()->GetSubsystem<USaveLoadManager>())
@@ -1802,6 +1967,106 @@ bool UEmployeeManager::RerollEmployeePotential(int32 EmployeeID, EItemType CubeT
 
     OnEmployeeStatsChanged.Broadcast(EmployeeID);
     return true;
+}
+
+// ===== 서버 권위 경제 =====
+
+UCloudEconomySubsystem* UEmployeeManager::GetCloudEconomy() const
+{
+    UGameInstance* GI = GetGameInstance();
+    return GI ? GI->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+}
+
+FName UEmployeeManager::GetPotentialRerollConsumeReason()
+{
+    return ConsumeReason_PotentialReroll;
+}
+
+FName UEmployeeManager::PotentialRerollActionKey(int32 EmployeeID)
+{
+    return FName(*FString::Printf(TEXT("employee.potentialReroll.%d"), EmployeeID));
+}
+
+bool UEmployeeManager::ShouldSkipLocalEffect(bool bReplayed)
+{
+    return bReplayed;
+}
+
+bool UEmployeeManager::IsRerollCard(EItemType CubeType)
+{
+    return CubeType == EItemType::BusinessCardPaper
+        || CubeType == EItemType::BusinessCardGold
+        || CubeType == EItemType::BusinessCardBlack;
+}
+
+void UEmployeeManager::RequestPotentialReroll(int32 EmployeeID, EItemType CubeType, FOnEmployeeEconomyDone Done)
+{
+    RequestPotentialReroll(EmployeeID, CubeType, FOnCloudEconomyOpDone::CreateLambda(
+        [Done](bool bOk, FName) { Done.ExecuteIfBound(bOk); }));
+}
+
+void UEmployeeManager::RequestPotentialReroll(int32 EmployeeID, EItemType CubeType, FOnCloudEconomyOpDone Done)
+{
+    const FName ActionKey = PotentialRerollActionKey(EmployeeID);
+
+    UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+    if (!Cloud)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[EmployeeManager] 잠재 리롤 실패 - CloudEconomySubsystem 없음. Employee=%d"), EmployeeID);
+        Done.ExecuteIfBound(false, CloudErr::Internal);
+        return;
+    }
+
+    if (!Cloud->BeginPendingAction(ActionKey))
+    {
+        UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] 잠재 리롤 중복 - 진행 중. Employee=%d"), EmployeeID);
+        Done.ExecuteIfBound(false, NAME_None);
+        return;
+    }
+
+    // 로컬 캐시로 가능 판정만 — 소모는 서버가 한다
+    UItemInventoryManager* ItemMgr = GetGameInstance()->GetSubsystem<UItemInventoryManager>();
+    const bool bHasCard = IsRerollCard(CubeType) && ItemMgr && ItemMgr->HasItem(CubeType, 1);
+    const bool bLocallyPossible = FindEmployee(EmployeeID) != nullptr && bHasCard;
+
+    if (!bLocallyPossible)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[EmployeeManager] 잠재 리롤 미전송 - 로컬 판정 실패. Employee=%d"), EmployeeID);
+        Cloud->EndPendingAction(ActionKey);
+        // 명함 재고만 "부족합니다" — 직원이 사라진 것은 부족이 아니다
+        Done.ExecuteIfBound(false, bHasCard ? NAME_None : CloudErr::InsufficientItems);
+        return;
+    }
+
+    const FName ItemName = FCloudEconomyData::ItemTypeToName(CubeType);
+
+    // maxPerOp 1 — 리롤은 배치 경로가 없다
+    Cloud->RequestConsume(GetPotentialRerollConsumeReason(), ItemName, 1,
+        UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+            [this, EmployeeID, CubeType, ActionKey, Done](const FCloudOpResult& OpResult)
+    {
+        bool bApplied = false;
+        FName FailureCode = OpResult.Code;
+        if (OpResult.bOk && !ShouldSkipLocalEffect(OpResult.bReplayed))
+        {
+            bApplied = ApplyPotentialRerollEffect(EmployeeID, CubeType);
+            if (!bApplied)
+            {
+                FailureCode = CloudErr::Internal;
+            }
+        }
+        else if (!OpResult.bOk)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[EmployeeManager] employee.potentialReroll 실패 - Code=%s Http=%d"),
+                *OpResult.Code.ToString(), OpResult.HttpStatus);
+        }
+
+        if (UCloudEconomySubsystem* CloudEnd = GetCloudEconomy())
+        {
+            CloudEnd->EndPendingAction(ActionKey);
+        }
+        Done.ExecuteIfBound(bApplied, bApplied ? NAME_None : FailureCode);
+    }));
 }
 
 // ========== 경험치 디버깅 명령어 ==========
@@ -1824,19 +2089,19 @@ void UEmployeeManager::TestAddExp(int32 Amount, int32 EmployeeID)
         return;
     }
 
-    float OldExp = Employee->Experience;
+    const double OldExp = GetExperience(TargetID);
     int32 MaxExp = GetMaxExperienceForLevel(Employee->Level);
 
     AddExperience(TargetID, static_cast<float>(Amount));
 
     UE_LOG(LogTemp, Warning, TEXT("[TestAddExp] %s (ID:%d): %.1f -> %.1f EXP (Max: %d, Level: %d)"),
-        *Employee->EmployeeName, TargetID, OldExp, Employee->Experience, MaxExp, Employee->Level);
+        *Employee->EmployeeName, TargetID, OldExp, GetExperience(TargetID), MaxExp, Employee->Level);
 
     // 레벨업 가능 여부 체크
-    if (Employee->Experience >= MaxExp)
+    if (CanLevelUpEmployee(TargetID))
     {
         UE_LOG(LogTemp, Warning, TEXT("[TestAddExp] >>> LEVEL UP AVAILABLE! Current: Lv.%d, Exp: %.1f/%d"),
-            Employee->Level, Employee->Experience, MaxExp);
+            Employee->Level, GetExperience(TargetID), MaxExp);
     }
 }
 
@@ -1872,14 +2137,14 @@ void UEmployeeManager::ShowExpStatus()
     for (const FEmployeeInstance& Employee : EmployeeList)
     {
         int32 MaxExp = GetMaxExperienceForLevel(Employee.Level);
-        float Progress = (MaxExp > 0) ? (Employee.Experience / MaxExp * 100.0f) : 0.0f;
-        bool bCanLevelUp = Employee.Experience >= MaxExp;
+        double Progress = (MaxExp > 0) ? (GetExperience(Employee.EmployeeID) / MaxExp * 100.0) : 0.0;
+        bool bCanLevelUp = CanLevelUpEmployee(Employee.EmployeeID);
 
         UE_LOG(LogTemp, Warning, TEXT("  [%d] %s | Lv.%d | EXP: %.1f/%d (%.1f%%) | Building: %d %s"),
             Employee.EmployeeID,
             *Employee.EmployeeName,
             Employee.Level,
-            Employee.Experience,
+            GetExperience(Employee.EmployeeID),
             MaxExp,
             Progress,
             Employee.AssignedBuildingIndex,
@@ -1895,7 +2160,6 @@ void UEmployeeManager::SeedEmployeesForBuilding(int32 BuildingIndex, int32 Count
 #if !UE_BUILD_SHIPPING
     // 상한을 넘겨 시드하면 CanHireIntoBuilding 이 거부할 상태를 프리셋이 만들어 낸다 —
     // 플레이로는 도달 불가능한 세이브를 밸런스 하네스가 정상으로 읽으므로 여기서 자른다.
-    // 키스톤(상한 0)은 자연히 0명이 된다.
     const int32 Capacity = GetBuildingEmployeeCapacity(BuildingIndex, /*bLogIfZero*/ false);
     const int32 SeedCount = FMath::Clamp(Count, 0, Capacity);
     if (SeedCount < Count)
@@ -1917,7 +2181,7 @@ void UEmployeeManager::SeedEmployeesForBuilding(int32 BuildingIndex, int32 Count
         Emp.AssignedBuildingIndex = BuildingIndex;
         // false = 벤치. 벤치 직원은 워커 액터도 초상화 backfill 도 안 돈다.
         Emp.bIsAssigned = true;
-        Emp.Level = Rng.RandRange(FMath::Min(LevelMin, LevelMax), FMath::Max(LevelMin, LevelMax));
+        Emp.Level = FMath::Clamp(Rng.RandRange(FMath::Min(LevelMin, LevelMax), FMath::Max(LevelMin, LevelMax)), 1, MaxEmployeeLevel);
         Emp.EnhancementLevel = FMath::Clamp(
             Rng.RandRange(FMath::Min(EnhanceMin, EnhanceMax), FMath::Max(EnhanceMin, EnhanceMax)),
             0, MaxEnhancementLevel);
@@ -1932,10 +2196,11 @@ void UEmployeeManager::SeedEmployeesForBuilding(int32 BuildingIndex, int32 Count
         Emp.SpawnRarity = Rarity;
 
         // 가챠와 같은 규칙을 써야 값 분포가 실제 플레이와 일치한다
+        const int32 DisciplineCount = GetDisciplineCountForCompany(GetCompanyTypeForBuilding(BuildingIndex));
         const EProductionDiscipline Primary =
-            static_cast<EProductionDiscipline>(Rng.RandRange(0, static_cast<int32>(EProductionDiscipline::Count) - 1));
-        Emp.DisciplinePoints = MakeDisciplineProfile(Primary, Rarity);
-        Emp.InvestedDisciplinePoints.Init(0, Emp.DisciplinePoints.Num());
+            static_cast<EProductionDiscipline>(Rng.RandRange(0, DisciplineCount - 1));
+        Emp.DisciplinePoints = MakeDisciplineProfile(Primary, Rarity, DisciplineCount);
+        Emp.DisciplinePoints[static_cast<int32>(Primary)] += (Emp.Level - 1) * WorkPowerPerLevel;
         ApplyStatProfile(Emp.Stats, MakeStatProfile());
         Emp.Department = GetDerivedDepartment(Emp);
 

@@ -9,6 +9,12 @@ struct FCityPlotData : public FTableRowBase
 {
     GENERATED_BODY()
 
+    // true = 이 행의 부지는 레벨에 손으로 배치한다(City_Pack 계열 맵). SpawnCityPlots 가 스폰 대상에서 제외하므로
+    // Center/GridCols/GridRows/BuildingCapacity 는 무시되고, 액터 트랜스폼과 BoxComponent Extent 가 권위가 된다.
+    // 제외하지 않으면 MainMap 이 이 행까지 스폰해 Center 좌표(=0) 허공에 부지가 뜬다.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    bool bPlacedInLevel = false;
+
     // 블록 중심 월드 좌표
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
     FVector Center = FVector::ZeroVector;

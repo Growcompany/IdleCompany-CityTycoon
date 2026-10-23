@@ -16,6 +16,8 @@ class UOfficeStageProgressManager;
 class AWorkstationActorBase;
 struct FProjectData;
 
+DECLARE_MULTICAST_DELEGATE(FOnOfficeEmployeesReady);
+
 /**
  * OfficeMap 전용 GameMode
  *
@@ -60,6 +62,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Office|Employee")
 	AOfficeworker* FindEmployeeActorByID(int32 EmployeeID) const;
 
+	/** 저장된 책상 배정과 분산 스폰·표시가 모두 끝난 뒤 발화한다. */
+	FOnOfficeEmployeesReady OnOfficeEmployeesReady;
+	bool AreOfficeEmployeesReady() const { return bOfficeEmployeesReady; }
+	bool CanStartSkylineDevelopment() const;
+	void SetSkylineEmployeesWorking(bool bWorking);
+
+	/** 등반으로 넘은 층 수를 외장 높이와 카메라에 함께 반영한다. 위젯이 셸·카메라를 직접 찾지 않게 하는 중계다. */
+	void SetSkylineClimbFloors(int32 ClearedCount);
+
+	/** 등반 종료·이탈 시 외장 높이와 카메라 오프셋을 원래대로 되돌린다. 빠지면 다음 입장에서 사무실이 떠 있다. */
+	void ResetSkylineClimbPresentation();
+
 	// 단일 직원 워커를 지정 워크스테이션 좌석에 즉시 스폰+배치 (로드 시 일괄 스폰과 별개로, 책상 배정 시 즉시 등장용)
 	void SpawnWorkerForAssignment(const FEmployeeInstance& Employee, AWorkstationActorBase* Workstation, int32 SeatIndex);
 
@@ -89,9 +103,6 @@ private:
 	// 단일 직원 스폰 (내부용)
 	void SpawnSingleEmployee(const FEmployeeInstance& Employee);
 
-	// 스틱맨(신규 병렬) 사용 여부 게이트 — strangler-fig 전환 제어
-	bool ShouldUseStickWorker(const FEmployeeInstance& Employee) const;
-
 	// 저장된 ELootBoxRarity(6단계) → EGachaTier(3단계) 압축 (세이브 변경 없이 골드 신호 산출)
 	static EGachaTier ResolveGachaTier(const FEmployeeInstance& Employee);
 
@@ -113,12 +124,9 @@ private:
 
 	// 현재 스폰 인덱스
 	int32 CurrentSpawnIndex = 0;
+	bool bOfficeEmployeesReady = false;
 
-	// 스틱맨 직원 전역 토글. true=신규 스틱맨 / false=구 모듈러. (실기 검증 단계라 ON; 구 직원으로 되돌리려면 false)
-	UPROPERTY(EditDefaultsOnly, Category = "Worker")
-	bool bUseStickWorkers = true;
-
-	// 스틱맨 BP 클래스 1회 해석 캐시 — 스폰당 소프트 클래스 재로드/재해석 제거(GC 루트). 미존재 시 C++ 클래스 폴백 후 캐시.
+	// BP_FunnyOfficeworker 1회 해석 캐시 — 스폰당 소프트 클래스 재로드/재해석 제거(GC 루트).
 	UPROPERTY(Transient)
 	TSubclassOf<AOfficeworker> ResolvedStickWorkerClass = nullptr;
 

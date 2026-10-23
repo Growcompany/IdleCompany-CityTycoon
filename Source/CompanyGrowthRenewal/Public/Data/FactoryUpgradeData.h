@@ -72,12 +72,15 @@ struct FFactoryUpgradeDefinition : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade|Cost")
 	float CostExponent = 3.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade|Cost", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float EarlyCostMultiplier = 1.0f;
+
+	// 현재 레벨이 이 값에 도달하면 초기 비용 보정이 끝난다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade|Cost", meta = (ClampMin = "1"))
+	int32 FullCostFromLevel = 1;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade|Unlock", meta = (ClampMin = "0"))
 	int32 RequiredHQLevel = 0;
-
-	// true 면 상태 표시 전용 슬롯 (업그레이드 불가, 수집 버튼 표시)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
-	bool bIsStatusSlot = false;
 
 	// 비용 계산은 전부 이 곡선 하나를 거친다 — 단건/벌크/UI 표시가 갈라지지 않게.
 	FFactoryCostCurve GetCostCurve() const
@@ -88,6 +91,8 @@ struct FFactoryUpgradeDefinition : public FTableRowBase
 		Curve.GrowthRate = CostGrowthRate;
 		Curve.LevelScale = CostLevelScale;
 		Curve.Exponent = CostExponent;
+		Curve.EarlyCostMultiplier = EarlyCostMultiplier;
+		Curve.FullCostFromLevel = FullCostFromLevel;
 		return Curve;
 	}
 
@@ -101,15 +106,8 @@ namespace FactoryUpgradeUnlockPolicy
 {
 	inline bool IsAutoUnlockType(EFactoryUpgradeType UpgradeType)
 	{
-		switch (UpgradeType)
-		{
-		case EFactoryUpgradeType::AutoCollection:
-		case EFactoryUpgradeType::AutoCollectionCapacity:
-		case EFactoryUpgradeType::BrickStock:
-			return true;
-		default:
-			return false;
-		}
+		// 인부 추가는 공장의 기본 성장축이라 처음부터 열려 있다 — 자동(오프라인) 묶음은 상한 하나뿐이다.
+		return UpgradeType == EFactoryUpgradeType::AutoCollectionCapacity;
 	}
 
 	inline bool TryResolveRequiredHQLevel(
@@ -118,36 +116,18 @@ namespace FactoryUpgradeUnlockPolicy
 	{
 		OutRequiredHQLevel = 0;
 
-		const FFactoryUpgradeDefinition* AutoCollectionDefinition = Definitions.FindByPredicate(
-			[](const FFactoryUpgradeDefinition& Definition)
-			{
-				return Definition.UpgradeType == EFactoryUpgradeType::AutoCollection;
-			});
 		const FFactoryUpgradeDefinition* CapacityDefinition = Definitions.FindByPredicate(
 			[](const FFactoryUpgradeDefinition& Definition)
 			{
 				return Definition.UpgradeType == EFactoryUpgradeType::AutoCollectionCapacity;
 			});
-		const FFactoryUpgradeDefinition* BrickStockDefinition = Definitions.FindByPredicate(
-			[](const FFactoryUpgradeDefinition& Definition)
-			{
-				return Definition.UpgradeType == EFactoryUpgradeType::BrickStock;
-			});
 
-		if (!AutoCollectionDefinition || !CapacityDefinition || !BrickStockDefinition)
+		if (!CapacityDefinition || CapacityDefinition->RequiredHQLevel <= 0)
 		{
 			return false;
 		}
 
-		const int32 RequiredHQLevel = AutoCollectionDefinition->RequiredHQLevel;
-		if (RequiredHQLevel <= 0
-			|| CapacityDefinition->RequiredHQLevel != RequiredHQLevel
-			|| BrickStockDefinition->RequiredHQLevel != RequiredHQLevel)
-		{
-			return false;
-		}
-
-		OutRequiredHQLevel = RequiredHQLevel;
+		OutRequiredHQLevel = CapacityDefinition->RequiredHQLevel;
 		return true;
 	}
 }

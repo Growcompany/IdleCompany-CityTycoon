@@ -8,12 +8,21 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/Actor.h"
 #include "Styling/SlateBrush.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 
+#include "Entity/Factory/BrickFactory.h"
+#include "Entity/Building/BuildingBaseActor.h"
+#include "Entity/Officeworker/Officeworker.h"
+#include "EngineUtils.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "Manager/GoalBoardSubsystem.h"
 #include "Manager/UIManagerSubsystem.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "UI/UIBase.h"
+#include "UI/HUD/GuideTooltipAvoidance.h"
+#include "UI/Panel/LaunchConfirmWidget.h"
+#include "UI/Panel/OfficeRecruitmentModalWidget.h"
 #include "UI/Element/Common/GuideTooltipWidget.h"
 #include "UI/Element/Common/GestureHintWidget.h"
 #include "Player/MainMapPlayerController.h"
@@ -34,6 +43,77 @@ const TCHAR* UMissionGuideOverlayWidget::SpotlightMaterialPath =
 
 namespace
 {
+	// 자리에 멈춰 일하는 직원(머리 위로 떠오르는 점수 글씨 자리 포함)의 화면 사각형 ― 걷는 직원은 빼서 말풍선이 따라 흔들리지 않게
+	void AppendSeatedWorkerRects(UWorld* World, APlayerController* PC, const FGeometry& OverlayGeo, const FGeometry& ViewportGeo, TArray<FSlateRect>& Out)
+	{
+		if (!World || !PC)
+		{
+			return;
+		}
+		for (TActorIterator<AOfficeworker> It(World); It; ++It)
+		{
+			const AOfficeworker* Worker = *It;
+			if (!Worker || Worker->IsHidden() || Worker->GetVelocity().SizeSquared() > 25.0)
+			{
+				continue;
+			}
+			FVector Origin, Extent;
+			Worker->GetActorBounds(true, Origin, Extent);
+			Origin.Z += Extent.Z * 0.5;
+			Extent.Z *= 1.5;
+			FVector2D Min(TNumericLimits<double>::Max(), TNumericLimits<double>::Max());
+			FVector2D Max(TNumericLimits<double>::Lowest(), TNumericLimits<double>::Lowest());
+			bool bAny = false;
+			for (int32 Corner = 0; Corner < 8; ++Corner)
+			{
+				const FVector Point = Origin + FVector((Corner & 1) ? Extent.X : -Extent.X,
+					(Corner & 2) ? Extent.Y : -Extent.Y, (Corner & 4) ? Extent.Z : -Extent.Z);
+				FVector2D ViewportPos;
+				if (!UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(PC, Point, ViewportPos, true))
+				{
+					continue;
+				}
+				const FVector2D Local = OverlayGeo.AbsoluteToLocal(ViewportGeo.LocalToAbsolute(ViewportPos));
+				Min = FVector2D(FMath::Min(Min.X, Local.X), FMath::Min(Min.Y, Local.Y));
+				Max = FVector2D(FMath::Max(Max.X, Local.X), FMath::Max(Max.Y, Local.Y));
+				bAny = true;
+			}
+			if (bAny)
+			{
+				Out.Emplace(Min.X, Min.Y, Max.X, Max.Y);
+			}
+		}
+	}
+
+	void GetGuideActorBounds(const AActor* Actor, FVector& OutOrigin, FVector& OutExtent)
+	{
+		if (const ABrickFactory* Factory = Cast<ABrickFactory>(Actor))
+		{
+			if (const UStaticMeshComponent* Body = Cast<UStaticMeshComponent>(Factory->GetMainMeshComponent()))
+			{
+				if (const UStaticMesh* Mesh = Body->GetStaticMesh())
+				{
+					// 공장의 예약 부지 충돌 박스는 실제 외형보다 커서 안내 영역과 손 위치를 밀어낸다.
+					const FBox WorldBounds = Mesh->GetBoundingBox().TransformBy(Body->GetComponentTransform());
+					OutOrigin = WorldBounds.GetCenter();
+					OutExtent = WorldBounds.GetExtent();
+					return;
+				}
+			}
+		}
+		if (const ABuildingBaseActor* Building = Cast<ABuildingBaseActor>(Actor))
+		{
+			const FBox WorldBounds = Building->GetBuildingWorldBounds();
+			if (WorldBounds.IsValid)
+			{
+				OutOrigin = WorldBounds.GetCenter();
+				OutExtent = WorldBounds.GetExtent();
+				return;
+			}
+		}
+		Actor->GetActorBounds(false, OutOrigin, OutExtent);
+	}
+
 	// Slate 부모 체인 포함 판정 — 중첩 UserWidget/네임드 슬롯까지 UMG 트리 그대로 따라간다
 	bool IsSlateDescendantOf(const UWidget* Child, const UWidget* Ancestor)
 	{
@@ -258,6 +338,31 @@ void UMissionGuideOverlayWidget::SyncDimVisibility()
 	}
 }
 
+void UMissionGuideOverlayWidget::AdvanceSpotlightTransition(float DeltaSeconds)
+{
+	bSpotlightMoving = false;
+	if (!bHasSpotlight || !SpotlightMID || !DimImage || HoleCentersLocal.Num() != 1
+		|| !RequestedSpotlightTarget.IsValid())
+	{
+		SpotlightTransition.Reset();
+		PreviousSpotlightTarget.Reset();
+		return;
+	}
+	if (PreviousSpotlightTarget != RequestedSpotlightTarget)
+	{
+		SpotlightTransition.Retarget();
+		PreviousSpotlightTarget = RequestedSpotlightTarget;
+	}
+	FVector2D DrawCenter = HoleCenterLocal;
+	FVector2D DrawHalf = RequestedSpotlightHalf;
+	SpotlightTransition.Advance(DrawCenter, DrawHalf, DeltaSeconds);
+	bSpotlightMoving = !SpotlightTransition.IsSettled();
+	SpotlightMID->SetScalarParameterValue(TEXT("HoleCX"), static_cast<float>(DrawCenter.X));
+	SpotlightMID->SetScalarParameterValue(TEXT("HoleCY"), static_cast<float>(DrawCenter.Y));
+	SpotlightMID->SetScalarParameterValue(TEXT("HoleHW"), static_cast<float>(DrawHalf.X));
+	SpotlightMID->SetScalarParameterValue(TEXT("HoleHH"), static_cast<float>(DrawHalf.Y));
+}
+
 void UMissionGuideOverlayWidget::UpdateSpotlight(AActor* SpotActor, float DimScale)
 {
 	EnsureSpotlightMID();
@@ -276,7 +381,7 @@ void UMissionGuideOverlayWidget::UpdateSpotlight(AActor* SpotActor, float DimSca
 	// 액터 AABB 8코너를 화면 투영해 위젯 로컬 렉트 산출 (CLAUDE.md 좌표 규칙)
 	FVector BoundsOrigin;
 	FVector BoundsExtent;
-	SpotActor->GetActorBounds(false, BoundsOrigin, BoundsExtent);
+	GetGuideActorBounds(SpotActor, BoundsOrigin, BoundsExtent);
 
 	const FGeometry& MyTickGeo = GetTickSpaceGeometry();
 	const FGeometry ViewportGeo = UWidgetLayoutLibrary::GetViewportWidgetGeometry(this);
@@ -330,6 +435,8 @@ void UMissionGuideOverlayWidget::UpdateSpotlight(AActor* SpotActor, float DimSca
 	// SpotlightElapsed 는 펄스 위상과 별개 누적 시간(NativeTick 에서 UpdateSpotlight 호출 전에 갱신됨).
 	const float Breathe = FMath::Sin(SpotlightElapsed * (2.f * PI / BreatheCycle)) * BreatheAmpPx;
 	const FVector2D HoleHalf = HoleSizeLocal * 0.5f + FVector2D(Breathe, Breathe);
+	RequestedSpotlightTarget = SpotActor;
+	RequestedSpotlightHalf = HoleHalf;
 
 	// 딤 0(미션판 안내 2초 경과)이면 알파 0 풀스크린 쿼드만 매 프레임 남는다 — 박스는 끄고 셰브론만 남긴다(체인은 DimScale=1 라 무영향)
 	bHasSpotlight = (DimScale > KINDA_SMALL_NUMBER);
@@ -398,6 +505,8 @@ void UMissionGuideOverlayWidget::UpdateSpotlightFromWidget(UWidget* TargetWidget
 
 	const float Breathe = FMath::Sin(SpotlightElapsed * (2.f * PI / BreatheCycle)) * BreatheAmp;
 	const FVector2D HoleHalf = HalfBase + FVector2D(Breathe, Breathe);
+	RequestedSpotlightTarget = TargetWidget;
+	RequestedSpotlightHalf = HoleHalf;
 
 	SpotlightMID->SetScalarParameterValue(TEXT("Wpx"), static_cast<float>(FullSize.X));
 	SpotlightMID->SetScalarParameterValue(TEXT("Hpx"), static_cast<float>(FullSize.Y));
@@ -451,6 +560,10 @@ void UMissionGuideOverlayWidget::UpdateSpotlightFromWidgets(const TArray<UWidget
 		{
 			continue;   // 이 엔트리만 건너뜀 (null 또는 아직 레이아웃 안 됨)
 		}
+		if (OutCenters.IsEmpty())
+		{
+			RequestedSpotlightTarget = Target;
+		}
 		OutCenters.Add(Center);
 		OutSizes.Add(LocalSize);
 	}
@@ -496,6 +609,7 @@ void UMissionGuideOverlayWidget::UpdateSpotlightFromWidgets(const TArray<UWidget
 	}
 	HoleCenterLocal = HoleCentersLocal[0];
 	HoleSizeLocal = HoleSizesLocal[0];
+	RequestedSpotlightHalf = HoleSizeLocal * 0.5f;
 
 	bHasSpotlight = true;
 	bSpotlightChevron = false;   // 대상이 여럿이면 화살표는 클러터
@@ -586,58 +700,13 @@ void UMissionGuideOverlayWidget::ResolveWidgetTarget(UMissionManagerSubsystem* M
 	TargetSizeLocal = FVector2D(FMath::Abs(Corner1.X - Corner0.X), FMath::Abs(Corner1.Y - Corner0.Y));
 	bHasTarget = true;
 
-	// 타겟(또는 내부 버튼)이 CommonButton 계열이면 그 스타일 브러시를 값 복사해 잔상으로 그릴 준비 (실패 시 라운드렉트 폴백)
-	if (CommonBtn)
-	{
-		if (const UCommonButtonStyle* StyleCDO = CommonBtn->GetStyleCDO())
-		{
-			FSlateBrush Extracted;
-			// 단일 머티리얼 스타일이면 머티리얼 브러시, 아니면 Normal 베이스(둥근 코너 텍스처) 브러시
-			if (StyleCDO->bSingleMaterial)
-			{
-				StyleCDO->GetMaterialBrush(Extracted);
-			}
-			else
-			{
-				StyleCDO->GetNormalBaseBrush(Extracted);
-			}
-
-			// 그릴 수 있는 리소스가 실제로 있을 때만 (이미지/머티리얼 없으면 폴백).
-			if (Extracted.GetResourceObject() != nullptr)
-			{
-				TargetBrush = Extracted;
-				bHasBrush = true;
-			}
-		}
-	}
-
-	// 일반 버튼 하이라이트에도 라이트 화면 딤 + 컷아웃 (2026-06-21 사용자 요청 — 너무 진하지 않게). 링(잔상)은 유지, 셰브론은 끔.
+	// 일반 버튼 하이라이트에도 라이트 화면 딤 + 컷아웃. 외곽선은 유지하고 셰브론은 끈다.
 	// 이 프레임에 이미 월드 액터 스포트라이트가 있으면(앞서 UpdateSpotlight) 그게 우선 — 중복 생략.
-	// 딤이 0이면(미션판 안내 2초 경과) 그릴 게 없는데 풀스크린 반투명 쿼드만 매 프레임 남는다 — 링만 남기고 생략(체인은 1.f 라 무영향)
+	// 딤이 0이면 링만 남기고 반투명 쿼드는 생략한다.
 	if (!bHasSpotlight && DimScale > KINDA_SMALL_NUMBER)
 	{
-		// 페이즈가 부가 타겟을 주면 구멍을 여럿 뚫는다. 링(잔상)은 주 타겟에만 남긴다 —
-		// 설명 대상마다 링을 달면 "어디를 누르라는 건지" 가 흐려져 유도가 아니라 클러터가 된다.
-		TArray<UWidget*> ExtraTargets;
-		Mgr->GetCurrentHighlightExtraTargets(ExtraTargets);
-
-		if (ExtraTargets.Num() > 0)
-		{
-			TArray<UWidget*> DimTargets;
-			DimTargets.Reserve(ExtraTargets.Num() + 1);
-			DimTargets.Add(VisualTarget);
-			DimTargets.Append(ExtraTargets);
-
-			// ⚠ 멤버 배열(HoleCentersLocal/HoleSizesLocal)을 out 으로 넘기지 말 것 — 헤더 불변식
-			TArray<FVector2D> Centers;
-			TArray<FVector2D> Sizes;
-			UpdateSpotlightFromWidgets(DimTargets, WidgetSpotlightDimAlpha * DimScale, SpotlightPadding, Centers, Sizes);
-		}
-		else
-		{
-			FVector2D DimC, DimS;
-			UpdateSpotlightFromWidget(VisualTarget, WidgetSpotlightDimAlpha * DimScale, SpotlightPadding, BreatheAmpPx, /*bChevron=*/false, DimC, DimS);
-		}
+		FVector2D DimC, DimS;
+		UpdateSpotlightFromWidget(VisualTarget, WidgetSpotlightDimAlpha * DimScale, SpotlightPadding, BreatheAmpPx, /*bChevron=*/false, DimC, DimS);
 	}
 }
 
@@ -703,6 +772,7 @@ void UMissionGuideOverlayWidget::EnsureBlockerLayer()
 
 void UMissionGuideOverlayWidget::ApplyBlockMode(EBlockMode Mode, const FVector2D& HoleMin, const FVector2D& HoleMax)
 {
+	CurrentBlockMode = Mode;
 	if (!bBlockerReady)
 	{
 		// 게이트 레이어 없음 — 소프트(입력 통과)로만 동작
@@ -762,6 +832,10 @@ void UMissionGuideOverlayWidget::ApplyBlockMode(EBlockMode Mode, const FVector2D
 
 void UMissionGuideOverlayWidget::OnClaimButtonClicked()
 {
+	if (bSpotlightMoving)
+	{
+		return;
+	}
 	UMissionManagerSubsystem* Mgr = Manager.Get();
 	if (!Mgr)
 	{
@@ -773,12 +847,20 @@ void UMissionGuideOverlayWidget::OnClaimButtonClicked()
 	// 받아주면 툴팁을 한 번도 못 보고 스킵된다. 안 넘어가도 갇히지 않는다: 타임아웃이 탈출로다
 	if (Mgr->IsExplainPhaseActive())
 	{
+		const int32 CurrentStep = Mgr->GetExplainStep();
 		UWidget* TapTarget = nullptr;
 		FGuideExplainCopy TapCopy;
-		// 틱의 Show 조건과 정확히 같아야 한다 — 어긋나면 안 보이는 설명이 탭으로 넘어간다
-		if (Mgr->IsExplainCameraSettled() && Mgr->GetExplainTargetForStep(Mgr->GetExplainStep(), TapTarget, TapCopy))
+		const UGuideTooltipWidget* CurrentTip = ExplainTooltipPool.IsValidIndex(0) ? ExplainTooltipPool[0] : nullptr;
+		// 읽기 시간은 실제 표시·이동 완료 틱에서만 쌓인다. 스텝 불일치는 같은 프레임의 연속 탭을 막는다.
+		if (ExplainReadGate.CanAdvance(CurrentStep, ExplainReadSeconds)
+			&& bTooltipShownThisTick && CurrentTip
+			&& CurrentTip->GetVisibility() == ESlateVisibility::HitTestInvisible
+			&& CurrentTip->GetRenderOpacity() > 0.f
+			&& Mgr->IsExplainCameraSettled()
+			&& Mgr->GetExplainTargetForStep(CurrentStep, TapTarget, TapCopy))
 		{
 			Mgr->AdvanceExplainPhase();
+			ExplainReadGate.Reset();
 		}
 		return;   // 어느 쪽이든 클레임 수령 경로로 흘려보내지 않는다
 	}
@@ -819,7 +901,8 @@ UGuideTooltipWidget* UMissionGuideOverlayWidget::GetOrCreateExplainTooltip(int32
 		return nullptr;
 	}
 	// 루트가 HitTestInvisible 이므로 툴팁도 입력을 안 먹는다 — 탭은 Claim 풀스크린 버튼이 받는다
-	Tip->SetVisibility(ESlateVisibility::HitTestInvisible);
+	Tip->SetVisibility(ESlateVisibility::Hidden);
+	Tip->SetRenderOpacity(0.f);
 	if (UCanvasPanel* RootCanvas = Cast<UCanvasPanel>(GetRootWidget()))
 	{
 		if (UCanvasPanelSlot* NewSlot = RootCanvas->AddChildToCanvas(Tip))
@@ -834,7 +917,7 @@ UGuideTooltipWidget* UMissionGuideOverlayWidget::GetOrCreateExplainTooltip(int32
 }
 
 void UMissionGuideOverlayWidget::LayoutExplainTooltips(const TArray<FVector2D>& Centers,
-	const TArray<FVector2D>& Sizes, const TArray<FGuideExplainCopy>& Copy)
+	const TArray<FVector2D>& Sizes, const TArray<FGuideExplainCopy>& Copy, bool bKeepNearAnchor)
 {
 	// 구멍과 카피는 1:1 이어야 한다 — 하나라도 레이아웃 실패로 빠지면 뒤가 한 칸씩 밀려
 	// 엉뚱한 대상에 엉뚱한 설명이 붙는다. 짝이 안 맞으면 툴팁만 접는다(딤/구멍/탭은 유지).
@@ -850,6 +933,68 @@ void UMissionGuideOverlayWidget::LayoutExplainTooltips(const TArray<FVector2D>& 
 		return;
 	}
 
+	// Hard = 덮으면 안 되는 것(대상 구멍·손·닫기·보상·먼저 놓인 말풍선), Soft = 패널의 읽는 내용
+	FGuideTooltipAvoid Avoid;
+	if (UUIManagerSubsystem* UIMgr = !bKeepNearAnchor && GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+	{
+		if (UUIBase* UIBase = UIMgr->GetUIBase())
+		{
+			UCommonActivatableWidget* Prompt = UIBase->GetActivePromptWidget();
+			CollectGuideTooltipAvoidRects(Prompt ? static_cast<UWidget*>(Prompt) : UIBase, GetTickSpaceGeometry(), Avoid.Soft, &Avoid.Hard, &Avoid.Controls);
+			if (!Prompt)
+			{
+				AppendSeatedWorkerRects(GetWorld(), GetOwningPlayer(), GetTickSpaceGeometry(),
+					UWidgetLayoutLibrary::GetViewportWidgetGeometry(this), Avoid.Soft);
+			}
+			if (const ULaunchConfirmWidget* Launch = Cast<ULaunchConfirmWidget>(Prompt))
+			{
+				UWidget* Rewards = Launch->GetGuideRewardWidget();
+				FVector2D RewardCenter, RewardSize;
+				if (Rewards && Rewards->IsVisible() && ComputeWidgetRectLocal(GetTickSpaceGeometry(), Rewards, RewardCenter, RewardSize))
+				{
+					Avoid.Hard.Emplace(RewardCenter.X - RewardSize.X * 0.5, RewardCenter.Y - RewardSize.Y * 0.5,
+						RewardCenter.X + RewardSize.X * 0.5, RewardCenter.Y + RewardSize.Y * 0.5);
+				}
+			}
+		}
+	}
+	// 구멍은 링이 그려지는 여백까지 ― 말풍선은 그 바깥에 붙는다
+	for (int32 AnchorIndex = 0; AnchorIndex < Centers.Num(); ++AnchorIndex)
+	{
+		const FVector2D Half = Sizes[AnchorIndex] * 0.5 + FVector2D(SpotlightPadding, SpotlightPadding);
+		Avoid.Hard.Emplace(Centers[AnchorIndex].X - Half.X, Centers[AnchorIndex].Y - Half.Y,
+			Centers[AnchorIndex].X + Half.X, Centers[AnchorIndex].Y + Half.Y);
+	}
+	if (bHasSecondaryTarget)
+	{
+		const FVector2D Half = SecondaryTargetSizeLocal * 0.5;
+		Avoid.Hard.Emplace(SecondaryTargetCenterLocal.X - Half.X, SecondaryTargetCenterLocal.Y - Half.Y,
+			SecondaryTargetCenterLocal.X + Half.X, SecondaryTargetCenterLocal.Y + Half.Y);
+	}
+	FSlateRect HandRect;
+	if (bGestureShownThisTick && GestureHint && GestureHint->GetHandRectLocal(GetTickSpaceGeometry(), HandRect))
+	{
+		Avoid.Hard.Add(HandRect);
+	}
+	// 월드에 붙은 운영 표시와 수익 칩은 UIBase 트리 밖에 있으므로 함께 보호한다.
+	if (const UMissionManagerSubsystem* Mgr = Manager.Get(); Mgr && Mgr->IsExplainPhaseActive())
+	{
+		for (int32 StepIndex = 0; StepIndex < UMissionManagerSubsystem::ExplainStepCount; ++StepIndex)
+		{
+			UWidget* ExplainTarget = nullptr;
+			FGuideExplainCopy ExplainCopy;
+			FVector2D ExplainCenter, ExplainSize;
+			if (Mgr->GetExplainTargetForStep(StepIndex, ExplainTarget, ExplainCopy)
+				&& ComputeWidgetRectLocal(GetTickSpaceGeometry(), ExplainTarget, ExplainCenter, ExplainSize))
+			{
+				const FVector2D Half = ExplainSize * 0.5;
+				Avoid.Hard.Emplace(ExplainCenter.X - Half.X, ExplainCenter.Y - Half.Y,
+					ExplainCenter.X + Half.X, ExplainCenter.Y + Half.Y);
+			}
+		}
+	}
+
 	for (int32 i = 0; i < Centers.Num(); ++i)
 	{
 		UGuideTooltipWidget* Tip = GetOrCreateExplainTooltip(i);
@@ -857,14 +1002,21 @@ void UMissionGuideOverlayWidget::LayoutExplainTooltips(const TArray<FVector2D>& 
 		{
 			continue;
 		}
-		Tip->SetContent(Copy[i].Eyebrow, Copy[i].Body);
-		if (Tip->GetVisibility() != ESlateVisibility::HitTestInvisible)
+		if (Copy[i].Body.IsEmpty())
 		{
-			Tip->SetVisibility(ESlateVisibility::HitTestInvisible);
+			Tip->HideGuide();
+			continue;
+		}
+		const bool bContentChanged = Tip->SetContent(Copy[i].Eyebrow, Copy[i].Body);
+		if (bContentChanged || Tip->GetVisibility() == ESlateVisibility::Collapsed
+			|| Tip->GetVisibility() == ESlateVisibility::Hidden)
+		{
+			Tip->SetVisibility(ESlateVisibility::Hidden);
+			Tip->SetRenderOpacity(0.f);
+			Tip->ForceLayoutPrepass();
 		}
 
-		// desired size 는 콘텐츠 주입 다음 프레임에야 확정된다 — 첫 프레임은 0 이라 배치가 튄다.
-		// 0 이면 이번 틱은 건너뛰고 다음 틱에 앉힌다(한 프레임 늦게 뜨는 편이 엉뚱한 데 뜨는 것보다 낫다).
+		// 콘텐츠 변경은 숨긴 상태의 prepass로 측정하고, 유효한 위치를 얻은 뒤에만 등장시킨다.
 		const FVector2D TipSize = Tip->GetDesiredSize();
 		if (TipSize.X <= KINDA_SMALL_NUMBER || TipSize.Y <= KINDA_SMALL_NUMBER)
 		{
@@ -874,13 +1026,10 @@ void UMissionGuideOverlayWidget::LayoutExplainTooltips(const TArray<FVector2D>& 
 		// 구멍 = 대상 렉트 + 스포트라이트 패딩. 툴팁은 밝은 구멍 바깥에 붙어야 한다
 		const FVector2D AnchorSize = Sizes[i] + FVector2D(SpotlightPadding, SpotlightPadding) * 2.f;
 
-		// 클램프는 앵커를 모른다 — 선호 방향에 자리가 없으면 툴팁이 자기 구멍을 덮으므로 반대편으로 뒤집는다.
-		// 뒤집은 Dir 을 배치·꼬리축·SetTail 셋 다에 써야 꼬리가 맞는 모서리에 붙는다.
-		const EGuideTooltipDir Dir = ResolveGuideTooltipSide(
-			Copy[i].Dir, Centers[i], AnchorSize, TipSize, ScreenSize, ExplainSafeMargin, ExplainTooltipGap);
-
-		const FVector2D Pos = ComputeGuideTooltipPosition(
-			Centers[i], AnchorSize, TipSize, Dir, ScreenSize, ExplainSafeMargin, ExplainTooltipGap);
+		const FGuideTooltipLayout Placement = ResolveGuideTooltipLayoutAvoiding(Copy[i].Dir, Centers[i], AnchorSize,
+			TipSize, ScreenSize, ExplainSafeMargin, ExplainTooltipGap, Avoid, ExplainMaxRetreat);
+		const EGuideTooltipDir Dir = Placement.Direction;
+		const FVector2D Pos = Placement.Position;
 
 		const bool bVertical = (Dir == EGuideTooltipDir::Up || Dir == EGuideTooltipDir::Down);
 		const float TailOffset = ComputeGuideTailOffset(
@@ -893,6 +1042,9 @@ void UMissionGuideOverlayWidget::LayoutExplainTooltips(const TArray<FVector2D>& 
 		if (UCanvasPanelSlot* TipSlot = Cast<UCanvasPanelSlot>(Tip->Slot))
 		{
 			TipSlot->SetPosition(Pos);
+			Avoid.Hard.Emplace(Pos.X, Pos.Y, Pos.X + TipSize.X, Pos.Y + TipSize.Y);
+			bTooltipShownThisTick = true;
+			Tip->SetVisibility(ESlateVisibility::HitTestInvisible);
 		}
 	}
 
@@ -900,9 +1052,27 @@ void UMissionGuideOverlayWidget::LayoutExplainTooltips(const TArray<FVector2D>& 
 	{
 		if (ExplainTooltipPool[i] && ExplainTooltipPool[i]->GetVisibility() != ESlateVisibility::Collapsed)
 		{
-			ExplainTooltipPool[i]->SetVisibility(ESlateVisibility::Collapsed);
+			ExplainTooltipPool[i]->HideGuide();
 		}
 	}
+}
+
+bool UMissionGuideOverlayWidget::GetVisibleTooltipRect(FSlateRect& OutAbsoluteRect) const
+{
+	const UGuideTooltipWidget* Tip = ExplainTooltipPool.IsValidIndex(0) ? ExplainTooltipPool[0].Get() : nullptr;
+	if (!bTooltipShownThisTick || bSpotlightMoving || !Tip
+		|| Tip->GetVisibility() != ESlateVisibility::HitTestInvisible || Tip->GetRenderOpacity() <= 0.f)
+	{
+		return false;
+	}
+	const FGeometry& TipGeo = Tip->GetCachedGeometry();
+	const FVector2D TipSize = TipGeo.GetLocalSize();
+	if (TipSize.X <= KINDA_SMALL_NUMBER || TipSize.Y <= KINDA_SMALL_NUMBER)
+	{
+		return false;
+	}
+	OutAbsoluteRect = TipGeo.GetRenderBoundingRect();
+	return true;
 }
 
 void UMissionGuideOverlayWidget::ClearExplainTooltips()
@@ -911,7 +1081,7 @@ void UMissionGuideOverlayWidget::ClearExplainTooltips()
 	{
 		if (Tip && Tip->GetVisibility() != ESlateVisibility::Collapsed)
 		{
-			Tip->SetVisibility(ESlateVisibility::Collapsed);
+			Tip->HideGuide();
 		}
 	}
 }
@@ -933,13 +1103,13 @@ bool UMissionGuideOverlayWidget::TickTrackedGoalGuide(float InDeltaTime)
 		return false;
 	}
 
-	// 모달이 떠 있으면 가이드는 물러난다 — 체인 가이드와 같은 규칙(2026-07-27 부지 인수 사고).
-	// 구멍이 아래 타겟에 고정돼 모달 버튼을 막는 것을 방지한다
+	const FGoalGuideStep GuideStep = Mgr->GetTrackedGoalStep();
+	// 현재 프롬프트 안의 행동은 안내하되, 그 뒤에 가려진 대상은 비추지 않는다.
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
 		if (UUIBase* UIBase = UIMgr->GetUIBase())
 		{
-			if (UIBase->GetPromptStackCount() > 0)
+			if (UIBase->GetPromptStackCount() > 0 && !IsGuideTargetAbovePrompt(GuideStep.Anchor, UIBase))
 			{
 				ApplyBlockMode(EBlockMode::None, FVector2D::ZeroVector, FVector2D::ZeroVector);
 				return true;   // 그리지 않되 체인 경로로 흘려보내지도 않는다
@@ -960,17 +1130,32 @@ bool UMissionGuideOverlayWidget::TickTrackedGoalGuide(float InDeltaTime)
 	// 딤은 TrackedDimSeconds 에 걸쳐 선형으로 걷힌다. 이후엔 링/셰브론만 남는다
 	const float DimScale = FMath::Clamp(1.f - (TrackedElapsed / TrackedDimSeconds), 0.f, 1.f);
 
-	if (AActor* SpotActor = Mgr->GetTrackedGoalSpotlightActor())
+	AActor* SpotActor = GuideStep.Spot;
+	if (IsValid(SpotActor))
 	{
 		UpdateSpotlight(SpotActor, DimScale);
+		UpdateGestureHintForActor(EGestureHintKind::Tap, SpotActor);
+		if (bGestureShownThisTick)
+		{
+			bSpotlightChevron = false;
+		}
 	}
-	else if (UWidget* TargetWidget = Mgr->GetTrackedGoalHighlightTarget())
+	else if (UWidget* TargetWidget = GuideStep.Anchor)
 	{
 		// 체인 가이드와 같은 함수 — 브러시 추출/래퍼 언랩/조작가능 안전망을 그대로 태운다
 		ResolveWidgetTarget(Mgr, TargetWidget, DimScale);
 	}
-	// 타겟이 없으면(다른 맵이거나 위젯 미배치) 아무것도 그리지 않는다.
-	// 멘토 밴드는 활성 미션 전용이라 여기선 안 뜬다 — 미션판 행의 장소 태그("사무실에서")가 그 공백을 말한다
+	const FText GuideLine = Mgr->GetTrackedGoalStepLine();
+	if (!GuideLine.IsEmpty() && (bHasTarget || bHasSpotlight
+		|| (IsValid(SpotActor) && RequestedSpotlightTarget.Get() == SpotActor)))
+	{
+		FGuideExplainCopy HintCopy;
+		HintCopy.Body = GuideLine;
+		HintCopy.Dir = EGuideTooltipDir::Down;
+		LayoutExplainTooltips(
+			{bHasTarget ? TargetCenterLocal : HoleCenterLocal},
+			{bHasTarget ? TargetSizeLocal : HoleSizeLocal}, {HintCopy});
+	}
 
 	// 입력 차단 없음 — 자유 플레이 중이므로 게이트를 걸지 않는다
 	ApplyBlockMode(EBlockMode::None, FVector2D::ZeroVector, FVector2D::ZeroVector);
@@ -980,6 +1165,8 @@ bool UMissionGuideOverlayWidget::TickTrackedGoalGuide(float InDeltaTime)
 UGestureHintWidget* UMissionGuideOverlayWidget::GetOrCreateGestureHint()
 {
 	if (GestureHint) return GestureHint;
+	UCanvasPanel* RootCanvas = Cast<UCanvasPanel>(GetRootWidget());
+	if (!RootCanvas) return nullptr;
 	UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
 	TSubclassOf<UUserWidget> Cls = TableMgr ? TableMgr->GetWidgetClass(EWidgetType::GestureHint) : nullptr;
 	if (!Cls)
@@ -994,14 +1181,12 @@ UGestureHintWidget* UMissionGuideOverlayWidget::GetOrCreateGestureHint()
 	UGestureHintWidget* Hint = CreateWidget<UGestureHintWidget>(GetOwningPlayer(), Cls);
 	if (!Hint) return nullptr;
 	Hint->SetVisibility(ESlateVisibility::Collapsed);
-	if (UCanvasPanel* RootCanvas = Cast<UCanvasPanel>(GetRootWidget()))
+	if (UCanvasPanelSlot* HintSlot = RootCanvas->AddChildToCanvas(Hint))
 	{
-		if (UCanvasPanelSlot* HintSlot = RootCanvas->AddChildToCanvas(Hint))
-		{
-			HintSlot->SetAutoSize(true);
-			HintSlot->SetAlignment(FVector2D(0.5f, 0.5f));
-		}
+		HintSlot->SetAutoSize(true);
+		HintSlot->SetAlignment(FVector2D(0.5f, 0.5f));
 	}
+	else return nullptr;
 	GestureHint = Hint;
 	return Hint;
 }
@@ -1009,9 +1194,9 @@ UGestureHintWidget* UMissionGuideOverlayWidget::GetOrCreateGestureHint()
 bool UMissionGuideOverlayWidget::ProjectActorCenterToLocal(AActor* Actor, FVector2D& OutLocal) const
 {
 	APlayerController* PC = GetOwningPlayer();
-	if (!Actor || !PC) return false;
+	if (!IsValid(Actor) || !PC) return false;
 	FVector BoundsOrigin, BoundsExtent;
-	Actor->GetActorBounds(false, BoundsOrigin, BoundsExtent);
+	GetGuideActorBounds(Actor, BoundsOrigin, BoundsExtent);
 	FVector2D ViewportPos;
 	if (!UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(PC, BoundsOrigin, ViewportPos, true)) return false;
 	// 월드 컨텍스트로 PC 를 넘긴다 — const 메서드라 this 를 UObject* 로 못 준다(같은 월드라 결과는 동일)
@@ -1039,17 +1224,24 @@ void UMissionGuideOverlayWidget::UpdateGestureHint(UMissionManagerSubsystem* Mgr
 			if (Handler && Handler->IsDraggingPlacement()) return;
 		}
 	}
+	UpdateGestureHintForActor(Kind, Mgr->GetCurrentGestureAnchorActor());
+}
+
+void UMissionGuideOverlayWidget::UpdateGestureHintForActor(EGestureHintKind Kind, AActor* Actor)
+{
 	FVector2D Center;
-	if (!ProjectActorCenterToLocal(Mgr->GetCurrentGestureAnchorActor(), Center)) return;
+	if (!ProjectActorCenterToLocal(Actor, Center)) return;
 	UGestureHintWidget* Hint = GetOrCreateGestureHint();
 	if (!Hint) return;
+	UCanvasPanelSlot* HintSlot = Cast<UCanvasPanelSlot>(Hint->Slot);
+	if (!HintSlot) return;
 	Hint->SetGesture(Kind);
 	Hint->SetLabel(FText::GetEmpty());
-	// 체인 힌트는 월드 액터 위라 모바일에서 크게 — 공장 홀드는 더 크게(2.25), 프리뷰 드래그 1.75. 오피스 캐치 힌트(라벨 동반)는 1.0.
+	// 월드 힌트는 모바일에서 크게 — 공장 홀드는 더 크게(2.25), 탭/프리뷰 드래그 1.75. 오피스 캐치 힌트(라벨 동반)는 1.0.
 	// 피벗 기본 (0.5,0.5) = 손끝이라 스케일해도 앵커가 안 움직인다.
 	const float HintScale = (Kind == EGestureHintKind::Hold) ? 2.25f : 1.75f;
 	Hint->SetRenderScale(FVector2D(HintScale, HintScale));
-	if (UCanvasPanelSlot* HintSlot = Cast<UCanvasPanelSlot>(Hint->Slot)) HintSlot->SetPosition(Center);
+	HintSlot->SetPosition(Center);
 	if (Hint->GetVisibility() != ESlateVisibility::HitTestInvisible) Hint->SetVisibility(ESlateVisibility::HitTestInvisible);
 	bGestureShownThisTick = true;
 }
@@ -1067,6 +1259,40 @@ void UMissionGuideOverlayWidget::NativeTick(const FGeometry& MyGeometry, float I
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
 	UpdateGuideState(InDeltaTime);
+	AdvanceSpotlightTransition(InDeltaTime);
+	if (bSpotlightMoving)
+	{
+		bTooltipShownThisTick = false;
+		bGestureShownThisTick = false;
+		// 이동하는 밝은 영역이 지나가는 버튼은 입력 대상으로 사용하지 않는다.
+		if (CurrentBlockMode != EBlockMode::None)
+		{
+			ApplyBlockMode(EBlockMode::Gate, FVector2D::ZeroVector, FVector2D::ZeroVector);
+		}
+	}
+	if (!bTooltipShownThisTick)
+	{
+		ClearExplainTooltips();
+	}
+	else
+	{
+		for (UGuideTooltipWidget* Tip : ExplainTooltipPool)
+		{
+			if (Tip && Tip->GetVisibility() == ESlateVisibility::HitTestInvisible)
+			{
+				Tip->AdvanceReveal(InDeltaTime);
+			}
+		}
+	}
+	UMissionManagerSubsystem* Mgr = Manager.Get();
+	const bool bExplainActive = Mgr && Mgr->IsExplainPhaseActive();
+	const int32 ExplainStep = bExplainActive ? Mgr->GetExplainStep() : INDEX_NONE;
+	const UGuideTooltipWidget* ExplainTip = ExplainTooltipPool.IsValidIndex(0) ? ExplainTooltipPool[0] : nullptr;
+	const bool bExplainVisible = bExplainActive && ExplainStep == LastExplainStep
+		&& bTooltipShownThisTick && !bSpotlightMoving && ExplainTip
+		&& ExplainTip->GetVisibility() == ESlateVisibility::HitTestInvisible
+		&& ExplainTip->GetRenderOpacity() > 0.f;
+	ExplainReadGate.Update(ExplainStep, bExplainVisible, InDeltaTime);
 
 	// 딤은 자식 위젯이라 상태를 가시성으로 옮겨야 한다 — 본체는 분기마다 return 이라 여기 한 곳에서만 맞춘다
 	SyncDimVisibility();
@@ -1076,11 +1302,13 @@ void UMissionGuideOverlayWidget::NativeTick(const FGeometry& MyGeometry, float I
 void UMissionGuideOverlayWidget::UpdateGuideState(float InDeltaTime)
 {
 	bHasTarget = false;
-	bHasBrush = false;
+	bHasSecondaryTarget = false;
 	bHasSpotlight = false;
 	bClaimMode = false;
 	bSpotlightChevron = false;
 	bGestureShownThisTick = false;
+	bTooltipShownThisTick = false;
+	RequestedSpotlightTarget.Reset();
 	// 구멍 배열도 매 프레임 비운다 — 지난 프레임 구멍이 남으면 안 되기 때문이지, "비었다 = 딤 없음" 이라서가 아니다.
 	// 구멍 0개인 딤이 존재한다(ShowFullDim, 카메라 대기) — 딤 가시성은 (딤 레이어와 MID 가 있을 때) bHasSpotlight 가 정한다
 	HoleCentersLocal.Reset();
@@ -1088,11 +1316,12 @@ void UMissionGuideOverlayWidget::UpdateGuideState(float InDeltaTime)
 
 	UMissionManagerSubsystem* Mgr = Manager.Get();
 
-	// 설명 툴팁은 아래 조기 반환 경로(미션 종료·매니저 소실·클레임)에서도 남으면 안 된다 —
-	// 페이즈 밖이면 여기 한 곳에서 접는다(페이즈 안의 미해결/가림은 각 분기가 담당)
-	if (!Mgr || !Mgr->IsExplainPhaseActive())
+	if (Mgr && Mgr->IsRecruitmentPresentationActive())
 	{
 		ClearExplainTooltips();
+		ApplyBlockMode(EBlockMode::None, FVector2D::ZeroVector, FVector2D::ZeroVector);
+		SetVisibility(ESlateVisibility::Hidden);
+		return;
 	}
 
 	if (!Mgr)
@@ -1152,7 +1381,6 @@ void UMissionGuideOverlayWidget::UpdateGuideState(float InDeltaTime)
 		TargetCenterLocal = ClaimC;
 		TargetSizeLocal = ClaimS;
 		bHasTarget = true;
-		bHasBrush = false;
 
 		// 수령 버튼은 카드 위에만 — 풀스크린이면 배치/패널로 향한 탭까지 삼켜 "누른 적 없는 수령"이 된다.
 		ApplyBlockMode(EBlockMode::Claim, ClaimC - ClaimS * 0.5f, ClaimC + ClaimS * 0.5f);
@@ -1222,7 +1450,6 @@ void UMissionGuideOverlayWidget::UpdateGuideState(float InDeltaTime)
 		{
 		case EGuideExplainAction::Show:
 		{
-			ExplainUnresolvedSeconds = 0.f;
 			// ⚠ 멤버 배열(HoleCentersLocal/HoleSizesLocal)을 out 으로 넘기지 말 것 — 진입 Reset 과
 			// 제자리 패딩 가산이 호출자 배열까지 건드려 헤더가 약속한 불변식이 깨진다
 			const TArray<UWidget*> StepTargets = { ExplainTarget };
@@ -1231,6 +1458,18 @@ void UMissionGuideOverlayWidget::UpdateGuideState(float InDeltaTime)
 			TArray<FVector2D> Sizes;
 			UpdateSpotlightFromWidgets(StepTargets, SpotlightDimAlpha, SpotlightPadding, Centers, Sizes);
 			LayoutExplainTooltips(Centers, Sizes, StepCopy);
+			// 타겟은 있어도 툴팁 에셋/레이아웃이 끝내 안 뜨면 탭으로 진행할 수 없으므로 탈출시킨다.
+			ExplainUnresolvedSeconds = bTooltipShownThisTick ? 0.f : ExplainUnresolvedSeconds + InDeltaTime;
+			if (ExplainUnresolvedSeconds >= ExplainResolveTimeout)
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[MissionGuide] 설명 툴팁이 %.0f초간 뜨지 않아 자동 통과합니다(스텝 %d)."),
+					ExplainResolveTimeout, Step + 1);
+				ExplainUnresolvedSeconds = 0.f;
+				Mgr->AdvanceExplainPhase(false);
+				ClearExplainTooltips();
+				return;
+			}
 			// 구멍이 하나라도 게이트(구멍 밖 4분할)를 쓰지 않는다 — 여기서 원하는 건 "아무 데나 탭" 이다.
 			// 오수령 위험은 없다: OnClaimButtonClicked 가 설명 페이즈를 먼저 가로채 진행만 시킨다.
 			ApplyBlockMode(EBlockMode::Claim, FVector2D::ZeroVector, GetTickSpaceGeometry().GetLocalSize());
@@ -1284,18 +1523,61 @@ void UMissionGuideOverlayWidget::UpdateGuideState(float InDeltaTime)
 		UpdateSpotlight(SpotActor);
 	}
 
-	// 제스처가 있는 페이즈는 셰브론 대신 손 (스펙 D5) — 같은 자리에 화살표 둘을 두지 않는다
-	if (Mgr->GetCurrentGesture() != EGestureHintKind::None)
+	// ===== 진행 중 — 위젯 하이라이트 타겟 (잔상 링 + 라이트 딤/컷아웃, 셰브론 X) =====
+	// 배치/Grind 는 딤 0 — 부지 pulse·강화 패널을 가리지 않는다 (스펙 D4)
+	ResolveWidgetTarget(Mgr, HighlightTarget, Mgr->GetGuideDimScale());
+	if (UWidget* SecondaryTarget = Mgr->GetCurrentSecondaryHighlightTarget())
+	{
+		FString Reason;
+		if (SecondaryTarget != HighlightTarget && Mgr->IsGuideTargetActionable(SecondaryTarget, Reason))
+		{
+			bHasSecondaryTarget = ComputeWidgetRectLocal(GetTickSpaceGeometry(), SecondaryTarget,
+				SecondaryTargetCenterLocal, SecondaryTargetSizeLocal);
+		}
+	}
+	UpdateGestureHint(Mgr);
+	if (bGestureShownThisTick)
 	{
 		bSpotlightChevron = false;
 	}
 
-	// ===== 진행 중 — 위젯 하이라이트 타겟 (잔상 링 + 라이트 딤/컷아웃, 셰브론 X) =====
-	// 배치/Grind 는 딤 0 — 부지 pulse·강화 패널을 가리지 않는다 (스펙 D4)
-	ResolveWidgetTarget(Mgr, HighlightTarget, Mgr->GetGuideDimScale());
-	UpdateGestureHint(Mgr);
+	// 목표와 진행도는 트래커에 두고, 조작 대상에는 짧은 설명만 붙인다.
+	const FText GuideLine = Mgr->GetCurrentGuideLine();
+	if (!GuideLine.IsEmpty())
+	{
+		FVector2D HintCenter;
+		FVector2D HintSize;
+		bool bHintAnchorReady = false;
+		FString HintTargetReason;
+		if (HighlightTarget && Mgr->IsGuideTargetActionable(HighlightTarget, HintTargetReason))
+		{
+			bHintAnchorReady = ComputeWidgetRectLocal(GetTickSpaceGeometry(), HighlightTarget, HintCenter, HintSize);
+		}
+		else if (bHasSpotlight)
+		{
+			HintCenter = HoleCenterLocal;
+			HintSize = HoleSizeLocal;
+			bHintAnchorReady = true;
+		}
+		else if (ProjectActorCenterToLocal(Mgr->GetCurrentGestureAnchorActor(), HintCenter))
+		{
+			HintSize = FVector2D(100.f, 100.f);
+			bHintAnchorReady = true;
+		}
+		if (bHintAnchorReady)
+		{
+			FGuideExplainCopy HintCopy;
+			HintCopy.Body = GuideLine;
+			HintCopy.Dir = EGuideTooltipDir::Down;
+			const UOfficeRecruitmentModalWidget* RecruitModal = HighlightTarget
+				? HighlightTarget->GetTypedOuter<UOfficeRecruitmentModalWidget>() : nullptr;
+			const bool bRecruitPull = Mgr->GetActiveConditionType() == EMissionConditionType::RecruitEmployees
+				&& RecruitModal && HighlightTarget == RecruitModal->GetPullButtonMultiWidget();
+			LayoutExplainTooltips({HintCenter}, {HintSize}, {HintCopy}, bRecruitPull);
+		}
+	}
 
-	if (bHasTarget)
+	if (bHasTarget || bHasSecondaryTarget)
 	{
 		PulsePhase += InDeltaTime / PulseCycle;
 		PulsePhase = FMath::Fmod(PulsePhase, 1.f);
@@ -1331,6 +1613,10 @@ int32 UMissionGuideOverlayWidget::NativePaint(const FPaintArgs& Args, const FGeo
 	FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
 {
 	int32 MaxLayer = Super::NativePaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+	if (bSpotlightMoving)
+	{
+		return MaxLayer;
+	}
 
 	// 딤(컷아웃 MID)은 여기서 그리지 않는다 — 루트 캔버스 최하단 자식 DimImage 가 담당.
 	// 여기서 그리면 MaxLayer 가 이미 자식 트리를 지난 값이라 툴팁 3장까지 0.55 검정 워시를 뒤집어쓴다.
@@ -1341,8 +1627,7 @@ int32 UMissionGuideOverlayWidget::NativePaint(const FPaintArgs& Args, const FGeo
 	{
 		const int32 JuiceLayer = MaxLayer + 1;
 
-		// 시그니처 주황(앰버) — 잔상과 동일 RingColor 재사용
-		const FLinearColor RingColor(0.96f, 0.62f, 0.04f, 1.f);
+		const FLinearColor RingColor = FLinearColor::FromSRGBColor(FColor(0x57, 0xD9, 0xFF));
 
 		// 바운싱 셰브론 — 아래 방향 V 2겹. sin 바운스(브리딩과 다른 주기). 클레임 모드는 크게(엄청 크게크게).
 		const float ChevHalf  = bClaimMode ? 34.f : 24.f;
@@ -1359,50 +1644,50 @@ int32 UMissionGuideOverlayWidget::NativePaint(const FPaintArgs& Args, const FGeo
 		MaxLayer = JuiceLayer;
 	}
 
-	if (!bHasTarget)
+	if (!bHasTarget && !bHasSecondaryTarget)
 	{
 		return MaxLayer;
 	}
 
 	const int32 RingLayer = MaxLayer + 1;
 
-	// 시그니처 주황(앰버 #F59E0B) 계열 — 크롬 웜크림&주황 톤 정합
-	const FLinearColor RingColor(0.96f, 0.62f, 0.04f, 1.f);
+	const FLinearColor RingColor = FLinearColor::FromSRGBColor(FColor(0x57, 0xD9, 0xFF));
+	const FLinearColor HaloColor = FLinearColor::FromSRGBColor(FColor(0x0C, 0x6F, 0xB2));
 
-	// 잔상 N겹 — 각 겹은 PulsePhase에서 i/WaveCount 만큼 스태거된 위상으로 동시에 확장
-	// (파도치듯 1/3씩 엇갈려 퍼지며 사라짐). 틱 로컬 좌표를 페인트 로컬에 그대로 사용(같은 공간).
-	for (int32 i = 0; i < WaveCount; ++i)
+	const float Pulse = 0.8f + 0.2f * FMath::Cos(PulsePhase * 2.f * PI);
+	const auto DrawTargetOutline = [&](const FVector2D& Center, const FVector2D& Size)
 	{
-		float Phase = PulsePhase + static_cast<float>(i) / WaveCount;
-		Phase -= FMath::FloorToFloat(Phase); // 0~1로 wrap
-
-		const float Expand = BasePadding + Phase * WaveMaxExpand;
-
-		if (bHasBrush)
+		const FVector2D OutlineSize = Size + FVector2D(2.f * BasePadding, 2.f * BasePadding);
+		const float Radius = CornerRadius + BasePadding;
+		// 선의 안쪽 끝도 타겟 밖에 두어 라벨·가격·아이콘의 원래 색을 보존한다.
+		for (int32 WaveIndex = 0; WaveIndex < WaveCount; ++WaveIndex)
 		{
-			// 버튼 스타일 브러시(둥근 코너 포함)를 4방향 확장한 렉트에 그대로 드로잉.
-			// 9-slice(Box/Border) 브러시는 MakeBox가 코너를 보존하므로 확장해도 둥근 모양 유지.
-			const FVector2D WaveSize = TargetSizeLocal + FVector2D(2.f * Expand, 2.f * Expand);
-			const FVector2D TopLeft = TargetCenterLocal - WaveSize * 0.5f;
-			const FLinearColor Tint(RingColor.R, RingColor.G, RingColor.B, (1.f - Phase) * 0.7f);
-
-			FSlateDrawElement::MakeBox(OutDrawElements, RingLayer,
-				AllottedGeometry.ToPaintGeometry(FVector2f(WaveSize), FSlateLayoutTransform(FVector2f(TopLeft))),
-				&TargetBrush, ESlateDrawEffect::None, Tint);
-		}
-		else
-		{
-			// 폴백 — 라운드렉트 아웃라인 물결. 잉크 헤일로 + 흰 코어 페어:
-			// 노란 버튼/크림 패널/딤 등 어떤 배경에서도 명암 대비로 읽힌다 (앰버 단색은 노란 버튼에서 실종)
-			const FVector2D WaveSize = TargetSizeLocal + FVector2D(2.f * Expand, 2.f * Expand);
+			const float Phase = FMath::Frac(PulsePhase + static_cast<float>(WaveIndex) / WaveCount);
+			const float Expand = BasePadding + Phase * WaveMaxExpand;
+			const float Fade = FMath::Square(1.f - Phase);
+			const FVector2D WaveSize = Size + FVector2D(2.f * Expand, 2.f * Expand);
 			const float WaveRadius = CornerRadius + Expand;
-			const float Fade = 1.f - Phase;
-
-			DrawRoundedRectOutline(OutDrawElements, RingLayer, AllottedGeometry, TargetCenterLocal, WaveSize, WaveRadius,
-				FLinearColor(0.12f, 0.08f, 0.05f, Fade * 0.45f), 8.f);
-			DrawRoundedRectOutline(OutDrawElements, RingLayer, AllottedGeometry, TargetCenterLocal, WaveSize, WaveRadius,
-				FLinearColor(1.f, 1.f, 1.f, Fade * 0.95f), 4.f);
+			DrawRoundedRectOutline(OutDrawElements, RingLayer, AllottedGeometry, Center, WaveSize, WaveRadius,
+				FLinearColor(0.06f, 0.08f, 0.10f, 0.4f * Fade), 9.f);
+			DrawRoundedRectOutline(OutDrawElements, RingLayer, AllottedGeometry, Center, WaveSize, WaveRadius,
+				FLinearColor(HaloColor.R, HaloColor.G, HaloColor.B, 0.32f * Fade), 7.f);
+			DrawRoundedRectOutline(OutDrawElements, RingLayer, AllottedGeometry, Center, WaveSize, WaveRadius,
+				FLinearColor(RingColor.R, RingColor.G, RingColor.B, 0.9f * Fade), 4.f);
 		}
+		DrawRoundedRectOutline(OutDrawElements, RingLayer, AllottedGeometry, Center, OutlineSize, Radius,
+			FLinearColor(0.06f, 0.08f, 0.10f, 0.65f), 12.f);
+		DrawRoundedRectOutline(OutDrawElements, RingLayer, AllottedGeometry, Center, OutlineSize, Radius,
+			FLinearColor(HaloColor.R, HaloColor.G, HaloColor.B, 0.65f * Pulse), 9.f);
+		DrawRoundedRectOutline(OutDrawElements, RingLayer, AllottedGeometry, Center, OutlineSize, Radius,
+			FLinearColor(RingColor.R, RingColor.G, RingColor.B, 1.f), 4.f);
+	};
+	if (bHasTarget)
+	{
+		DrawTargetOutline(TargetCenterLocal, TargetSizeLocal);
+	}
+	if (bHasSecondaryTarget)
+	{
+		DrawTargetOutline(SecondaryTargetCenterLocal, SecondaryTargetSizeLocal);
 	}
 
 	return RingLayer;

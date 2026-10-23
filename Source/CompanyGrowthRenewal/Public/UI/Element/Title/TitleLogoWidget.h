@@ -12,7 +12,7 @@ class UImage;
  *   배지가 자체 대비(스카이블렌드 플레이트)를 가져 별도 백플레이트 불필요.
  * - 정적 표시 전용 — 인트로/idle 애니메이션은 2026-07-06 사용자 결정으로 제거.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UTitleLogoWidget : public UCommonUserWidget
 {
 	GENERATED_BODY()

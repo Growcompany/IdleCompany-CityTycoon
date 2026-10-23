@@ -5,7 +5,6 @@
 #include "CoreMinimal.h"
 #include "CommonActivatableWidget.h"
 #include "Enum/RawMaterialType.h"
-#include "Entity/Country/CountryActor.h"
 #include "WorldResourcePanelWidget.generated.h"
 
 class UTextBlock;
@@ -21,7 +20,7 @@ class UTableManagerSubsystem;
  * 10종 원자재 + 에너지 + 정제유 표시.
  * 항목 클릭 시 주력 산출국으로 카메라 포커스 + CountryDetail 패널 열림.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UWorldResourcePanelWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()

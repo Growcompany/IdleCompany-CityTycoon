@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
-#include "Styling/SlateBrush.h"
+#include "UI/HUD/GuideHoleTransition.h"
 #include "MissionGuideOverlayWidget.generated.h"
 
 class UMissionManagerSubsystem;
@@ -12,6 +12,7 @@ class UButton;
 class UImage;
 class UGuideTooltipWidget;
 class UGestureHintWidget;
+enum class EGestureHintKind : uint8;
 
 /** 설명 페이즈 한 틱의 처분. */
 enum class EGuideExplainAction : uint8
@@ -73,16 +74,44 @@ inline EGuideExplainAdvanceAction ResolveGuideExplainAdvanceAction(
 		: EGuideExplainAdvanceAction::WaitForNextTarget;
 }
 
+/** 실제 설명 표시 시간만 누적한다. 스텝 전환과 숨김은 읽기 시간을 새로 시작한다. */
+struct FGuideExplainReadGate
+{
+	int32 Step = INDEX_NONE;
+	float VisibleSeconds = 0.f;
+
+	void Update(int32 CurrentStep, bool bVisibleAndSettled, float DeltaSeconds)
+	{
+		if (Step != CurrentStep)
+		{
+			Step = CurrentStep;
+			VisibleSeconds = 0.f;
+			return;
+		}
+		VisibleSeconds = bVisibleAndSettled
+			? VisibleSeconds + FMath::Max(0.f, DeltaSeconds) : 0.f;
+	}
+
+	bool CanAdvance(int32 CurrentStep, float MinimumSeconds) const
+	{
+		return CurrentStep != INDEX_NONE && Step == CurrentStep && VisibleSeconds >= MinimumSeconds;
+	}
+
+	void Reset()
+	{
+		Step = INDEX_NONE;
+		VisibleSeconds = 0.f;
+	}
+};
+
 /**
  * 미션 가이드 오버레이 — 현 페이즈의 하이라이트 타겟 위젯을 소프트 유도.
- * 타겟이 CommonButton 계열이면 그 버튼 스타일 브러시(텍스처 둥근 코너 포함)를 복사해
- * 바깥으로 퍼지는 잔상 3겹으로 그린다(버튼 모양 그대로 퍼지는 잔상). 브러시 추출 실패/비버튼
- * 타겟이면 라운드렉트 아웃라인 물결 3겹으로 폴백. 텍스트 없음.
+ * 타겟 바깥에 밝은 라운드 외곽선과 퍼지는 파동을 그려 버튼 내용이 가려지지 않게 한다.
+ * 설명은 대상 옆 말풍선에 한 문장으로 표시한다.
  * 또한 매니저가 월드 액터 스포트라이트 대상을 지정하면(GetCurrentSpotlightActor) 화면을 어둡게
  * 딤 처리하고 그 액터 위만 부드러운 라운드박스로 컷아웃해 밝게 비춘다(M_UI_SpotlightCutout MID).
- * 스포트라이트 활성 동안 컷아웃은 숨쉬듯 브리딩하고, 구멍 위에 바운싱하는 아래 방향 셰브론 2겹을
- * 그린다. 멘토 라인 텍스트는 상단 Notification 상주 알림이 담당(매니저 UpdateGuideNotification).
- * 풀스크린 + HitTestInvisible (입력 완전 통과 — 강제 차단 없음).
+ * 스포트라이트 활성 동안 컷아웃은 숨쉬듯 브리딩하고, 구멍 위에 바운싱하는 아래 방향 셰브론 2겹을 그린다.
+ * 말풍선은 입력을 통과시키고, 입력 게이트와 보상 수령은 별도 차단 레이어가 처리한다.
  * 매니저가 CreateWidget 직후 InitGuideOverlay 호출 → AddToViewport(9000, 프롬프트 모달 위).
  */
 UCLASS()
@@ -92,6 +121,11 @@ class COMPANYGROWTHRENEWAL_API UMissionGuideOverlayWidget : public UUserWidget
 
 public:
 	void InitGuideOverlay(UMissionManagerSubsystem* InManager);
+
+	// 자동 플레이어 조회 ― 구멍이 이동 중이면 클릭이 지나가는 옛 구멍을 친다
+	bool IsGuideTransitionSettled() const { return !bSpotlightMoving; }
+	// 지금 보이는 말풍선(0번)의 절대 좌표 사각형. 숨김·투명·이동 중이면 false
+	bool GetVisibleTooltipRect(FSlateRect& OutAbsoluteRect) const;
 
 protected:
 	virtual void NativeConstruct() override;
@@ -106,20 +140,19 @@ private:
 	bool bHasTarget = false;
 	FVector2D TargetCenterLocal = FVector2D::ZeroVector;
 	FVector2D TargetSizeLocal = FVector2D::ZeroVector;
+	// 개발 요구점수 행의 두 번째 링. 딤과 입력 게이트는 기본 타겟만 처리한다.
+	bool bHasSecondaryTarget = false;
+	FVector2D SecondaryTargetCenterLocal = FVector2D::ZeroVector;
+	FVector2D SecondaryTargetSizeLocal = FVector2D::ZeroVector;
 
-	// 타겟 버튼 스타일의 Normal 베이스 브러시 복사본 (틱에서 캐시, 페인트에서 잔상으로 드로잉)
-	// 텍스처를 강참조하진 않지만 그리는 동안 타겟+스타일이 살아 있어 안전 — 타겟 invalid 시 bHasBrush 리셋이 가드
-	bool bHasBrush = false;
-	FSlateBrush TargetBrush;
-
-	// 물결 위상 (0~1 주기 반복) — 물결 i의 실제 위상은 여기에 i/WaveCount 스태거를 더해 wrap
+	// 외곽선 밝기와 바깥 파동의 위상 (0~1 주기 반복)
 	float PulsePhase = 0.f;
 
-	static constexpr int32 WaveCount = 3;        // 동시에 퍼지는 물결 겹 수 (1/3씩 위상 엇갈림)
-	static constexpr float PulseCycle = 1.2f;    // 물결 1겹 수명 주기(초)
-	static constexpr float BasePadding = 6.f;    // 타겟 윤곽에서 물결 시작 안쪽 여백 px
-	static constexpr float WaveMaxExpand = 18.f; // 물결 최대 바깥 확장 px (phase 1 시점)
-	static constexpr float CornerRadius = 20.f;  // 라운드렉트 기본 코너 반경 px (확장 오프셋이 가산됨)
+	static constexpr float PulseCycle = 1.2f;    // 밝기 맥동 주기(초)
+	static constexpr float BasePadding = 8.f;    // 타겟 윤곽과 외곽선 중심 사이 여백 px
+	static constexpr float CornerRadius = 20.f;  // 라운드렉트 기본 코너 반경 px
+	static constexpr int32 WaveCount = 3;       // 바깥으로 퍼지는 파동 수
+	static constexpr float WaveMaxExpand = 52.f;// 파동의 바깥 확장 거리 px
 
 	// ===== 월드 액터 스포트라이트 (화면 딤 + 라운드박스 컷아웃) =====
 	// 첫 사용 시 소프트 로드 후 MID 생성, 멤버로 캐시(GC 보호). 로드 실패 시 스포트라이트 영구 생략(딤 없음).
@@ -162,6 +195,13 @@ private:
 	static constexpr int32 MaxSpotlightHoles = 3;
 	TArray<FVector2D> HoleCentersLocal;
 	TArray<FVector2D> HoleSizesLocal;
+
+	void AdvanceSpotlightTransition(float DeltaSeconds);
+	FGuideHoleTransition SpotlightTransition;
+	TWeakObjectPtr<UObject> RequestedSpotlightTarget;
+	TWeakObjectPtr<UObject> PreviousSpotlightTarget;
+	FVector2D RequestedSpotlightHalf = FVector2D::ZeroVector;
+	bool bSpotlightMoving = false;
 
 	static constexpr float SpotlightPadding = 28.f;  // 액터 화면 렉트 바깥 여백 px
 	static constexpr float SpotlightRadiusPx = 28.f; // 컷아웃 코너 라운드 px
@@ -208,6 +248,7 @@ private:
 
 	// 입력 차단 레이어 — 코드 생성(루트 패널에 투명 버튼 자식). 구멍 밖 4버튼=차단 / 풀스크린 1버튼=클레임 탭.
 	enum class EBlockMode : uint8 { None, Gate, Claim };
+	EBlockMode CurrentBlockMode = EBlockMode::None;
 	void EnsureBlockerLayer();
 	void ApplyBlockMode(EBlockMode Mode, const FVector2D& HoleMin, const FVector2D& HoleMax);
 
@@ -252,12 +293,13 @@ private:
 
 	// ===== M7 설명 페이즈 (딤 1장 + 구멍 1 + 툴팁 1, 탭하면 다음 설명) =====
 	void LayoutExplainTooltips(const TArray<FVector2D>& Centers, const TArray<FVector2D>& Sizes,
-		const TArray<struct FGuideExplainCopy>& Copy);
+		const TArray<struct FGuideExplainCopy>& Copy, bool bKeepNearAnchor = false);
 	void ClearExplainTooltips();
 	UGuideTooltipWidget* GetOrCreateExplainTooltip(int32 Index);
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UGuideTooltipWidget>> ExplainTooltipPool;
+	bool bTooltipShownThisTick = false;
 
 	// 설명이 아직 성립하지 않은 채 흐른 시간 — 타겟 미해결과 카메라 글라이드 대기를 한 축에 함께 누적한다
 	// (Wait 진입 사유가 둘). ExplainResolveTimeout 을 넘으면 설명을 자동 통과시킨다
@@ -266,14 +308,17 @@ private:
 	// 직전 틱의 설명 스텝 — 스텝이 바뀌면 위 예산을 새로 준다(안 그러면 앞 설명이 쓴 시간을 뒷 설명이 물려받는다).
 	// 매니저에서 밀지 않고 여기서 감지한다 — 결합을 늘리지 않는 쪽
 	int32 LastExplainStep = INDEX_NONE;
+	FGuideExplainReadGate ExplainReadGate;
 
 	// DT_WidgetClass 행 누락 경고 1회 래치 — 매 틱 × 툴팁 3장이면 로그가 프레임마다 쏟아진다
 	bool bExplainTooltipClassMissingLogged = false;
 
 	// 연출 박자가 아니라 소프트락 탈출용 상한 ― 대기 경로에 카메라 글라이드가 들어와 5초로는 정상 경로까지 잘렸다
 	static constexpr float ExplainResolveTimeout = 12.f;   // 소프트락 방지 자동 통과 한계(초)
+	static constexpr float ExplainReadSeconds = 1.2f;
 	static constexpr float ExplainSafeMargin = 72.f;       // 화면 가장자리(코너 라운딩 대비)
 	static constexpr float ExplainTooltipGap = 30.f;       // 구멍 가장자리 ↔ 툴팁
+	static constexpr float ExplainMaxRetreat = 48.f;       // 손·닫기·내용을 피하려고 더 물러나는 상한 ― 넘으면 무엇을 가리키는지 잃는다
 	static constexpr float ExplainTailSize = 30.f;
 	static constexpr float ExplainTailCornerInset = 24.f;  // 꼬리가 코너 라운딩을 안 침범하게
 
@@ -282,6 +327,7 @@ private:
 	// 액터 바운드 중심을 내 로컬로 투영. 화면 밖/레이아웃 미산출이면 false
 	bool ProjectActorCenterToLocal(AActor* Actor, FVector2D& OutLocal) const;
 	void UpdateGestureHint(UMissionManagerSubsystem* Mgr);
+	void UpdateGestureHintForActor(EGestureHintKind Kind, AActor* Actor);
 	// UpdateGuideState 는 분기마다 return 이라 표시 여부를 플래그로 모아 NativeTick 끝에서 한 번에 접는다 (딤과 같은 패턴)
 	void SyncGestureHintVisibility();
 

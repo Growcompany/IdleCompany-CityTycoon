@@ -1,4 +1,5 @@
 #include "Manager/CityAcquisitionManager.h"
+#include "Data/SkipCostRules.h"
 #include "Entity/Plot/CityClickProxyActor.h"
 #include "Entity/Plot/CityDemolitionActor.h"
 #include "Manager/SoundManagerSubsystem.h"
@@ -26,6 +27,14 @@
 #include "UI/Panel/CityCompanyInfoWidget.h"
 #include "UI/Panel/CityCompanyManageWidget.h"
 #include "Player/PlayerCamera.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Data/CloudEconomyData.h"
+
+namespace
+{
+    // 서버 카탈로그 reason — spendRules.json 과 바이트 단위로 같아야 한다(다르면 400)
+    const FName SpendReason_CitySkipRecovery(TEXT("city.skipRecovery"));
+}
 
 UResourceItemManager* UCityAcquisitionManager::ResMgr() const { return GetWorld()->GetGameInstance()->GetSubsystem<UResourceItemManager>(); }
 UTableManagerSubsystem* UCityAcquisitionManager::TableMgr() const { return GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>(); }
@@ -130,6 +139,39 @@ AActor* UCityAcquisitionManager::GetCompanyActor(int32 Key) const
     return nullptr;
 }
 
+int32 UCityAcquisitionManager::FindCheapestAcquirableCompanyKey() const
+{
+    const UCityCompanyDirector* Dir = Director();
+    if (!Dir) { return INDEX_NONE; }
+    int32 BestKey = INDEX_NONE;
+    int64 BestCost = TNumericLimits<int64>::Max();
+    for (const FCitySkylineEntry& E : Dir->GetSkylineEntries())
+    {
+        const AActor* Building = E.Building.Get();
+        if (!Building || Building->IsHidden() || GetState(E.BuildingKey) != EAcqState::NotAcquired) { continue; }
+        const int64 Cost = E.Data.AcquisitionCost;
+        if (Cost < BestCost || (Cost == BestCost && E.BuildingKey < BestKey))
+        {
+            BestCost = Cost;
+            BestKey = E.BuildingKey;
+        }
+    }
+    return BestKey;
+}
+
+int32 UCityAcquisitionManager::FindFirstCompanyKeyInState(EAcqState State) const
+{
+    const UCityCompanyDirector* Dir = Director();
+    if (!Dir) { return INDEX_NONE; }
+    int32 BestKey = INDEX_NONE;
+    for (const FCitySkylineEntry& E : Dir->GetSkylineEntries())
+    {
+        if (!E.Building.IsValid() || GetState(E.BuildingKey) != State) { continue; }
+        if (BestKey == INDEX_NONE || E.BuildingKey < BestKey) { BestKey = E.BuildingKey; }
+    }
+    return BestKey;
+}
+
 void UCityAcquisitionManager::GetOccupantKeysForPlot(FName PlotId, TArray<int32>& OutKeys) const
 {
     OutKeys.Reset();
@@ -146,13 +188,19 @@ void UCityAcquisitionManager::GetOccupantKeysForPlot(FName PlotId, TArray<int32>
 
 bool UCityAcquisitionManager::ArePlotOccupantsCleared(FName PlotId) const
 {
+    return CountUnclearedPlotOccupants(PlotId) == 0;
+}
+
+int32 UCityAcquisitionManager::CountUnclearedPlotOccupants(FName PlotId) const
+{
     TArray<int32> Keys;
     GetOccupantKeysForPlot(PlotId, Keys);
+    int32 Uncleared = 0;
     for (const int32 Key : Keys)
     {
-        if (GetState(Key) != EAcqState::Cleared) { return false; }
+        Uncleared += GetState(Key) != EAcqState::Cleared ? 1 : 0;
     }
-    return true;
+    return Uncleared;
 }
 
 bool UCityAcquisitionManager::CanAcquire(int32 Key) const
@@ -225,9 +273,11 @@ bool UCityAcquisitionManager::Tick(float Dt)
 
 int32 UCityAcquisitionManager::GetSkipDiamondCost(int32 Key) const
 {
+    const FCityAcqRuntime* R = Runtime.Find(Key);
     FCityCompanyData D;
-    if (!TableMgr() || !TableMgr()->GetCityCompanyData(Key, D)) { return 0; }
-    return FMath::Max(10, D.Tier * 10);
+    if (!R || R->State != EAcqState::Milking || R->RTotal <= 0 || !TableMgr() || !TableMgr()->GetCityCompanyData(Key, D)) { return 0; }
+    // 드립 속도가 일정해 남은 회수 비율 = 남은 시간 비율 ― 진행할수록 싸진다
+    return FSkipCostRules::Diamonds(D.Tier, double(R->RRemaining) / double(R->RTotal));
 }
 
 bool UCityAcquisitionManager::SkipRecovery(int32 Key)
@@ -235,13 +285,22 @@ bool UCityAcquisitionManager::SkipRecovery(int32 Key)
     FCityAcqRuntime* R = Runtime.Find(Key);
     if (!R || R->State != EAcqState::Milking) { return false; }
 
-    FCityCompanyData D;
-    if (!TableMgr() || !TableMgr()->GetCityCompanyData(Key, D)) { return false; }
-
     const int32 Cost = GetSkipDiamondCost(Key);
     UResourceItemManager* Res = ResMgr();
     if (!Res || !Res->HasResource(EResourceType::Diamond, Cost)) { return false; }
     Res->SpendResource(EResourceType::Diamond, Cost, /*bShouldSave=*/false);
+
+    return ApplySkipRecoveryEffect(Key);
+}
+
+bool UCityAcquisitionManager::ApplySkipRecoveryEffect(int32 Key)
+{
+    // 서버 왕복 사이에 고갈·철거됐을 수 있다 — 포인터를 다시 찾고 상태를 재검사한다
+    FCityAcqRuntime* R = Runtime.Find(Key);
+    if (!R || R->State != EAcqState::Milking) { return false; }
+
+    FCityCompanyData D;
+    if (!TableMgr() || !TableMgr()->GetCityCompanyData(Key, D)) { return false; }
 
     // 온라인 티커와 같은 StepDrip 을 남은 구간만큼 압축 실행한다 — 파는 것은 시간뿐이다.
     // 갈라진 구현을 쓰면 "건너뛴 결과"가 기다린 결과와 달라진다.
@@ -264,12 +323,108 @@ bool UCityAcquisitionManager::SkipRecovery(int32 Key)
     }
 
     UE_LOG(LogTemp, Log, TEXT("[Acq] skip key=%d cost=%d steps=%d state=%d pot=%lld"),
-        Key, Cost, Steps, (int32)R->State, R->RTotal - R->RRemaining);
+        Key, GetSkipDiamondCost(Key), Steps, (int32)R->State, R->RTotal - R->RRemaining);
 
     // 압축 중에는 침묵했으므로 결과를 한 번에 알린다
     OnCompanyProgressChanged.Broadcast(Key);
     SaveToGame();
     return true;
+}
+
+// ===== 서버 권위 즉시 완료 =====
+
+UCloudEconomySubsystem* UCityAcquisitionManager::CloudEconomy() const
+{
+    UWorld* W = GetWorld();
+    UGameInstance* GI = W ? W->GetGameInstance() : nullptr;
+    return GI ? GI->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+}
+
+FName UCityAcquisitionManager::GetSkipRecoverySpendReason()
+{
+    return SpendReason_CitySkipRecovery;
+}
+
+FName UCityAcquisitionManager::SkipRecoveryActionKey(int32 Key)
+{
+    return FName(*FString::Printf(TEXT("city.skipRecovery.%d"), Key));
+}
+
+void UCityAcquisitionManager::RequestSkipRecovery(int32 Key, FOnCityAcqActionDone Done)
+{
+    RequestSkipRecovery(Key, FOnCloudEconomyOpDone::CreateLambda(
+        [Done](bool bOk, FName) { Done.ExecuteIfBound(bOk); }));
+}
+
+void UCityAcquisitionManager::RequestSkipRecovery(int32 Key, FOnCloudEconomyOpDone Done)
+{
+    const FName ActionKey = SkipRecoveryActionKey(Key);
+
+    UCloudEconomySubsystem* Cloud = CloudEconomy();
+    if (!Cloud)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[Acq] 즉시 완료 실패 - CloudEconomySubsystem 없음. key=%d"), Key);
+        Done.ExecuteIfBound(false, CloudErr::Internal);
+        return;
+    }
+
+    // 중복 클릭 — 내가 잡은 pending 이 아니므로 풀지 않는다
+    if (!Cloud->BeginPendingAction(ActionKey))
+    {
+        UE_LOG(LogTemp, Log, TEXT("[Acq] 즉시 완료 중복 - 진행 중. key=%d"), Key);
+        Done.ExecuteIfBound(false, NAME_None);
+        return;
+    }
+
+    // 로컬 캐시로 가능 판정만 — 차감은 서버가 한다
+    const FCityAcqRuntime* R = Runtime.Find(Key);
+    const int32 Cost = GetSkipDiamondCost(Key);
+    UResourceItemManager* Res = ResMgr();
+    const bool bHasDiamond = Cost > 0 && Res && Res->HasResource(EResourceType::Diamond, Cost);
+    const bool bLocallyPossible = R && R->State == EAcqState::Milking && bHasDiamond;
+
+    if (!bLocallyPossible)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[Acq] 즉시 완료 미전송 - 로컬 판정 실패. key=%d cost=%d"), Key, Cost);
+        Cloud->EndPendingAction(ActionKey);
+        // 잔액 부족만 "부족합니다" — 이미 고갈된 회사는 부족이 아니다
+        Done.ExecuteIfBound(false, bHasDiamond ? NAME_None : CloudErr::InsufficientFunds);
+        return;
+    }
+
+    // 어느 회사의 스킵이었는지는 금액만으로 복원할 수 없다 — 영수증 감사용
+    FCloudMeta Meta;
+    Meta.Add(TEXT("companyKey"), FCloudMetaValue::FromInt(Key));
+
+    Cloud->RequestSpend(CloudCurrency::Diamond, Cost, GetSkipRecoverySpendReason(), Meta,
+        UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+            [this, Key, ActionKey, Done](const FCloudOpResult& OpResult)
+    {
+        bool bApplied = false;
+        FName FailureCode = OpResult.Code;
+        if (OpResult.bOk)
+        {
+            // 압축은 멱등이 아니지만 되돌릴 것도 없다(Milking -> Depleted 단방향) — 재검사가 이중 실행을 막는다
+            bApplied = ApplySkipRecoveryEffect(Key);
+            if (!bApplied)
+            {
+                UE_LOG(LogTemp, Error, TEXT("[Acq] 보석은 나갔는데 스킵 조건이 사라졌다. key=%d"), Key);
+                // 서버는 성공했는데 로컬이 못 따라갔다 — "부족" 이 아니라 내부 오류다
+                FailureCode = CloudErr::Internal;
+            }
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[Acq] city.skipRecovery 실패 - Code=%s Http=%d"),
+                *OpResult.Code.ToString(), OpResult.HttpStatus);
+        }
+
+        if (UCloudEconomySubsystem* CloudEnd = CloudEconomy())
+        {
+            CloudEnd->EndPendingAction(ActionKey);
+        }
+        Done.ExecuteIfBound(bApplied, bApplied ? NAME_None : FailureCode);
+    }));
 }
 
 void UCityAcquisitionManager::Demolish(int32 Key)
@@ -427,7 +582,18 @@ bool UCityAcquisitionManager::Acquire(int32 Key)
     FCityCompanyData D;
     TableMgr()->GetCityCompanyData(Key, D);
     ResMgr()->SpendResource(EResourceType::Money, D.AcquisitionCost, /*bShouldSave=*/false);
-    const int32 Pct = FMath::RandRange(D.YieldMinPct, D.YieldMaxPct);
+    int32 Pct = FMath::RandRange(D.YieldMinPct, D.YieldMaxPct);
+    if (const UGameInstance* PctGI = GetWorld() ? GetWorld()->GetGameInstance() : nullptr)
+    {
+        FMissionTable Active;
+        const UMissionManagerSubsystem* PctMissions = PctGI->GetSubsystem<UMissionManagerSubsystem>();
+        if (PctMissions && PctMissions->GetActiveMission(Active)
+            && Active.ConditionType == EMissionConditionType::AcquireFirstCompany && Active.FixedAcquireYieldPct > 0)
+        {
+            Pct = FMath::Clamp(Active.FixedAcquireYieldPct, D.YieldMinPct, D.YieldMaxPct);
+        }
+    }
+    UE_LOG(LogTemp, Log, TEXT("[Acq] acquire key=%d pct=%d"), Key, Pct);
     FCityAcqRuntime R;
     R.State = EAcqState::Milking;
     R.RTotal = (int64)(D.AcquisitionCost * Pct / 100.0);
@@ -565,7 +731,7 @@ void UCityAcquisitionManager::OnCompanyClicked(int32 Key)
     }
 }
 
-void UCityAcquisitionManager::OpenManagePanel(int32 Key)
+bool UCityAcquisitionManager::OpenManagePanel(int32 Key)
 {
     // 포커싱이 오픈과 한 몸이어야 호출자가 늘어도(재클릭 / 리빌 확인 체인 등) 매번 좌측 프레이밍이 보장된다.
     if (AActor* CompanyActor = GetCompanyActor(Key))
@@ -584,17 +750,19 @@ void UCityAcquisitionManager::OpenManagePanel(int32 Key)
     UUIManagerSubsystem* UIM = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr;
     UTableManagerSubsystem* TM = TableMgr();
     UUIBase* UIBase = UIM ? UIM->GetUIBase() : nullptr;
-    if (!UIBase || !TM) { return; }
+    if (!UIBase || !TM) { return false; }
     // 중복 push 방지는 입력모드로: 패널 NativeOnActivated 가 GoToUIMode → 프록시 클릭이 Normal 게이트에서 막힘.
     // (BottomStack 은 BuildOpen 바가 상주해 항상 >0 이므로 카운트 가드는 못 씀 — BuildingManagePanel 과 동일 패턴)
     TSubclassOf<UUserWidget> Cls = TM->GetWidgetClass(EWidgetType::CityCompanyManage);
     if (!Cls)
     {
         UE_LOG(LogTemp, Error, TEXT("[Acq] CityCompanyManage widget class not found (DT_WidgetClass 행 확인)"));
-        return;
+        return false;
     }
     if (UCityCompanyManageWidget* P = Cast<UCityCompanyManageWidget>(UIBase->PushBottomClass(Cls.Get())))
     {
         P->ConfigureForCompany(Key);
+        return true;
     }
+    return false;
 }

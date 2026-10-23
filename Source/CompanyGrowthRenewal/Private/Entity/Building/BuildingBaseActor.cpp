@@ -2,6 +2,7 @@
 
 
 #include "Entity/Building/BuildingBaseActor.h"
+#include "Entity/Building/BuildingDefaultSkin.h"
 
 #include "Core/CGGameInstance.h"
 #include "Player/MainMapPlayerController.h"
@@ -9,7 +10,9 @@
 #include "Player/PlayerCamera.h"
 #include "Manager/SettingsManagerSubsystem.h"
 #include "Utils/FWidgetAnimationUtils.h"
+#include "Util/InstancedMeshRefresh.h"
 #include "Utils/MobileFacadeMaterialTuning.h"
+#include "Utils/BuildingGroundContact.h"
 
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/BoxComponent.h"
@@ -25,14 +28,15 @@
 #include "Manager/ProjectOperationManager.h"
 #include "Manager/ResourceItemManager.h"
 #include "Manager/SoundManagerSubsystem.h"
-#include "Manager/KeystoneAuraSubsystem.h"
 
 #include "UI/Panel/BuildingManagePanelWidget.h"
+#include "UI/Panel/FactoryPanelWidget.h"
 #include "UI/Panel/InGameLayerWidget.h"
 #include "UI/UIBase.h"
 
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshSocket.h"
+#include "Engine/World.h"
 #include "Materials/MaterialInstance.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Kismet/KismetMathLibrary.h"
@@ -94,46 +98,30 @@ ABuildingBaseActor::ABuildingBaseActor()
 
 	// 비콘 머티리얼은 런타임 로드(UpdateRooftopBeacons) — 에셋이 C++ 이후 생성되어도 재시작 없이 반영(CLAUDE.md 런타임 로드 패턴).
 
-	// 키스톤 영향권 반투명 돔 — 엔진 Sphere 를 지면 z=0 중심에 두어 위쪽 반구만 돔으로 보임(아래는 불투명 지면이 가림).
-	// 머티리얼/스케일은 런타임 설정(UpdateKeystoneRing). 기본 숨김.
-	KeystoneDomeMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("KeystoneDomeMesh"));
-	KeystoneDomeMesh->SetupAttachment(RootComponent);
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> DomeMeshFinder(
-		TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-	if (DomeMeshFinder.Succeeded())
-	{
-		KeystoneDomeMesh->SetStaticMesh(DomeMeshFinder.Object);
-	}
-	KeystoneDomeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	KeystoneDomeMesh->SetCastShadow(false);
-	KeystoneDomeMesh->SetVisibility(false);
-	KeystoneDomeMesh->SetRelativeLocation(FVector::ZeroVector);
-
-	// 키스톤 영향권 멤버를 감싸는 파란 Candrop 박스(엔진 Cube + M_Placeable_BuffBlue). 머티리얼/스케일은 런타임(SetAuraHighlight). 기본 숨김.
-	AuraBoxSMC = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("AuraBoxSMC"));
-	AuraBoxSMC->SetupAttachment(RootComponent);
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> AuraCubeFinder(
-		TEXT("/Engine/BasicShapes/Cube.Cube"));
-	if (AuraCubeFinder.Succeeded())
-	{
-		AuraBoxSMC->SetStaticMesh(AuraCubeFinder.Object);
-	}
-	AuraBoxSMC->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	AuraBoxSMC->SetCanEverAffectNavigation(false);
-	AuraBoxSMC->SetCastShadow(false);
-	AuraBoxSMC->SetVisibility(false);
-
 	// 가림 고스트 박스. 머티리얼은 런타임(SetOccluderGhost)에 주입. 기본 숨김.
 	GhostBoxSMC = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("GhostBoxSMC"));
 	GhostBoxSMC->SetupAttachment(RootComponent);
-	if (AuraCubeFinder.Succeeded())
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> GhostCubeFinder(
+		TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (GhostCubeFinder.Succeeded())
 	{
-		GhostBoxSMC->SetStaticMesh(AuraCubeFinder.Object);
+		GhostBoxSMC->SetStaticMesh(GhostCubeFinder.Object);
 	}
 	GhostBoxSMC->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	GhostBoxSMC->SetCanEverAffectNavigation(false);
 	GhostBoxSMC->SetCastShadow(false);
 	GhostBoxSMC->SetVisibility(false);
+
+	GroundContactSMC = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("GroundContactSMC"));
+	GroundContactSMC->SetupAttachment(MainMeshComponent);
+	GroundContactSMC->SetMobility(EComponentMobility::Movable);
+	GroundContactSMC->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	GroundContactSMC->SetGenerateOverlapEvents(false);
+	GroundContactSMC->SetCanEverAffectNavigation(false);
+	GroundContactSMC->SetCastShadow(false);
+	GroundContactSMC->bUseAsOccluder = false;
+	GroundContactSMC->bUseAttachParentBound = true;
+	GroundContactSMC->SetVisibility(false);
 
 	// MainMeshComponent 설정
 	if (MainMeshComponent)
@@ -189,9 +177,17 @@ void ABuildingBaseActor::SetInteractableInfo(const FInteractableInfo& InInfo)
 	// 새로 생성된 건물은 Build 태그 (나중에 BuildSuccess에서 Building으로 변경)
 	Tags.Add("Build");
 
-	// 새로 생성된 건물은 기본 스킨 100 적용 (저장하지 않음)
-	ApplySkin(100, false);
-	UE_LOG(LogTemp, Log, TEXT("[BuildingBaseActor] Applied default skin 100 to new building"));
+	int32 DefaultSkinID = CGBuildingDefaultSkin::FindDefaultSkinID(InInfo.Name);
+	if (DefaultSkinID == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingBaseActor] No default skin for %s; using skin 100"),
+			*InInfo.Name.ToString());
+		DefaultSkinID = 100;
+	}
+
+	// 배치 프리뷰부터 종류별 외형을 적용하며, 저장은 배치 완료 경로에서 처리한다.
+	ApplySkin(DefaultSkinID, false);
+	if (GroundContactSMC) { GroundContactSMC->SetVisibility(false); }
 }
 
 void ABuildingBaseActor::InitializeFromSaveData(const FInteractableInfo& InInfo, const FBuildingEntitySaveData& LoadData)
@@ -223,6 +219,10 @@ void ABuildingBaseActor::InitializeFromSaveData(const FInteractableInfo& InInfo,
 
 	// 로드된 데이터는 이미 완성된 건물
 	Tags.Add("Building");
+	if (GroundContactSMC && !bOccluderGhosted && !bIsFloating)
+	{
+		GroundContactSMC->SetVisibility(GroundContactSMC->GetStaticMesh() != nullptr);
+	}
 
 	// 조명 ID 먼저 멤버에 복원 — ApplySkin 내부의 emissive 재적용이 이 값을 참조함
 	if (LoadData.BuildingData.AppliedLightID != 0)
@@ -240,9 +240,6 @@ void ABuildingBaseActor::InitializeFromSaveData(const FInteractableInfo& InInfo,
 		// 스킨은 default 유지 + 조명만 변경된 세이브 — ApplySkin 우회 경로이므로 emissive 직접 적용
 		ApplyLight(AppliedLightID, false);
 	}
-
-	// 복원된 층수(=모뉴먼트 레벨) 기준으로 영향권 링 갱신 (가시성은 SetKeystoneRingVisible 가 별도 제어)
-	UpdateKeystoneRing();
 }
 
 FBuildingEntitySaveData ABuildingBaseActor::GetBuildingSaveData() const
@@ -276,163 +273,57 @@ FBuildingEntitySaveData ABuildingBaseActor::GetBuildingSaveData() const
 	return SaveData;
 }
 
-int64 ABuildingBaseActor::GetMonumentPassiveOutput() const
-{
-	if (!bIsKeystoneMonument) return 0;
-	UGameInstance* GI = GetGameInstance();
-	if (!GI) return 0;
-	UTableManagerSubsystem* TMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-	if (!TMgr) return 0;
-	bool bOk = false;
-	const FBuildingData Data = TMgr->GetBuildingData(BuildingID, bOk);
-	if (!bOk || !Data.KeystoneAura.bIsKeystone) return 0;
-	const int32 Level = FMath::Max(1, GetMonumentLevel());
-	return Data.KeystoneAura.BasePassiveOutput + (int64)(Level - 1) * Data.KeystoneAura.PassivePerLevel;
-}
-
-float ABuildingBaseActor::GetKeystoneAuraRadiusCm() const
-{
-	if (!bIsKeystoneMonument) return 0.f;
-	UGameInstance* GI = GetGameInstance();
-	UTableManagerSubsystem* TMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
-	if (!TMgr) return 0.f;
-	bool bOk = false;
-	const FBuildingData Data = TMgr->GetBuildingData(BuildingID, bOk);
-	if (!bOk || !Data.KeystoneAura.bIsKeystone) return 0.f;
-	const FKeystoneAuraData& Aura = Data.KeystoneAura;
-	if (Aura.bGlobal) return 0.f; // 글로벌은 줌 대상 아님
-	const int32 Level = FMath::Max(1, GetMonumentLevel());
-	return (Aura.BaseRadiusCells + (Level - 1) * Aura.RadiusPerLevelCells) * FootprintCellSize;
-}
-
-void ABuildingBaseActor::UpdateKeystoneRing()
-{
-	if (!KeystoneDomeMesh) return;
-	if (!bIsKeystoneMonument) { KeystoneDomeMesh->SetVisibility(false); return; }
-
-	UGameInstance* GI = GetGameInstance();
-	UTableManagerSubsystem* TMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
-	if (!TMgr) return;
-	bool bOk = false;
-	const FBuildingData Data = TMgr->GetBuildingData(BuildingID, bOk);
-	if (!bOk || !Data.KeystoneAura.bIsKeystone) { KeystoneDomeMesh->SetVisibility(false); return; }
-
-	const FKeystoneAuraData& Aura = Data.KeystoneAura;
-	if (Aura.bGlobal) { KeystoneDomeMesh->SetVisibility(false); return; } // 글로벌은 돔 미표시(전역 연출 별도)
-
-	const int32 Level = FMath::Max(1, GetMonumentLevel());
-	const float RadiusCm = (Aura.BaseRadiusCells + (Level - 1) * Aura.RadiusPerLevelCells) * FootprintCellSize;
-
-	static const TSoftObjectPtr<UMaterialInterface> DomeMatPath(
-		FSoftObjectPath(TEXT("/Game/CompanyGrowth/UI/Materials/M_KeystoneAuraDome.M_KeystoneAuraDome")));
-	if (UMaterialInterface* DomeMat = DomeMatPath.LoadSynchronous())
-	{
-		KeystoneDomeMesh->SetMaterial(0, DomeMat);
-	}
-	else
-	{
-		// 머티리얼 미생성 시 숨김
-		KeystoneDomeMesh->SetVisibility(false);
-		return;
-	}
-	// 머티리얼/스케일만 설정 — 가시성은 SetKeystoneRingVisible(선택 시)가 제어하므로 여기선 강제하지 않음.
-	// 엔진 Sphere 반경 50cm. XY=영향권 반경에 맞추고, Z(돔 높이)는 반경과 무관하게 낮게 고정 → 납작한 방패 돔.
-	const float DomeHeightCm = 500.0f;
-	const float DomeXYScale = RadiusCm / 50.0f;
-	KeystoneDomeMesh->SetRelativeScale3D(FVector(DomeXYScale, DomeXYScale, DomeHeightCm / 50.0f));
-}
-
-void ABuildingBaseActor::SetKeystoneRingVisible(bool bVisible)
-{
-	bKeystoneRingOn = bVisible;
-
-	// 고스트 중에는 본체가 없으므로 돔도 띄우지 않는다. 상태만 기록해 두고 복원 시 재적용.
-	if (bOccluderGhosted && bVisible)
-	{
-		return;
-	}
-
-	if (!bIsKeystoneMonument || !KeystoneDomeMesh) return;
-
-	// 표시 직전 머티리얼/스케일을 최신 상태로 구성 (현재 층수 기준 반경)
-	if (bVisible)
-	{
-		UpdateKeystoneRing();
-	}
-	KeystoneDomeMesh->SetVisibility(bVisible);
-}
-
 FBox ABuildingBaseActor::GetBuildingWorldBounds() const
 {
 	FBox WorldBox(ForceInit);
-	UMeshComponent* const BodyMeshes[] = { MainMeshComponent, Body_Module, Top_Module, Top_Empty_Module };
-	for (UMeshComponent* Comp : BodyMeshes)
+	UStaticMeshComponent* const BodyMeshes[] = { MainMeshComponent, Body_Module, Top_Module, Top_Empty_Module };
+	for (UStaticMeshComponent* Comp : BodyMeshes)
 	{
-		if (Comp)
+		if (!Comp || !Comp->GetStaticMesh())
 		{
-			WorldBox += Comp->Bounds.GetBox();
+			continue;
 		}
+		const UInstancedStaticMeshComponent* Instances = Cast<UInstancedStaticMeshComponent>(Comp);
+		if (Instances && Instances->GetInstanceCount() == 0)
+		{
+			continue;
+		}
+		// 인스턴스 재적층 직후에는 렌더용 Bounds 캐시가 아직 이전 프레임일 수 있다.
+		WorldBox += Comp->CalcBounds(Comp->GetComponentTransform()).GetBox();
 	}
 	return WorldBox;
 }
 
-void ABuildingBaseActor::SetAuraHighlight(bool bOn)
+FVector2D ABuildingBaseActor::GetPlacementFootprintHalfExtent(bool bWorldAxes) const
 {
-	bAuraHighlightOn = bOn;
-
-	// 고스트 중에는 본체가 없으므로 아우라 박스도 띄우지 않는다. 상태만 기록해 두고 복원 시 재적용.
-	if (bOccluderGhosted && bOn)
+	const FBuildingData* Row = BuildingDataTable && !BuildingID.IsNone()
+		? BuildingDataTable->FindRow<FBuildingData>(BuildingID, TEXT("GetPlacementFootprintHalfExtent"))
+		: nullptr;
+	const FVector2D LocalHalfExtent(
+		BuildingFootprintCellSize * FMath::Max(1, Row ? Row->FootprintWidthCells : 1) * 0.5,
+		BuildingFootprintCellSize * FMath::Max(1, Row ? Row->FootprintDepthCells : 1) * 0.5);
+	if (!bWorldAxes)
 	{
-		return;
+		return LocalHalfExtent;
 	}
 
-	// 키스톤 영향권 멤버를 감싸는 파란 Candrop 박스 토글. 건물 메시는 건드리지 않고, 건물 바운드 크기의 큐브만 띄움.
-	if (!AuraBoxSMC) return;
+	const double YawRadians = FMath::DegreesToRadians(GetActorRotation().Yaw);
+	const double AbsCos = FMath::Abs(FMath::Cos(YawRadians));
+	const double AbsSin = FMath::Abs(FMath::Sin(YawRadians));
+	return FVector2D(
+		LocalHalfExtent.X * AbsCos + LocalHalfExtent.Y * AbsSin,
+		LocalHalfExtent.X * AbsSin + LocalHalfExtent.Y * AbsCos);
+}
 
-	if (!bOn)
+FVector ABuildingBaseActor::GetPlacementFootprintCenter() const
+{
+	const FBox WorldBounds = GetBuildingWorldBounds();
+	if (!WorldBounds.IsValid)
 	{
-		AuraBoxSMC->SetVisibility(false);
-		return;
+		return GetActorLocation();
 	}
-
-	// 전용 파라미터 머티리얼(M_Placeable_BuffBlue) → DMI로 건물 높이에 맞춰 FadeHeight 주입. 미생성 시 graceful 숨김.
-	static const TSoftObjectPtr<UMaterialInterface> BoxMatPath(
-		FSoftObjectPath(TEXT("/Game/CompanyGrowth/Resources/Materials/M_Placeable_BuffBlue.M_Placeable_BuffBlue")));
-	UMaterialInterface* BoxMat = BoxMatPath.LoadSynchronous();
-	if (!BoxMat)
-	{
-		AuraBoxSMC->SetVisibility(false);
-		return;
-	}
-	if (!AuraBoxMID)
-	{
-		AuraBoxMID = UMaterialInstanceDynamic::Create(BoxMat, this);
-		AuraBoxSMC->SetMaterial(0, AuraBoxMID);
-	}
-
-	const FBox WorldBox = GetBuildingWorldBounds();
-	if (!WorldBox.IsValid)
-	{
-		AuraBoxSMC->SetVisibility(false);
-		return;
-	}
-
-	const FVector Origin = WorldBox.GetCenter();
-	const FVector Extent = WorldBox.GetExtent();
-	const float BuildingHeight = Extent.Z * 2.0f;
-	const float GroundZ = Origin.Z - Extent.Z;
-
-	// 페이드가 건물 높이의 딱 1배(=꼭대기)까지 숨쉬며 올라오도록 DMI에 주입(건물마다 일관).
-	AuraBoxMID->SetScalarParameterValue(TEXT("FadeHeight"), BuildingHeight * 1.0f);
-
-	// XY는 footprint에 스냅(×1.05), Z는 건물 전체높이+여유(1.3×)로 키워 파랑이 박스 윗변에서 안 잘리게.
-	const float BoxHalfHeightZ = BuildingHeight * 0.65f; // 전체 1.3H
-	AuraBoxSMC->SetWorldLocation(FVector(Origin.X, Origin.Y, GroundZ + BoxHalfHeightZ));
-	AuraBoxSMC->SetWorldScale3D(FVector(
-		Extent.X / 50.0f * 1.05f,
-		Extent.Y / 50.0f * 1.05f,
-		BoxHalfHeightZ / 50.0f));
-	AuraBoxSMC->SetVisibility(true);
+	const FVector VisualCenter = WorldBounds.GetCenter();
+	return FVector(VisualCenter.X, VisualCenter.Y, GetActorLocation().Z);
 }
 
 void ABuildingBaseActor::SetOccluderGhost(bool bOn)
@@ -450,7 +341,6 @@ void ABuildingBaseActor::SetOccluderGhost(bool bOn)
 		{
 			GhostBoxSMC->SetVisibility(false);
 		}
-
 		UMeshComponent* const BodyMeshes[] = { MainMeshComponent, Body_Module, Top_Module, Top_Empty_Module };
 		for (UMeshComponent* Comp : BodyMeshes)
 		{
@@ -459,11 +349,14 @@ void ABuildingBaseActor::SetOccluderGhost(bool bOn)
 				Comp->SetVisibility(true, true);
 			}
 		}
+		if (GroundContactSMC)
+		{
+			GroundContactSMC->SetVisibility(!bIsFloating && !Tags.Contains("Build")
+				&& GroundContactSMC->GetStaticMesh() != nullptr);
+		}
 
 		// 스냅샷이 아니라 출처에서 재계산 — 고스트 중 낮/밤이 바뀌었어도 맞는 값이 된다
 		ApplyNightVisibility(bGlowVisible);
-		SetAuraHighlight(bAuraHighlightOn);
-		SetKeystoneRingVisible(bKeystoneRingOn);
 		return;
 	}
 
@@ -503,6 +396,7 @@ void ABuildingBaseActor::SetOccluderGhost(bool bOn)
 	GhostBoxSMC->SetWorldScale3D(FVector(Extent.X / 50.0f, Extent.Y / 50.0f, Extent.Z / 50.0f));
 
 	bOccluderGhosted = true;
+	if (GroundContactSMC) { GroundContactSMC->SetVisibility(false); }
 
 	UMeshComponent* const BodyMeshes[] = { MainMeshComponent, Body_Module, Top_Module, Top_Empty_Module };
 	for (UMeshComponent* Comp : BodyMeshes)
@@ -515,14 +409,6 @@ void ABuildingBaseActor::SetOccluderGhost(bool bOn)
 	if (BeaconISM)
 	{
 		BeaconISM->SetVisibility(false, true);
-	}
-	if (AuraBoxSMC)
-	{
-		AuraBoxSMC->SetVisibility(false);
-	}
-	if (KeystoneDomeMesh)
-	{
-		KeystoneDomeMesh->SetVisibility(false);
 	}
 
 	GhostBoxSMC->SetVisibility(true);
@@ -563,16 +449,23 @@ static const TArray<FLinearColor> WindowLightColors = {
 
 void ABuildingBaseActor::ApplyMobileFacadeMaterialTuning()
 {
+	const FBox BuildingBounds = GetBuildingWorldBounds();
 	UMeshComponent* const FacadeMeshes[] = { MainMeshComponent, Body_Module, Top_Module, Top_Empty_Module };
 	for (UMeshComponent* FacadeMesh : FacadeMeshes)
 	{
-		MobileFacadeMaterialTuning::ApplyToSlotZero(FacadeMesh);
+		MobileFacadeMaterialTuning::ApplyToSlotZero(FacadeMesh, BuildingBounds);
 	}
 }
 
 void ABuildingBaseActor::BeginPlay()
 {
 	Super::BeginPlay();
+	if (GroundContactSMC)
+	{
+		const bool bConfigured = BuildingGroundContact::Configure(this, MainMeshComponent, GroundContactSMC);
+		GroundContactSMC->SetVisibility(bConfigured && Tags.Contains("Building")
+			&& !bIsFloating && !bOccluderGhosted);
+	}
 
 	FOnTimelineFloat TimelineProgress;
 	TimelineProgress.BindUFunction(this, FName("Wooble_TimelineUpdate"));
@@ -589,9 +482,8 @@ void ABuildingBaseActor::BeginPlay()
 	if (ATimeCycleManager* Clock = Cast<ATimeCycleManager>(UGameplayStatics::GetActorOfClass(GetWorld(), ATimeCycleManager::StaticClass())))
 	{
 		CachedTimeCycle = Clock;
-		Clock->OnSunRise.AddDynamic(this, &ABuildingBaseActor::HandleSunRise);
-		Clock->OnSunSet.AddDynamic(this, &ABuildingBaseActor::HandleSunSet);
-		const int32 Cur = Clock->GetCurrentTime().ToSeconds();
+		Clock->OnVisualTimeChanged.AddDynamic(this, &ABuildingBaseActor::HandleVisualTimeChanged);
+		const int32 Cur = Clock->GetVisualTime().ToSeconds();
 		const int32 Rise = Clock->GetSunRiseTime().ToSeconds();
 		const int32 Set = Clock->GetSunSetTime().ToSeconds();
 		bGlowVisible = (Cur >= Set) || (Cur < Rise);
@@ -601,10 +493,13 @@ void ABuildingBaseActor::BeginPlay()
 
 void ABuildingBaseActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	GetWorldTimerManager().ClearTimer(NewFloorRiseTimerHandle);
+	PendingFloorRecruitTicketCount = 0;
+	NewFloorRiseInstanceIndex = INDEX_NONE;
+
 	if (ATimeCycleManager* Clock = CachedTimeCycle.Get())
 	{
-		Clock->OnSunRise.RemoveDynamic(this, &ABuildingBaseActor::HandleSunRise);
-		Clock->OnSunSet.RemoveDynamic(this, &ABuildingBaseActor::HandleSunSet);
+		Clock->OnVisualTimeChanged.RemoveDynamic(this, &ABuildingBaseActor::HandleVisualTimeChanged);
 	}
 
 	// 레벨 전환/철거 시 고스트 상태가 남지 않게 (핸들러가 못 따라오는 경로 대비)
@@ -629,8 +524,13 @@ void ABuildingBaseActor::ApplyNightVisibility(bool bNight)
 	}
 }
 
-void ABuildingBaseActor::HandleSunRise() { ApplyNightVisibility(false); }
-void ABuildingBaseActor::HandleSunSet()  { ApplyNightVisibility(true); }
+void ABuildingBaseActor::HandleVisualTimeChanged()
+{
+	if (const ATimeCycleManager* Clock = CachedTimeCycle.Get())
+	{
+		ApplyNightVisibility(Clock->IsVisualNight());
+	}
+}
 
 void ABuildingBaseActor::InitializeWindowLightColor()
 {
@@ -639,26 +539,24 @@ void ABuildingBaseActor::InitializeWindowLightColor()
 	Window_Emissive_Color = WindowLightColors[RandomIndex];
 
 	// 머티리얼에 적용
-	ApplyWindowLightColor();
+	ApplyWindowLightState();
 }
 
-void ABuildingBaseActor::ApplyWindowLightColor()
+void ABuildingBaseActor::ApplyWindowLightState()
 {
-	FVector ColorVector(Window_Emissive_Color.R, Window_Emissive_Color.G, Window_Emissive_Color.B);
+	const UWorld* BuildingWorld = GetWorld();
+	const bool bMobileES31 = BuildingWorld
+		&& BuildingWorld->GetFeatureLevel() == ERHIFeatureLevel::ES3_1;
+	const FLinearColor WriteColor = MobileFacadeMaterialTuning::ResolveWindowEmissiveColor(
+		Window_Emissive_Color,
+		bMobileES31);
+	const float Density = bWindowLightActive ? ActiveWindowLightDensity : IdleWindowLightDensity;
 
-	if (MainMeshComponent)
+	UMeshComponent* const FacadeMeshes[] = { MainMeshComponent, Body_Module, Top_Module, Top_Empty_Module };
+	for (UMeshComponent* FacadeMesh : FacadeMeshes)
 	{
-		MainMeshComponent->SetVectorParameterValueOnMaterials(TEXT("Window_Emissive_Color"), ColorVector);
-	}
-
-	if (Body_Module)
-	{
-		Body_Module->SetVectorParameterValueOnMaterials(TEXT("Window_Emissive_Color"), ColorVector);
-	}
-
-	if (Top_Module)
-	{
-		Top_Module->SetVectorParameterValueOnMaterials(TEXT("Window_Emissive_Color"), ColorVector);
+		MobileFacadeMaterialTuning::SetWindowEmissiveColorOnMaterials(FacadeMesh, WriteColor);
+		MobileFacadeMaterialTuning::SetWindowLightDensityOnMaterials(FacadeMesh, Density);
 	}
 }
 
@@ -666,29 +564,13 @@ bool ABuildingBaseActor::bForceWindowLightsOn = false;
 
 void ABuildingBaseActor::SetWindowLightActive(bool bActive)
 {
-	// [치트] 전역 강제 점등 중이면 꺼짐 요청 무시 — 운영 여부/버블 재평가와 무관하게 항상 켠 상태 유지
+	// [치트] 전역 강제 점등 중이면 꺼짐 요청 무시 — 운영 여부/버블 재평가와 무관하게 진행중 비율 유지
 	if (bForceWindowLightsOn) { bActive = true; }
 
 	// 외부에서 ApplyLight/ApplySkin 등이 같은 머티리얼 파라미터를 건드릴 수 있으므로
 	// 캐시 가드를 두지 않고 호출 시 무조건 머티리얼을 정본 상태로 동기화
 	bWindowLightActive = bActive;
-
-	const FVector ColorVector = bActive
-		? FVector(Window_Emissive_Color.R, Window_Emissive_Color.G, Window_Emissive_Color.B)
-		: FVector::ZeroVector;
-
-	if (MainMeshComponent)
-	{
-		MainMeshComponent->SetVectorParameterValueOnMaterials(TEXT("Window_Emissive_Color"), ColorVector);
-	}
-	if (Body_Module)
-	{
-		Body_Module->SetVectorParameterValueOnMaterials(TEXT("Window_Emissive_Color"), ColorVector);
-	}
-	if (Top_Module)
-	{
-		Top_Module->SetVectorParameterValueOnMaterials(TEXT("Window_Emissive_Color"), ColorVector);
-	}
+	ApplyWindowLightState();
 }
 
 void ABuildingBaseActor::InitializeStaticMesh(const FName& name)
@@ -732,6 +614,10 @@ void ABuildingBaseActor::BuildSuccess()
 {
 	Tags.Remove("Build");
 	Tags.Add("Building");
+	if (GroundContactSMC && !bOccluderGhosted && !bIsFloating)
+	{
+		GroundContactSMC->SetVisibility(GroundContactSMC->GetStaticMesh() != nullptr);
+	}
 
 	if (EntityManager != nullptr)
 	{
@@ -746,7 +632,15 @@ void ABuildingBaseActor::BuildSuccess()
 		if (URecruitmentManagerSubsystem* RecruitmentMgr =
 			GameInstance->GetSubsystem<URecruitmentManagerSubsystem>())
 		{
-			RecruitmentMgr->ReconcilePermanentCapacityTickets(false);
+			// 튜토리얼 안내가 다음 걸음으로 건물·버튼을 짚는 순간이라 가운데 띠 대신 하단 작은 알림으로 알린다
+			const UMissionManagerSubsystem* Missions = GameInstance->GetSubsystem<UMissionManagerSubsystem>();
+			const bool bTutorialChain = Missions && Missions->HasActiveMission();
+			const int32 Granted = RecruitmentMgr->ReconcilePermanentCapacityTickets(false, !bTutorialChain);
+			if (bTutorialChain)
+			{
+				PendingFloorRecruitTicketCount += Granted;
+				ShowPendingFloorRecruitTicketNotification();
+			}
 		}
 	}
 
@@ -759,9 +653,6 @@ void ABuildingBaseActor::ConstructVisuals(const FBuildingData* BuildingData)
 {
 	if (!BuildingData)
 		return;
-
-	// 모뉴먼트 여부 캐시 — 직원 스킵/패시브 산출/UI 게이팅이 매 틱 DT 조회 없이 이 플래그 참조
-	bIsKeystoneMonument = BuildingData ? BuildingData->IsKeystone() : false;
 
 	// footprint 칸수 캐시 — 증축 비용 배수. 홀드(10Hz) 경로가 매번 DT 를 뒤지지 않게 한다.
 	CachedFootprintCells = FMath::Max(1, BuildingData->FootprintWidthCells * BuildingData->FootprintDepthCells);
@@ -780,6 +671,25 @@ void ABuildingBaseActor::ConstructVisuals(const FBuildingData* BuildingData)
 	Body_Module->SetStaticMesh(BuildingData->BodyMesh.LoadSynchronous());
 	Top_Module->SetStaticMesh(BuildingData->TopMesh.LoadSynchronous());
 	Top_Empty_Module->SetStaticMesh(BuildingData->TopEmptyMesh.LoadSynchronous());
+
+	// 표시 배수는 **메시 컴포넌트에만** 건다. 액터 스케일을 쓰면 안 된다 —
+	// Wobble 은 "Wobble Center"/"Wobble Vector" 에 월드 좌표를 넣고, 층 상승(FloatingHeight)과 카메라 프레이밍은
+	// 고정 world cm 를 쓴다. 전부 액터 스케일 1 을 전제한 코드라 루트를 스케일하면 그 연출들이 어긋난다.
+	// (문서의 "SetActorScale3D 메시 리사이즈 = 과거 의도적 제거" 경고가 이 지점이다.)
+	AppliedMeshScale = FMath::Max(0.05f, BuildingData->MeshScale);
+	{
+		const FVector MeshScaleVec(AppliedMeshScale);
+		MainMeshComponent->SetRelativeScale3D(MeshScaleVec);   // NavBlocker 는 여기 붙어 있어 같이 따라온다
+		Body_Module->SetRelativeScale3D(MeshScaleVec);         // 인스턴스 위치는 컴포넌트 공간이라 적층도 같이 줄어든다
+		Top_Module->SetRelativeScale3D(MeshScaleVec);
+		Top_Empty_Module->SetRelativeScale3D(MeshScaleVec);
+		if (BeaconISM) { BeaconISM->SetRelativeScale3D(MeshScaleVec); }
+	}
+	if (GroundContactSMC)
+	{
+		BuildingGroundContact::Configure(this, MainMeshComponent, GroundContactSMC);
+		GroundContactSMC->SetVisibility(false);
+	}
 
 	if (Material_Main)
 	{
@@ -806,19 +716,19 @@ void ABuildingBaseActor::ConstructVisuals(const FBuildingData* BuildingData)
 	Top_Module->SetCustomPrimitiveDataFloat(1, Walls_Between_Windows_Switch);
 
 	// 각 모듈의 높이 계산
-	FVector Base_Min, Base_Max;
+	FVector Base_Min(ForceInit), Base_Max(ForceInit);
 	MainMeshComponent->GetLocalBounds(Base_Min, Base_Max);
 	const float Base_Height_CM = Base_Max.Z;
 
-	FVector Body_Min, Body_Max;
+	FVector Body_Min(ForceInit), Body_Max(ForceInit);
 	Body_Module->GetLocalBounds(Body_Min, Body_Max);
 	const float Body_Height_CM = Body_Max.Z;
 
-	FVector Top_Min, Top_Max;
+	FVector Top_Min(ForceInit), Top_Max(ForceInit);
 	Top_Module->GetLocalBounds(Top_Min, Top_Max);
 	const float Top_Height_CM = Top_Max.Z;
 
-	FVector TopEmpty_Min, TopEmpty_Max;
+	FVector TopEmpty_Min(ForceInit), TopEmpty_Max(ForceInit);
 	Top_Empty_Module->GetLocalBounds(TopEmpty_Min, TopEmpty_Max);
 	const float TopEmpty_Height_CM = TopEmpty_Max.Z;
 
@@ -830,8 +740,6 @@ void ABuildingBaseActor::ConstructVisuals(const FBuildingData* BuildingData)
 	Top_Module->AddInstance(TopTransform);
 
 	UpdateRooftopBeacons();
-
-	UpdateKeystoneRing();
 }
 
 float ABuildingBaseActor::RebuildBodyModules()
@@ -841,12 +749,12 @@ float ABuildingBaseActor::RebuildBodyModules()
 	Body_Module->ClearInstances();
 
 	// Base 높이
-	FVector Base_Min, Base_Max;
+	FVector Base_Min(ForceInit), Base_Max(ForceInit);
 	MainMeshComponent->GetLocalBounds(Base_Min, Base_Max);
 	float TotalHeight = Base_Max.Z;
 
 	// Body 높이
-	FVector Body_Min, Body_Max;
+	FVector Body_Min(ForceInit), Body_Max(ForceInit);
 	Body_Module->GetLocalBounds(Body_Min, Body_Max);
 	const float Body_Height_CM = Body_Max.Z;
 
@@ -870,11 +778,12 @@ float ABuildingBaseActor::RebuildBodyModules()
 
 float ABuildingBaseActor::CalculateTopModuleHeight() const
 {
-	FVector Base_Min, Base_Max;
+	// GetLocalBounds 는 메시가 없으면 출력을 쓰지 않는다 — 미초기화면 기기마다 쓰레기 값(-inf 실측).
+	FVector Base_Min(ForceInit), Base_Max(ForceInit);
 	MainMeshComponent->GetLocalBounds(Base_Min, Base_Max);
 	float TotalHeight = Base_Max.Z;
 
-	FVector Body_Min, Body_Max;
+	FVector Body_Min(ForceInit), Body_Max(ForceInit);
 	Body_Module->GetLocalBounds(Body_Min, Body_Max);
 	const float Body_Height_CM = Body_Max.Z;
 
@@ -887,17 +796,63 @@ float ABuildingBaseActor::CalculateTopModuleHeight() const
 	return TotalHeight;
 }
 
+bool ABuildingBaseActor::TryGetOfficeFloorHeight(float& OutLocalHeightCm) const
+{
+	if (!IsValid(MainMeshComponent) || !IsValid(MainMeshComponent->GetStaticMesh())
+		|| !IsValid(Body_Module) || !IsValid(Body_Module->GetStaticMesh())
+		|| Body_Module_Copies < 0 || Body_Module_Copies == MAX_int32
+		|| !FMath::IsFinite(Floor_Height_BodyModuleScale) || Floor_Height_BodyModuleScale <= 0.f
+		|| !FMath::IsFinite(Standard_FloorHeight) || Standard_FloorHeight <= 0.f)
+	{
+		return false;
+	}
+
+	FVector BaseMin, BaseMax, BodyMin, BodyMax;
+	MainMeshComponent->GetLocalBounds(BaseMin, BaseMax);
+	Body_Module->GetLocalBounds(BodyMin, BodyMax);
+	const float BodyHeightCm = static_cast<float>(BodyMax.Z);
+	const float StandardFloorHeightCm = Standard_FloorHeight * 100.f;
+	if (BaseMin.ContainsNaN() || BaseMax.ContainsNaN() || BodyMin.ContainsNaN() || BodyMax.ContainsNaN()
+		|| BaseMax.Z < 0.0 || !FMath::IsFinite(BodyHeightCm) || BodyHeightCm <= 0.f
+		|| !FMath::IsFinite(StandardFloorHeightCm))
+	{
+		return false;
+	}
+
+	// 기존 적층과 같은 Body Max.Z를 사용하며, 짧은 모듈에서는 한 층 높이를 모듈 높이로 제한한다.
+	const float FloorHeightCm = FMath::Min(BodyHeightCm, StandardFloorHeightCm) * Floor_Height_BodyModuleScale;
+	const float TopModuleHeightCm = CalculateTopModuleHeight();
+	const float OfficeFloorHeightCm = TopModuleHeightCm - FloorHeightCm;
+	if (!FMath::IsFinite(FloorHeightCm) || FloorHeightCm <= 0.f
+		|| !FMath::IsFinite(TopModuleHeightCm) || !FMath::IsFinite(OfficeFloorHeightCm)
+		|| OfficeFloorHeightCm <= 0.f || OfficeFloorHeightCm < BaseMax.Z || OfficeFloorHeightCm >= TopModuleHeightCm)
+	{
+		return false;
+	}
+
+	OutLocalHeightCm = OfficeFloorHeightCm;
+	return true;
+}
+
 float ABuildingBaseActor::GetTotalBuildingHeight() const
 {
 	// Top Module 시작 위치 계산
 	float TopModuleStartHeight = CalculateTopModuleHeight();
 
 	// Top Module 높이 추가
-	FVector Top_Min, Top_Max;
+	FVector Top_Min(ForceInit), Top_Max(ForceInit);
 	Top_Module->GetLocalBounds(Top_Min, Top_Max);
 	float TopModuleHeight = Top_Max.Z;
 
 	return TopModuleStartHeight + TopModuleHeight;
+}
+
+float ABuildingBaseActor::GetTotalBuildingHeightWorld() const
+{
+	const FBox BuildingBounds = GetBuildingWorldBounds();
+	return BuildingBounds.IsValid
+		? FMath::Max(0.f, static_cast<float>(BuildingBounds.Max.Z - GetActorLocation().Z))
+		: 0.f;
 }
 
 FBox ABuildingBaseActor::GetRoofBounds() const
@@ -979,7 +934,7 @@ void ABuildingBaseActor::UpdateRooftopBeacons()
 	//     이름 신호가 없으므로 개수로 크기 결정(1~2개=Large, 4개=Normal).
 	if (SocketCount == 0)
 	{
-		FVector TopMin, TopMax;
+		FVector TopMin(ForceInit), TopMax(ForceInit);
 		Top_Module->GetLocalBounds(TopMin, TopMax);
 		const float RoofCenterX = (TopMin.X + TopMax.X) * 0.5f;
 		const float RoofCenterY = (TopMin.Y + TopMax.Y) * 0.5f;
@@ -1037,7 +992,7 @@ FVector ABuildingBaseActor::GetRoofAnchorPosition() const
 FVector ABuildingBaseActor::GetBubbleAnchorPosition() const
 {
 	// MainMeshComponent 로컬 바운드에서 수평 중심 계산
-	FVector BoundsMin, BoundsMax;
+	FVector BoundsMin(ForceInit), BoundsMax(ForceInit);
 	MainMeshComponent->GetLocalBounds(BoundsMin, BoundsMax);
 	FVector LocalCenter = (BoundsMin + BoundsMax) * 0.5f;
 	LocalCenter.Z = 0.0f;
@@ -1045,13 +1000,13 @@ FVector ABuildingBaseActor::GetBubbleAnchorPosition() const
 	FVector WorldCenter = MainMeshComponent->GetComponentTransform().TransformPosition(LocalCenter);
 
 	return FVector(WorldCenter.X, WorldCenter.Y,
-		GetActorLocation().Z + GetTotalBuildingHeight());
+		GetActorLocation().Z + GetTotalBuildingHeightWorld());
 }
 
 void ABuildingBaseActor::UpdateBuildingInfo(const float TotalHeight)
 {
 	// Body_Module 높이 정보
-	FVector Body_Min, Body_Max;
+	FVector Body_Min(ForceInit), Body_Max(ForceInit);
 	Body_Module->GetLocalBounds(Body_Min, Body_Max);
 	const float Body_Height_CM = Body_Max.Z;
 
@@ -1061,7 +1016,7 @@ void ABuildingBaseActor::UpdateBuildingInfo(const float TotalHeight)
 	NumberStories = FText::AsNumber(FMath::RoundToInt(FloorsPerBodyModule * (Body_Module_Copies + 1)));
 
 	// Top Module 높이 가져오기
-	FVector Top_Min, Top_Max;
+	FVector Top_Min(ForceInit), Top_Max(ForceInit);
 	Top_Module->GetLocalBounds(Top_Min, Top_Max);
 	const float Top_Height_CM = Top_Max.Z;
 
@@ -1095,6 +1050,7 @@ void ABuildingBaseActor::AddFloor(bool bShouldSave)
 
 	// Box Collision 높이도 업데이트
 	ReCalcBoxExtent();
+	ApplyMobileFacadeMaterialTuning();
 
 	// 옥상 높이 변경 → 항공장애등 재배치
 	UpdateRooftopBeacons();
@@ -1120,19 +1076,6 @@ void ABuildingBaseActor::AddFloor(bool bShouldSave)
 
 	// 새 층 밀어올림 연출 — 최상단 인스턴스만 아래에서 제자리로 (통짜 승강 아님)
 	StartNewFloorRiseAnimation();
-
-	// 모뉴먼트는 층수=레벨이므로 층 추가 시 영향권(오라) + 링 반경을 즉시 재계산
-	if (bIsKeystoneMonument)
-	{
-		if (UWorld* W = GetWorld())
-		{
-			if (UKeystoneAuraSubsystem* A = W->GetSubsystem<UKeystoneAuraSubsystem>())
-			{
-				A->RecomputeAuras();
-			}
-		}
-		UpdateKeystoneRing();
-	}
 
 	if (bShouldSave)
 	{
@@ -1173,12 +1116,13 @@ void ABuildingBaseActor::PlayPlacementLandSequence()
 
 void ABuildingBaseActor::ReCalcBoxExtent() const
 {
-	if (MainMeshComponent == nullptr || BoxComponent == nullptr)
+	// 부모 OnConstruction 은 메시 주입 전에 이 함수를 부른다 — 맞출 대상이 없으면 상자를 건드리지 않는다.
+	if (MainMeshComponent == nullptr || BoxComponent == nullptr || !MainMeshComponent->GetStaticMesh())
 	{
 		return;
 	}
 
-	FVector boundsMin, boundsMax;
+	FVector boundsMin(ForceInit), boundsMax(ForceInit);
 	MainMeshComponent->GetLocalBounds(boundsMin, boundsMax);
 
 	// X, Y는 Base Module의 bounds 기준으로 사용
@@ -1190,10 +1134,17 @@ void ABuildingBaseActor::ReCalcBoxExtent() const
 	float totalHeight = CalculateTopModuleHeight();
 
 	// Top Module 높이도 추가
-	FVector Top_Min, Top_Max;
+	FVector Top_Min(ForceInit), Top_Max(ForceInit);
 	Top_Module->GetLocalBounds(Top_Min, Top_Max);
 	const float Top_Height_CM = Top_Max.Z;
 	totalHeight += Top_Height_CM;
+	// /fp:fast 라 비교식으로는 NaN/Inf 를 못 거른다. 한 번 NaN 이 된 상자는 SetRelativeLocation 으로 복구되지 않는다.
+	if (!FMath::IsFinite(totalHeight) || !FMath::IsFinite(AppliedMeshScale))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingBaseActor] ReCalcBoxExtent skipped - non-finite height %f (%s)"),
+			totalHeight, *GetName());
+		return;
+	}
 
 	// BoxExtent.Z = totalHeight / 2 (중심에서 위/아래로 반씩)
 	float halfHeight = totalHeight * 0.5f;
@@ -1207,15 +1158,24 @@ void ABuildingBaseActor::ReCalcBoxExtent() const
 	boundsMax.Y = std::max(boundsMax.Y, 100.0);
 	boundsMax.Z = std::max(boundsMax.Z, 100.0);
 
+	// 표시 배수 반영 — 위 치수는 전부 GetLocalBounds(메시 로컬) 기준이고 BoxComponent 는 스케일되지 않은
+	// 루트에 붙어 있어서, 곱하지 않으면 클릭 볼륨이 줄어든 건물보다 커진다(빈 공간이 눌린다).
+	boundsMax *= AppliedMeshScale;
+
 	float boundGap = BoundGap * 100;
 	boundsMax += FVector(boundGap, boundGap, boundGap);
 
 	BoxComponent->SetBoxExtent(boundsMax);
 	BoxComponent->SetWorldRotation(UKismetMathLibrary::MakeRotFromX(FVector(1, 0, 0)));
 
-	// BoxComponent 중심을 건물 높이의 절반 지점으로 이동
-	FVector BoxCenter = FVector(0.f, 0.f, totalHeight * 0.5f);
+	// BoxComponent 중심을 건물 높이의 절반 지점으로 이동 (totalHeight 는 로컬 → 표시 배수 반영)
+	FVector BoxCenter = FVector(0.f, 0.f, totalHeight * 0.5f * AppliedMeshScale);
 	BoxComponent->SetRelativeLocation(BoxCenter);
+	// 공유(아키타입) 바디셋업에서 갈라진 뒤 SetBoxExtent 는 물리 모양을 옛 기본 크기로 다시 만든다 — 트레이스가 새 크기를 보게 재생성.
+	if (BoxComponent->IsPhysicsStateCreated())
+	{
+		BoxComponent->RecreatePhysicsState();
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("[BuildingBaseActor] ReCalcBoxExtent - Total Height: %.2f cm, Box Extent Z: %.2f, Box Center Z: %.2f"),
 		totalHeight, boundsMax.Z, BoxCenter.Z);
@@ -1242,6 +1202,7 @@ void ABuildingBaseActor::OnConstruction(const FTransform& Transform)
 
 	if (BuildingID.IsNone())
 	{
+		if (GroundContactSMC) { GroundContactSMC->SetVisibility(false); }
 		if (MainMeshComponent) MainMeshComponent->SetStaticMesh(nullptr);
 		if (Body_Module) Body_Module->ClearInstances();
 		if (Top_Module) Top_Module->ClearInstances();
@@ -1317,6 +1278,12 @@ void ABuildingBaseActor::OpenManagePanel(AMainMapPlayerController* MainPC)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[BuildingBaseActor] UIBase is null"));
 		return;
+	}
+
+	// 월드 조작 중 열린 공장 패널은 건물 관리 패널로 전환할 때 스택에서 정리한다.
+	if (Cast<UFactoryPanelWidget>(UIBase->GetActiveBottomWidget()))
+	{
+		UIBase->PopBottomWidget();
 	}
 
 	// 패널 push 후 대상 건물 주입. 카메라 프레이밍은 SetTargetBuilding에서
@@ -1395,37 +1362,32 @@ void ABuildingBaseActor::PlayWobble()
 
 	FVector temVec = FVector(1, 0, 0);
 
-	// Base 높이
-	FVector Base_Min, Base_Max;
-	MainMeshComponent->GetLocalBounds(Base_Min, Base_Max);
-	float TotalHeight = Base_Max.Z;
+	const float WobbleHeightWorld = CalculateTopModuleHeight() * AppliedMeshScale;
 
-	// Top Module 높이 실시간 계산
-	float CalculatedTopHeight = CalculateTopModuleHeight();
-
-	float totalBuildingHeight = CalculatedTopHeight;
-
-	MainMeshComponent->SetScalarParameterValueOnMaterials("Building Total Height", totalBuildingHeight/4);
-	Body_Module->SetScalarParameterValueOnMaterials("Building Total Height", totalBuildingHeight/4);
-	Top_Module->SetScalarParameterValueOnMaterials("Building Total Height", totalBuildingHeight/4);
+	MainMeshComponent->SetScalarParameterValueOnMaterials("Building Total Height", WobbleHeightWorld / 4.f);
+	Body_Module->SetScalarParameterValueOnMaterials("Building Total Height", WobbleHeightWorld / 4.f);
+	Top_Module->SetScalarParameterValueOnMaterials("Building Total Height", WobbleHeightWorld / 4.f);
 
 	// 진폭을 높이 비례로 주입 — 머티리얼 기본값(20) 고정이면 절대 변위가 동일해 저층 건물이 비율상 과진동
-	const float WobbleMoveLimit = FMath::Clamp(totalBuildingHeight * 0.004f, 3.f, 16.f);
+	const float WobbleMoveLimit = FMath::Clamp(WobbleHeightWorld * 0.004f, 3.f, 16.f);
 	MainMeshComponent->SetScalarParameterValueOnMaterials("Wobble Move Limit", WobbleMoveLimit);
 	Body_Module->SetScalarParameterValueOnMaterials("Wobble Move Limit", WobbleMoveLimit);
 	Top_Module->SetScalarParameterValueOnMaterials("Wobble Move Limit", WobbleMoveLimit);
 
+	// MF_Wobble은 월드 정점 Z에서 Wobble Center.Z를 빼므로 모든 모듈이 같은 액터 바닥을 기준으로 흔들린다.
+	const FVector BuildingBaseWorld = GetActorLocation();
+
 	// Base Module (MainMeshComponent)
 	MainMeshComponent->SetVectorParameterValueOnMaterials("Wobble Vector", temVec);
-	MainMeshComponent->SetVectorParameterValueOnMaterials("Wobble Center", FVector(0, 0, 0));
+	MainMeshComponent->SetVectorParameterValueOnMaterials("Wobble Center", BuildingBaseWorld);
 
 	// Body Modules
 	Body_Module->SetVectorParameterValueOnMaterials("Wobble Vector", temVec);
-	Body_Module->SetVectorParameterValueOnMaterials("Wobble Center", FVector(0, 0, TotalHeight));
+	Body_Module->SetVectorParameterValueOnMaterials("Wobble Center", BuildingBaseWorld);
 
 	// Top Module
 	Top_Module->SetVectorParameterValueOnMaterials("Wobble Vector", temVec);
-	Top_Module->SetVectorParameterValueOnMaterials("Wobble Center", FVector(0,0, CalculatedTopHeight));
+	Top_Module->SetVectorParameterValueOnMaterials("Wobble Center", BuildingBaseWorld);
 
 	// 위상 동기화: MF_Wobble이 saturate((Time - StartTime) / 2) 원샷으로 샘플 (2초 = SetPlayRate(0.5f) 게이트 길이와 일치 유지)
 	const float WobbleStartTime = GetWorld()->GetTimeSeconds();
@@ -1554,8 +1516,14 @@ void ABuildingBaseActor::ApplyLight(int32 LightID, bool bShouldSave)
 		return;
 	}
 
-	// 머티리얼에 들어갈 최종 컬러 (>1 가능 — HDR 발광)
-	const FLinearColor FinalEmissive = LightData.EmissiveColor * LightData.EmissiveIntensity;
+	// DT 컬러와 강도를 결합한 원본은 캐시에 그대로 보존하고 MID write 직전에만 모바일 배율을 적용한다.
+	const FLinearColor SourceEmissive = LightData.EmissiveColor * LightData.EmissiveIntensity;
+	const UWorld* BuildingWorld = GetWorld();
+	const bool bMobileES31 = BuildingWorld
+		&& BuildingWorld->GetFeatureLevel() == ERHIFeatureLevel::ES3_1;
+	const FLinearColor ResolvedEmissive = MobileFacadeMaterialTuning::ResolveWindowEmissiveColor(
+		SourceEmissive,
+		bMobileES31);
 	static const FName EmissiveParamName(TEXT("Window_Emissive_Color"));
 
 	auto ApplyToComponent = [&](UMeshComponent* Comp)
@@ -1576,7 +1544,7 @@ void ABuildingBaseActor::ApplyLight(int32 LightID, bool bShouldSave)
 		}
 		if (MID)
 		{
-			MID->SetVectorParameterValue(EmissiveParamName, FinalEmissive);
+			MID->SetVectorParameterValue(EmissiveParamName, ResolvedEmissive);
 		}
 	};
 
@@ -1587,7 +1555,7 @@ void ABuildingBaseActor::ApplyLight(int32 LightID, bool bShouldSave)
 
 	AppliedLightID = LightID;
 	// SetWindowLightActive 가 1초 주기로 이 멤버를 정본 삼아 재적용하므로, 적용색을 캐시하지 않으면 초기 랜덤색(흰색 계열)으로 되돌아감
-	Window_Emissive_Color = FinalEmissive;
+	Window_Emissive_Color = SourceEmissive;
 
 	UE_LOG(LogTemp, Log, TEXT("[ApplyLight] Successfully applied light ID %d (RGB %.2f,%.2f,%.2f x %.2f)"),
 		LightID, LightData.EmissiveColor.R, LightData.EmissiveColor.G, LightData.EmissiveColor.B, LightData.EmissiveIntensity);
@@ -1614,11 +1582,17 @@ void ABuildingBaseActor::PlayBuildCompleteVFX(float SpawnHeight)
 		return;
 	}
 
+	UStaticMeshComponent* VFXMesh = SpawnHeight > 0.0f ? Body_Module : MainMeshComponent;
+	if (!VFXMesh || !VFXMesh->GetStaticMesh())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingBaseActor] Build VFX requires a visual mesh"));
+		return;
+	}
+
 	UE_LOG(LogTemp, Warning, TEXT("[BuildingBaseActor] BuildCompleteVFX is valid, proceeding..."));
 
 	// BoxComponent의 바운드 사용 (ReCalcBoxExtent에서 이미 계산됨)
 	FVector BoxExtent = BoxComponent->GetScaledBoxExtent();
-	FVector BoxWorldLocation = BoxComponent->GetComponentLocation();
 
 	// X, Y 평균 크기 (m 단위)
 	float AvgSizeX = BoxExtent.X / 100.0f;  // cm → m
@@ -1628,28 +1602,24 @@ void ABuildingBaseActor::PlayBuildCompleteVFX(float SpawnHeight)
 	// VFX Scale: 10x10m 건물 기준 Scale 5 (비율 0.5)
 	float VFXScale = FMath::Max(AvgSize * 0.5f, 2.5f);
 
-	// VFX 위치 계산
-	FVector BuildingLocation = GetActorLocation();
-
-	// BoxComponent는 건물 중간에 위치하므로, 바닥은 Box중심 - BoxExtent.Z
-	// SpawnHeight = 0: 건물 바닥 (완공 시)
-	// SpawnHeight = finalHeight: 새로 추가된 층 아래 (업그레이드 시)
-	float BuildingBottomZ = BoxWorldLocation.Z - BoxExtent.Z;
-	FVector VFXLocation = FVector(
-		BuildingLocation.X,
-		BuildingLocation.Y,
-		BuildingBottomZ + SpawnHeight
-	);
+	// 증축은 Body 이음새, 완공은 Base 바닥의 실제 중심을 사용한다.
+	// 클릭 박스의 여유 폭/반올림과 독립적으로 메시·액터 변환을 함께 반영한다.
+	FVector MeshMin, MeshMax;
+	VFXMesh->GetLocalBounds(MeshMin, MeshMax);
+	FVector LocalVFXLocation = (MeshMin + MeshMax) * 0.5f;
+	LocalVFXLocation.Z = SpawnHeight > 0.0f ? SpawnHeight : MeshMin.Z;
+	const FTransform& MeshTransform = VFXMesh->GetComponentTransform();
+	const FVector VFXLocation = MeshTransform.TransformPosition(LocalVFXLocation);
 
 	// VFX 스폰
 	UNiagaraComponent* SpawnedVFX = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 		GetWorld(),
 		BuildCompleteVFX,
 		VFXLocation,
-		FRotator::ZeroRotator,
+		MeshTransform.Rotator(),
 		FVector(VFXScale),
 		true,  // Auto Destroy
-		true,  // Auto Activate
+		false, // 사용자 파라미터를 설정한 뒤 첫 버스트를 시작한다.
 		ENCPoolMethod::None,
 		true
 	);
@@ -1664,6 +1634,7 @@ void ABuildingBaseActor::PlayBuildCompleteVFX(float SpawnHeight)
 
 		// VFX 크기
 		SpawnedVFX->SetFloatParameter(FName("Scale"), VFXScale);
+		SpawnedVFX->Activate(true);
 
 		UE_LOG(LogTemp, Warning, TEXT("[BuildingBaseActor] Build VFX - SpawnHeight: %.2f, BoxExtent: %s, Scale: %.2f, Location: %s"),
 			SpawnHeight, *BoxExtent.ToString(), VFXScale, *VFXLocation.ToString());
@@ -1733,9 +1704,9 @@ bool ABuildingBaseActor::UpgradeEnhancement(EBuildingEnhancementType Enhancement
 	}
 	const int64 NewLevel = static_cast<int64>(CurrentLevel) + static_cast<int64>(Count);
 
-	// 업그레이드 비용 계산 — 칸수는 패널 표시와 같은 출처(GetFootprintCells)를 쓴다
+	// 업그레이드 비용 계산 — 기본 건설비는 패널 표시와 같은 출처(GetBaseBuildCostBricks)를 쓴다
 	const int64 TotalCost = UBuildingEnhancementHelper::CalculateBulkUpgradeCost(
-		EnhancementType, CurrentLevel, Count, GetFootprintCells());
+		EnhancementType, CurrentLevel, Count, GetBaseBuildCostBricks());
 
 	// 보유 자금 확인 및 차감
 	UResourceItemManager* ResourceMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>();
@@ -1778,7 +1749,11 @@ bool ABuildingBaseActor::UpgradeEnhancement(EBuildingEnhancementType Enhancement
 		if (URecruitmentManagerSubsystem* RecruitmentMgr =
 			GetGameInstance()->GetSubsystem<URecruitmentManagerSubsystem>())
 		{
-			RecruitmentMgr->ReconcilePermanentCapacityTickets(false);
+			PendingFloorRecruitTicketCount += RecruitmentMgr->ReconcilePermanentCapacityTickets(false, false);
+			if (!GetWorldTimerManager().IsTimerActive(NewFloorRiseTimerHandle))
+			{
+				ShowPendingFloorRecruitTicketNotification();
+			}
 		}
 	}
 	else
@@ -1787,24 +1762,20 @@ bool ABuildingBaseActor::UpgradeEnhancement(EBuildingEnhancementType Enhancement
 		StoredLevel = static_cast<int32>(NewLevel);
 		UE_LOG(LogTemp, Log, TEXT("[BuildingBaseActor] Enhancement %d upgraded to Lv.%d"),
 			static_cast<int32>(EnhancementType), StoredLevel);
-
-		// 영향력(KeystoneAuraPower)은 버프 %를 키우므로 모뉴먼트면 오라 캐시를 즉시 재계산 (층수 경로는 AddFloor가 처리)
-		if (bIsKeystoneMonument && EnhancementType == EBuildingEnhancementType::KeystoneAuraPower)
-		{
-			if (UWorld* W = GetWorld())
-			{
-				if (UKeystoneAuraSubsystem* A = W->GetSubsystem<UKeystoneAuraSubsystem>())
-				{
-					A->RecomputeAuras();
-				}
-			}
-		}
 	}
 
 	// 지연 저장 — 강화는 클릭/홀드(10Hz) 고빈도 경로라 동기 전체 세이브를 매번 돌리면 프레임 히칭
 	if (USaveLoadManager* SaveLoadMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
 	{
 		SaveLoadMgr->RequestDeferredSave();
+	}
+
+	if (EnhancementType != EBuildingEnhancementType::BuildingFloor)
+	{
+		if (UMissionManagerSubsystem* Missions = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
+		{
+			Missions->NotifyBuildingStatUpgraded(Count);
+		}
 	}
 
 	return true;
@@ -1816,10 +1787,10 @@ bool ABuildingBaseActor::IsEnhancementPurchaseAllowed(EBuildingEnhancementType E
 	const UMissionManagerSubsystem* MissionMgr = GameInstance
 		? GameInstance->GetSubsystem<UMissionManagerSubsystem>()
 		: nullptr;
-	const bool bTutorialComplete = MissionMgr && MissionMgr->IsTutorialCompleted();
+	const bool bCompanyEnhancementUnlocked = MissionMgr && MissionMgr->IsCompanyEnhancementUnlocked();
 
 	bool bUnlockedByTier = false;
-	if (GameInstance && EnhancementType != EBuildingEnhancementType::KeystoneAuraPower)
+	if (GameInstance)
 	{
 		USaveLoadManager* SaveMgr = GameInstance->GetSubsystem<USaveLoadManager>();
 		const UTableManagerSubsystem* TableMgr = GameInstance->GetSubsystem<UTableManagerSubsystem>();
@@ -1831,10 +1802,9 @@ bool ABuildingBaseActor::IsEnhancementPurchaseAllowed(EBuildingEnhancementType E
 	}
 
 	return FTutorialEnhancementGateRules::IsPurchaseAllowed(
-		bTutorialComplete,
+		bCompanyEnhancementUnlocked,
 		EnhancementType,
-		bUnlockedByTier,
-		bIsKeystoneMonument);
+		bUnlockedByTier);
 }
 
 int32 ABuildingBaseActor::GetEnhancementLevel(EBuildingEnhancementType EnhancementType) const
@@ -1883,16 +1853,37 @@ int32 ABuildingBaseActor::GetFootprintCells() const
 	return 1;
 }
 
+int64 ABuildingBaseActor::GetBaseBuildCostBricks() const
+{
+	const UGameInstance* GameInstance = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	FBuildableCardTable CardInfo;
+	if (TableMgr && !BuildingID.IsNone() && TableMgr->GetBuildableInfo(BuildingID, CardInfo))
+	{
+		for (const FConstructionCost& Cost : CardInfo.ConstructionCosts)
+		{
+			if (Cost.ResourceType == EResourceType::Brick && Cost.Cost > 0)
+			{
+				return Cost.Cost;
+			}
+		}
+	}
+
+	// 가격은 싸지는 쪽으로 조용히 실패하면 안 된다 — 로그를 남기고 최저 배수로 계산한다
+	UE_LOG(LogTemp, Warning, TEXT("[BuildingBaseActor] 기본 건설비(벽돌) 미해결 (ID=%s) — 증축 비용을 배수 1로 계산한다"), *BuildingID.ToString());
+	return 1;
+}
+
 int64 ABuildingBaseActor::GetUpgradeCost(EBuildingEnhancementType EnhancementType) const
 {
 	const int32 CurrentLevel = GetEnhancementLevel(EnhancementType);
-	return UBuildingEnhancementHelper::CalculateUpgradeCost(EnhancementType, CurrentLevel, GetFootprintCells());
+	return UBuildingEnhancementHelper::CalculateUpgradeCost(EnhancementType, CurrentLevel, GetBaseBuildCostBricks());
 }
 
 int64 ABuildingBaseActor::GetBulkUpgradeCost(EBuildingEnhancementType EnhancementType, int32 Count) const
 {
 	const int32 CurrentLevel = GetEnhancementLevel(EnhancementType);
-	return UBuildingEnhancementHelper::CalculateBulkUpgradeCost(EnhancementType, CurrentLevel, Count, GetFootprintCells());
+	return UBuildingEnhancementHelper::CalculateBulkUpgradeCost(EnhancementType, CurrentLevel, Count, GetBaseBuildCostBricks());
 }
 
 float ABuildingBaseActor::GetVaultCapacity() const
@@ -1917,8 +1908,12 @@ void ABuildingBaseActor::StartFloating(float Height, bool bImmediate)
 		return;
 	}
 
+	// 호출부는 고정 500cm 를 넘긴다 — 표시 배수를 곱해 줄어든 건물에서도 들어올림이 같은 비율로 보이게 한다.
+	Height *= AppliedMeshScale;
+
 	bIsFloating = true;
 	bFloatingUp = true;
+	if (GroundContactSMC) { GroundContactSMC->SetVisibility(false); }
 	FloatingHeight = Height;
 	OriginalZ = GetActorLocation().Z;
 
@@ -2014,6 +2009,12 @@ void ABuildingBaseActor::UpdateFloatingAnimation()
 		bIsFloating = false;
 		GetWorldTimerManager().ClearTimer(FloatingTimerHandle);
 		SetActorLocation(FVector(CurrentLocation.X, CurrentLocation.Y, OriginalZ));
+		if (GroundContactSMC)
+		{
+			BuildingGroundContact::Configure(this, MainMeshComponent, GroundContactSMC);
+			GroundContactSMC->SetVisibility(!bOccluderGhosted && !Tags.Contains("Build")
+				&& GroundContactSMC->GetStaticMesh() != nullptr);
+		}
 
 		// 착지 VFX 재생
 		if (bShouldPlayLandVFX)
@@ -2026,8 +2027,10 @@ void ABuildingBaseActor::UpdateFloatingAnimation()
 
 void ABuildingBaseActor::StartNewFloorRiseAnimation()
 {
+	GetWorldTimerManager().ClearTimer(NewFloorRiseTimerHandle);
 	if (!Body_Module || USettingsManagerSubsystem::IsReduceMotion(this))
 	{
+		NewFloorRiseInstanceIndex = INDEX_NONE;
 		return;
 	}
 
@@ -2041,6 +2044,7 @@ void ABuildingBaseActor::StartNewFloorRiseAnimation()
 			L.Z = NewFloorRiseFinalZ;
 			Prev.SetLocation(L);
 			Body_Module->UpdateInstanceTransform(NewFloorRiseInstanceIndex, Prev, false, true, true);
+			CGInstancedMesh::RewriteAllInstances(Body_Module);
 		}
 	}
 
@@ -2057,7 +2061,7 @@ void ABuildingBaseActor::StartNewFloorRiseAnimation()
 	NewFloorRiseFinalZ = TopTransform.GetLocation().Z;
 
 	// 낙차 = 한 층 높이 (밀려 올라오는 티가 나되 과하지 않게)
-	FVector Body_Min, Body_Max;
+	FVector Body_Min(ForceInit), Body_Max(ForceInit);
 	Body_Module->GetLocalBounds(Body_Min, Body_Max);
 	NewFloorRiseDrop = FMath::Max(Body_Max.Z * Floor_Height_BodyModuleScale, 50.0f);
 
@@ -2066,6 +2070,8 @@ void ABuildingBaseActor::StartNewFloorRiseAnimation()
 	StartLoc.Z = NewFloorRiseFinalZ - NewFloorRiseDrop;
 	TopTransform.SetLocation(StartLoc);
 	Body_Module->UpdateInstanceTransform(TopIndex, TopTransform, false, true, true);
+	// 재추가 직후의 개별 갱신은 모바일(GPUScene 꺼짐)에서 엉뚱한 층을 옮긴다 — 같은 데이터로 다시 넣어 렌더 대응을 새로 만든다.
+	CGInstancedMesh::RewriteAllInstances(Body_Module);
 
 	NewFloorRiseElapsed = 0.0f;
 	GetWorldTimerManager().SetTimer(NewFloorRiseTimerHandle, this,
@@ -2079,6 +2085,8 @@ void ABuildingBaseActor::UpdateNewFloorRiseAnimation()
 	if (!Body_Module || NewFloorRiseInstanceIndex == INDEX_NONE)
 	{
 		GetWorldTimerManager().ClearTimer(NewFloorRiseTimerHandle);
+		NewFloorRiseInstanceIndex = INDEX_NONE;
+		ShowPendingFloorRecruitTicketNotification();
 		return;
 	}
 
@@ -2094,6 +2102,7 @@ void ABuildingBaseActor::UpdateNewFloorRiseAnimation()
 		L.Z = (NewFloorRiseFinalZ - NewFloorRiseDrop) + (NewFloorRiseDrop * Eased);
 		Xf.SetLocation(L);
 		Body_Module->UpdateInstanceTransform(NewFloorRiseInstanceIndex, Xf, false, true, true);
+		CGInstancedMesh::RewriteAllInstances(Body_Module);
 	}
 
 	if (T >= 1.0f)
@@ -2105,8 +2114,39 @@ void ABuildingBaseActor::UpdateNewFloorRiseAnimation()
 			L.Z = NewFloorRiseFinalZ;
 			Xf.SetLocation(L);
 			Body_Module->UpdateInstanceTransform(NewFloorRiseInstanceIndex, Xf, false, true, true);
+			CGInstancedMesh::RewriteAllInstances(Body_Module);
 		}
 		NewFloorRiseInstanceIndex = INDEX_NONE;
 		GetWorldTimerManager().ClearTimer(NewFloorRiseTimerHandle);
+		ShowPendingFloorRecruitTicketNotification();
 	}
+}
+
+void ABuildingBaseActor::ShowPendingFloorRecruitTicketNotification()
+{
+	const int32 GrantedCount = PendingFloorRecruitTicketCount;
+	PendingFloorRecruitTicketCount = 0;
+	if (GrantedCount <= 0)
+	{
+		return;
+	}
+
+	UGameInstance* GameInstance = GetGameInstance();
+	UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	UUIManagerSubsystem* UIMgr = GameInstance ? GameInstance->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+	if (!TableMgr || !UIMgr)
+	{
+		return;
+	}
+
+	FShopItemTable ItemRow;
+	if (!TableMgr->GetShopItemByItemType(EItemType::RecruitTicketNormal, ItemRow) || ItemRow.DisplayName.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingBaseActor] RecruitTicketNormal display name is missing from DT_ShopItem"));
+		return;
+	}
+
+	UIMgr->ShowBottomNotification(FText::Format(
+		NSLOCTEXT("RecruitCapacity", "FloorGrantNotification", "{0} +{1}"),
+		ItemRow.DisplayName, FText::AsNumber(GrantedCount)));
 }

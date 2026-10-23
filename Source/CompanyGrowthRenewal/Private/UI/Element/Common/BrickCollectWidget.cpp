@@ -4,12 +4,8 @@
 #include "UI/Element/Common/BrickCollectWidget.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Manager/ResourceItemManager.h"
-#include "Manager/SaveLoadManager.h"
-#include "Manager/SoundManagerSubsystem.h"
 #include "Manager/UIManagerSubsystem.h"
-#include "UI/Element/Common/ResourceWidget.h"
 #include "UI/Panel/InGameLayerWidget.h"
-#include "UI/UISoundTags.h"
 #include "Utils/FWidgetAnimationUtils.h"
 
 void UBrickCollectWidget::InitCollect(const FVector2D& InStartPos, const FVector2D& InTargetPos, UCanvasPanelSlot* InSlot, int32 InCollectAmount, float InBurstDelayExtra, bool bInIsLastOfBatch, int32 InBatchTotal, float InLandSoundVolume)
@@ -27,6 +23,8 @@ void UBrickCollectWidget::InitCollect(const FVector2D& InStartPos, const FVector
     const float ConeRad = FMath::DegreesToRadians(FMath::FRandRange(-BurstConeHalfAngleDeg, BurstConeHalfAngleDeg));
     const float Speed = FMath::FRandRange(BurstSpeedMin, BurstSpeedMax);
     Velocity = FVector2D(FMath::Sin(ConeRad), -FMath::Cos(ConeRad)) * Speed;
+    BurstStartPos = Pos;
+    BurstStartVelocity = Velocity;
 
     CurrentAngle = FMath::FRandRange(-InitialAngleJitterDeg, InitialAngleJitterDeg);
     SpinSpeed = FMath::FRandRange(-SpinSpeedMaxDeg, SpinSpeedMaxDeg);
@@ -47,30 +45,36 @@ void UBrickCollectWidget::NativeTick(const FGeometry& MyGeometry, float DeltaSec
     if (!CanvasSlot)
         return;
 
-    ElapsedTime += DeltaSeconds;
+    ElapsedTime += FMath::Max(0.f, DeltaSeconds);
 
     CurrentAngle += SpinSpeed * DeltaSeconds;
     SetRenderTransformAngle(CurrentAngle);
 
     if (Phase == ECollectPhase::Burst)
     {
-        // 스크린 Y-down 이라 +Gravity = 낙하
-        Velocity.Y += Gravity * DeltaSeconds;
-        Pos += Velocity * DeltaSeconds;
+        const float BurstEndTime = FMath::Max(0.01f, BurstDuration + FMath::Max(0.f, BurstDelayExtra));
+        const float BurstAge = FMath::Min(ElapsedTime, BurstEndTime);
+        // 스크린 Y-down 이라 +Gravity = 낙하. 시작 상태와 경과 시간으로 계산해 프레임 간격에 흔들리지 않는다.
+        Pos = BurstStartPos + BurstStartVelocity * BurstAge
+            + FVector2D(0.f, 0.5f * Gravity * BurstAge * BurstAge);
+        Velocity = BurstStartVelocity + FVector2D(0.f, Gravity * BurstAge);
         CanvasSlot->SetPosition(Pos);
 
-        const float PopAlpha = FMath::Clamp(ElapsedTime / SpawnPopDuration, 0.f, 1.f);
+        const float PopAlpha = FMath::Clamp(BurstAge / FMath::Max(SpawnPopDuration, 0.01f), 0.f, 1.f);
         const float PopScale = FMath::Lerp(SpawnStartScale, 1.f, FWidgetAnimationUtils::EaseOutBack(PopAlpha));
         SetRenderScale(FVector2D(PopScale, PopScale));
 
-        if (ElapsedTime >= BurstDuration + BurstDelayExtra)
+        if (ElapsedTime < BurstEndTime)
         {
-            BeginHoming();
+            return;
         }
-        return;
+
+        const float OverflowTime = ElapsedTime - BurstEndTime;
+        BeginHoming();
+        ElapsedTime = OverflowTime;
     }
 
-    const float RawAlpha = FMath::Clamp(ElapsedTime / HomingDuration, 0.f, 1.f);
+    const float RawAlpha = FMath::Clamp(ElapsedTime / FMath::Max(HomingDuration, 0.01f), 0.f, 1.f);
     const float Eased = FMath::Pow(RawAlpha, HomingEaseExp);
 
     const FVector2D A = FMath::Lerp(HomingStart, HomingControl, Eased);
@@ -106,41 +110,21 @@ void UBrickCollectWidget::BeginHoming()
 
 void UBrickCollectWidget::FinishCollect()
 {
-    // 벽돌 N개 연출이면 착지가 N번이라 즉시 저장 금지, 지연 저장 1회로
-    if (UResourceItemManager* RMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>())
-    {
-        RMgr->StoreResource(EResourceType::Brick, CollectAmount, /*bShouldSave=*/false);
-    }
-    if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
-    {
-        SaveMgr->RequestDeferredSave();
-    }
-
     if (UGameInstance* GI = GetGameInstance())
     {
+        if (UResourceItemManager* RMgr = GI->GetSubsystem<UResourceItemManager>())
+        {
+            RMgr->CollectFactoryBricks(CollectAmount);
+        }
         if (UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>())
         {
             if (UInGameLayerWidget* InGame = UIMgr->GetInGameLayer())
             {
-                if (UResourceWidget* BrickCounter = InGame->GetResourceWidget(EResourceType::Brick))
-                {
-                    BrickCounter->PlayBump();
-                }
-
                 // "+N" 팝업은 배치 합계로 마지막 도착 시 1회 (아이콘별 스팸 금지)
                 if (bIsLastOfBatch)
                 {
-                    InGame->SpawnGainPopup(EResourceType::Brick, BatchTotal);
+                    InGame->PlayBrickCollectionFeedback(BatchTotal, LandSoundVolume);
                 }
-            }
-        }
-        // 착지음도 배치당 1발 — 아이콘마다 울리면 생산틱 1회에 최대 7발이 겹친다.
-        // 볼륨 = 배치 간 감쇠(x0.7, 하한 0.35, 0.8s 리셋 — InGameLayerWidget 공유 상태), 피치 ±6% 랜덤으로 기계적 반복감 제거
-        if (bIsLastOfBatch)
-        {
-            if (USoundManagerSubsystem* SM = GI->GetSubsystem<USoundManagerSubsystem>())
-            {
-                SM->PlayUISoundWithParams(CGUISoundTags::RewardBrick, LandSoundVolume, FMath::FRandRange(0.94f, 1.06f));
             }
         }
     }

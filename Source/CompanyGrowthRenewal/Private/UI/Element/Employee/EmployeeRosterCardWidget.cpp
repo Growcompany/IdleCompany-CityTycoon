@@ -1,9 +1,11 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Element/Employee/EmployeeRosterCardWidget.h"
+#include "Global/CGDevSettings.h"
 #include "Data/EntityCardData.h"
 #include "Data/EmployeeStatsData.h"
 #include "Enum/LootBoxRarity.h"
+#include "UI/Element/Employee/EmployeeRarityDisplay.h"
 #include "Components/Image.h"
 #include "Components/Border.h"
 #include "CommonTextBlock.h"
@@ -13,6 +15,22 @@
 #include "IImageWrapperModule.h"
 #include "Misc/FileHelper.h"
 #include "ImageUtils.h"
+#include "Global/GlobalUtilFunctions.h"
+
+namespace
+{
+	// 빈자리와 직원이 같은 다크 타일 판을 공유한다 — 판 위의 직원 전용 레이어는 이름으로 걷어야 비침이 없다
+	const TCHAR* const RosterEmployeeOnlyLayers[] = {
+		TEXT("NameBand"), TEXT("LvBadgeBox"), TEXT("StageGlow"), TEXT("StarsChip"), TEXT("DiscChip") };
+	// 아래 SetEmployeeInfo 가 따로 가시성을 정하지 않는 것만 되살린다.
+	constexpr int32 RosterRestoreLayerCount = 3;
+
+	// 빈자리 브리딩 — 타일을 키우면 엔트리 셀을 넘으므로 링/＋ 의 불투명도만 움직인다
+	constexpr float HirePulsePeriodSeconds = 1.2f;
+	// ㉔ 펄스 골에서 잉크가 배경과 섞여 대비비가 3.26 까지 내려갔다(0.57×잉크 + 0.43×타일면).
+	// 저작 잉크(#A7B1BE)는 정확한데 레이어 불투명도가 계약을 무력화한 것 — 골을 0.82 로 올려 골에서도 CR 4.5 를 넘긴다.
+	constexpr float HirePulseFloorOpacity = 0.82f;
+}
 
 void UEmployeeRosterCardWidget::NativeConstruct()
 {
@@ -30,13 +48,59 @@ void UEmployeeRosterCardWidget::NativeDestruct()
 
 void UEmployeeRosterCardWidget::NativeOnListItemObjectSet(UObject* ListItemObject)
 {
+	// 이 구간의 선택 복원은 목록 재구성일 뿐 사용자의 선택이 아니다 — 펀치를 막는다
+	bApplyingListItem = true;
+
 	if (UEntityCardData* CardData = Cast<UEntityCardData>(ListItemObject))
 	{
-		SetEmployeeInfo(CardData->EmployeeInfo);
+		if (CardData->bIsHireSlot)
+		{
+			SetHireSlot();
+		}
+		else
+		{
+			bHireSlot = false;
+			bHirePulse = false;   // 재활용 엔트리가 앞 빈자리의 펄스를 물고 오지 않도록
+			PulseElapsed = 0.f;
+			if (HireLayer)
+			{
+				HireLayer->SetVisibility(ESlateVisibility::Collapsed);
+			}
+			SetEmployeeInfo(CardData->EmployeeInfo);
+		}
 	}
 
 	// 재활용 엔트리는 OnItemSelectionChanged 를 못 받을 수 있어 선택 상태를 직접 재질의
 	SetSelectedVisual(IsListItemSelected());
+
+	bApplyingListItem = false;
+}
+
+void UEmployeeRosterCardWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+
+	if (SelectPunch.IsPlaying())
+	{
+		SetRenderScale(FVector2D(SelectPunch.Tick(InDeltaTime)));
+		bRenderScaleDirty = true;
+		return;
+	}
+
+	if (bRenderScaleDirty)
+	{
+		SetRenderScale(FVector2D::UnitVector);
+		bRenderScaleDirty = false;
+	}
+
+	if (bHireSlot && bHirePulse && HireLayer)
+	{
+		// 스케일 펄스는 141 타일을 엔트리 셀 밖으로 밀어 TileView 클립에 잘렸다 — 크기 대신 불투명도로 호흡한다.
+		// 올린 코사인이 곧 EaseInOut 곡선이라 별도 이징을 겹치지 않는다 (1.2s 주기, 0.82 ~ 1.0)
+		PulseElapsed += InDeltaTime;
+		const float Phase = 0.5f * (1.f - FMath::Cos(2.f * PI * PulseElapsed / HirePulsePeriodSeconds));
+		HireLayer->SetRenderOpacity(FMath::Lerp(HirePulseFloorOpacity, 1.f, Phase));
+	}
 }
 
 void UEmployeeRosterCardWidget::NativeOnItemSelectionChanged(bool bIsSelected)
@@ -44,21 +108,91 @@ void UEmployeeRosterCardWidget::NativeOnItemSelectionChanged(bool bIsSelected)
 	SetSelectedVisual(bIsSelected);
 }
 
+void UEmployeeRosterCardWidget::SetHireSlot(bool bAffordable)
+{
+	bHireSlot = true;
+	if (bHirePulse != bAffordable)
+	{
+		PulseElapsed = 0.f;   // 재화가 생긴 순간 호흡을 처음부터 (중간 위상에서 튀어나오지 않게)
+		bHirePulse = bAffordable;
+	}
+	EmployeeData = FEmployeeInstance();
+
+	// 직원 레이어 전부 숨기고 빈자리 레이어만 — 재활용 엔트리가 앞 직원의 칩/글린트를 남기지 않도록
+	UWidget* EmployeeLayers[] = { PortraitImage, PortraitFallback, NameText, LevelText, RarityGem, StarsText, OverallText, PotentialGlint };
+	for (UWidget* Layer : EmployeeLayers)
+	{
+		if (Layer)
+		{
+			Layer->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+	for (const TCHAR* LayerName : RosterEmployeeOnlyLayers)
+	{
+		if (UWidget* Layer = GetWidgetFromName(LayerName))
+		{
+			Layer->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+
+	if (HireLayer)
+	{
+		HireLayer->SetVisibility(ESlateVisibility::HitTestInvisible);
+		// 펄스가 꺼진 채로 재활용되면 앞 타일의 호흡 중간값(투명한 ＋)이 그대로 남는다
+		HireLayer->SetRenderOpacity(1.f);
+	}
+}
+
 void UEmployeeRosterCardWidget::SetEmployeeInfo(const FEmployeeInstance& InEmployeeData)
 {
 	EmployeeData = InEmployeeData;
 
+	// SetHireSlot 이 걷은 레이어 중 아래에서 가시성을 다시 지정하지 않는 것만 복원 (재활용 엔트리 대비)
+	if (NameText)
+	{
+		NameText->SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
+	if (LevelText)
+	{
+		LevelText->SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
+	const bool bHasEnhancement = EmployeeData.EnhancementLevel > 0;
+	if (StarsText)
+	{
+		StarsText->SetText(bHasEnhancement
+			? FText::FromString(FString::Printf(TEXT("%d"), EmployeeData.EnhancementLevel)) : FText::GetEmpty());
+		StarsText->SetVisibility(bHasEnhancement ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (UWidget* StarsChip = GetWidgetFromName(TEXT("StarsChip")))
+	{
+		StarsChip->SetVisibility(bHasEnhancement ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	for (int32 LayerIndex = 0; LayerIndex < RosterRestoreLayerCount; ++LayerIndex)
+	{
+		if (UWidget* Layer = GetWidgetFromName(RosterEmployeeOnlyLayers[LayerIndex]))
+		{
+			Layer->SetVisibility(ESlateVisibility::HitTestInvisible);
+		}
+	}
+
+	// 초상은 런타임 캡처라 아직 없을 수 있다 — 그때 빈 판만 두면 슬롯이 고장난 것처럼 보인다
+	bool bHasPortrait = false;
 	if (PortraitImage)
 	{
 		if (UTexture2D* Portrait = LoadPortraitTexture(EmployeeData.EmployeeID, PortraitDisplaySize))
 		{
-			PortraitImage->SetBrushFromTexture(Portrait);
+			PortraitImage->SetBrushFromTexture(Portrait, true);
 			PortraitImage->SetVisibility(ESlateVisibility::Visible);
+			bHasPortrait = true;
 		}
 		else
 		{
 			PortraitImage->SetVisibility(ESlateVisibility::Hidden);
 		}
+	}
+	if (PortraitFallback)
+	{
+		PortraitFallback->SetVisibility(bHasPortrait ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
 	}
 
 	if (NameText)
@@ -68,41 +202,23 @@ void UEmployeeRosterCardWidget::SetEmployeeInfo(const FEmployeeInstance& InEmplo
 
 	if (LevelText)
 	{
-		// 다이아 뱃지 안 숫자만 (다이아 = 레벨 기호, "Lv." 라벨 폐기 — v8x)
-		LevelText->SetText(FText::AsNumber(EmployeeData.Level));
+		// 강화 수치와 구분하도록 레벨 접두사를 유지한다.
+		LevelText->SetText(FText::FromString(FString::Printf(TEXT("Lv%d"), EmployeeData.Level)));
 	}
 
-	if (StarsText)
-	{
-		// FC 강화 표기 "+N" (별 글리프 대신 — 2026-07-24 사용자 확정, 카드 한정) — 0강이면 칩째 숨김
-		const int32 Enh = EmployeeData.EnhancementLevel;
-		StarsText->SetText(FText::FromString(FString::Printf(TEXT("+%d"), Enh)));
-		UWidget* ChipOrText = GetWidgetFromName(TEXT("StarsChip"));
-		if (!ChipOrText) { ChipOrText = StarsText; }
-		ChipOrText->SetVisibility(Enh > 0 ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
-
-		// 강화 등급색 — 1~5 회색 / 6~10 은색 / 11+ 금색 (표시값=sRGB → linear 변환)
-		auto S2L = [](float c) { return FMath::Pow((c + 0.055f) / 1.055f, 2.4f); };
-		auto Metal = [&](float r, float g, float b) { return FLinearColor(S2L(r), S2L(g), S2L(b), 1.f); };
-		FLinearColor TxtCol, OutCol;
-		if (Enh >= 11)     { TxtCol = Metal(0.878f, 0.627f, 0.125f); OutCol = Metal(0.541f, 0.353f, 0.078f); }
-		else if (Enh >= 6) { TxtCol = Metal(0.831f, 0.867f, 0.902f); OutCol = Metal(0.420f, 0.470f, 0.530f); }
-		else               { TxtCol = Metal(0.660f, 0.700f, 0.760f); OutCol = Metal(0.300f, 0.340f, 0.400f); }
-		StarsText->SetColorAndOpacity(FSlateColor(TxtCol));
-		if (UBorder* Chip = Cast<UBorder>(ChipOrText))
-		{
-			FSlateBrush B = Chip->Background;
-			B.OutlineSettings.Color = FSlateColor(OutCol);
-			Chip->SetBrush(B);
-		}
-	}
-
-	// 등급 이음새 라인 — 원색은 형광으로 떠서 x0.62 다크 파생 (시뮬 실측)
+	// 등급 = 타일을 두르는 2px 프레임(구 상단 밴드). 위젯 이름은 유지한다 — 주입 경로가 여기 하나뿐이라
+	// 이름을 바꾸면 저작과 조용히 갈린다. 원색은 형광으로 떠서 x0.62 다크 파생 (시뮬 실측)
 	if (RarityGem)
 	{
-		const FLinearColor RC = FLootBoxRarityUtility::GetRarityColor(EmployeeData.SpawnRarity);
+		const FLinearColor RC = EmployeeRarityDisplay::Color(EmployeeData.SpawnRarity);
 		RarityGem->SetVisibility(ESlateVisibility::HitTestInvisible);
-		RarityGem->SetColorAndOpacity(FLinearColor(RC.R * 0.62f, RC.G * 0.62f, RC.B * 0.62f, 1.f));
+		// 이 위젯은 면이 아니라 타일을 두르는 2px 프레임이다 — 라운드박스의 아웃라인 색에는 위젯
+		// ColorAndOpacity 가 곱해지지 않는다(틴트는 채움/이미지 축). 채움이 투명이라 틴트만 쓰면
+		// 저작된 흰 테두리가 그대로 남는다. 등급색은 브러시 아웃라인에 직접 쓴다.
+		FSlateBrush GemBrush = RarityGem->GetBrush();
+		GemBrush.OutlineSettings.Color = FSlateColor(FLinearColor(RC.R * 0.62f, RC.G * 0.62f, RC.B * 0.62f, 1.f));
+		RarityGem->SetBrush(GemBrush);
+		RarityGem->SetColorAndOpacity(FLinearColor::White);
 	}
 
 	// 좌상단 레이팅 = 최고 직능 포인트 (좌하단 직능 아이콘과 한 세트 — "개발 33짜리 개발자". 2026-07-25 사용자 확정)
@@ -149,26 +265,14 @@ void UEmployeeRosterCardWidget::SetEmployeeInfo(const FEmployeeInstance& InEmplo
 	}
 
 	// 좌하단 직능 아이콘 칩 = DisciplinePoints 최고값 (GetDerivedDepartment와 동일 argmax)
-	// 인덱스 = EProductionDiscipline 순서. UIIcon 폴더는 DirectoriesToAlwaysCook 등록됨
 	{
-		static const TCHAR* DiscIconPaths[6] = {
-			TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Plan.T_UIIcon_Disc_Plan"),
-			TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Dev.T_UIIcon_Disc_Dev"),
-			TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Art.T_UIIcon_Disc_Art"),
-			TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Sound.T_UIIcon_Disc_Sound"),
-			TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Server.T_UIIcon_Disc_Server"),
-			TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_QA.T_UIIcon_Disc_QA"),
-		};
 		int32 BestIdx = -1, BestVal = 0;
 		for (int32 i = 0; i < EmployeeData.DisciplinePoints.Num() && i < 6; ++i)
 		{
 			if (EmployeeData.DisciplinePoints[i] > BestVal) { BestVal = EmployeeData.DisciplinePoints[i]; BestIdx = i; }
 		}
-		UTexture2D* DiscTex = nullptr;
-		if (BestIdx >= 0)
-		{
-			DiscTex = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(DiscIconPaths[BestIdx])).LoadSynchronous();
-		}
+		UTexture2D* DiscTex = UGlobalUtilFunctions::GetDisciplineIcon(
+			GetDisciplineIconSlot(BestIdx, EmployeeData.DisciplinePoints.Num()));
 		if (OverallText)
 		{
 			OverallText->SetText(FText::AsNumber(BestVal));
@@ -189,7 +293,7 @@ void UEmployeeRosterCardWidget::SetEmployeeInfo(const FEmployeeInstance& InEmplo
 		if (UMaterialInstanceDynamic* GlintMID = PotentialGlint->GetDynamicMaterial())
 		{
 			const ELootBoxRarity PotentialRarity = EmployeeData.PotentialAbility.CurrentRarity;
-			GlintMID->SetVectorParameterValue(TEXT("LineCol"), FLootBoxRarityUtility::GetRarityColor(PotentialRarity));
+			GlintMID->SetVectorParameterValue(TEXT("LineCol"), EmployeeRarityDisplay::Color(PotentialRarity));
 
 			// Epic+ 만 반짝임 — 낮은 등급까지 반짝이면 신호가 무의미해짐
 			const bool bHighPotential = static_cast<uint8>(PotentialRarity) >= static_cast<uint8>(ELootBoxRarity::Epic);
@@ -204,14 +308,29 @@ void UEmployeeRosterCardWidget::SetEmployeeInfo(const FEmployeeInstance& InEmplo
 
 void UEmployeeRosterCardWidget::SetSelectedVisual(bool bNowSelected)
 {
+	const bool bTurnedOn = bNowSelected && !bSelectedVisual;
+	bSelectedVisual = bNowSelected;
+
 	if (SelectionBG)
 	{
 		SelectionBG->SetVisibility(bNowSelected ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Hidden);
+	}
+
+	if (bTurnedOn && !bApplyingListItem)
+	{
+		SelectPunch.Start(1.06f, 0.25f);
 	}
 }
 
 void UEmployeeRosterCardWidget::OnButtonClicked()
 {
+	// 빈자리 타일은 직원 ID 가 없다 — 선택 경로로 보내면 없는 직원을 선택하게 된다
+	if (bHireSlot)
+	{
+		OnRosterHireSlotClicked.Broadcast();
+		return;
+	}
+
 	OnRosterCardClicked.Broadcast(EmployeeData.EmployeeID);
 }
 
@@ -225,7 +344,7 @@ UTexture2D* UEmployeeRosterCardWidget::LoadPortraitTexture(int32 EmployeeID, con
 	BasePath = FPaths::ProjectSavedDir();
 #endif
 
-	const FString FilePath = BasePath / TEXT("Portraits") / (FString::FromInt(EmployeeID) + TEXT(".png"));
+	const FString FilePath = BasePath / UCGDevSettings::GetPortraitFolderName() / (FString::FromInt(EmployeeID) + TEXT(".png"));
 	if (!FPaths::FileExists(FilePath))
 	{
 		return nullptr;
@@ -252,8 +371,15 @@ UTexture2D* UEmployeeRosterCardWidget::LoadPortraitTexture(int32 EmployeeID, con
 
 	const int32 SrcWidth = ImageWrapper->GetWidth();
 	const int32 SrcHeight = ImageWrapper->GetHeight();
-	const int32 DstWidth = FMath::RoundToInt32(TargetSize.X);
-	const int32 DstHeight = FMath::RoundToInt32(TargetSize.Y);
+	if (SrcWidth <= 0 || SrcHeight <= 0)
+	{
+		return nullptr;
+	}
+	// TargetSize는 최대 예산이다. 두 축을 따로 늘리면 컷아웃 얼굴 비율이 바뀐다.
+	const double Scale = TargetSize.X > 0.f && TargetSize.Y > 0.f
+		? FMath::Min(1.0, FMath::Min(TargetSize.X / SrcWidth, TargetSize.Y / SrcHeight)) : 1.0;
+	const int32 DstWidth = FMath::Max(1, FMath::RoundToInt32(SrcWidth * Scale));
+	const int32 DstHeight = FMath::Max(1, FMath::RoundToInt32(SrcHeight * Scale));
 
 	int32 FinalWidth = SrcWidth;
 	int32 FinalHeight = SrcHeight;

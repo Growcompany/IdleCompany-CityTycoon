@@ -1,20 +1,36 @@
 #include "Manager/MissionManagerSubsystem.h"
+#include "Manager/ContentGuideStep.h"
+#include "Components/PanelWidget.h"
+#include "Components/ScrollBox.h"
 #include "Manager/MissionGuidePhases.h"
 #include "Manager/GuideGestureRules.h"
 #include "Manager/DevPresetSeeder.h"
 #include "Manager/SaveLoadManager.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/GoalBoardSubsystem.h"
+#include "Manager/OverseasActions.h"
+#include "Manager/QuestSubsystem.h"
 #include "Manager/ResourceItemManager.h"
 #include "Manager/UIManagerSubsystem.h"
 #include "UI/UIBase.h"
 #include "UI/Panel/BuildOpenWidget.h"
+#include "UI/Panel/BuildModalWidget.h"
+#include "UI/Panel/OfficeWorkstationPanelWidget.h"
+#include "UI/Panel/PlotPurchasePanelWidget.h"
+#include "UI/Panel/ProjectReportWidget.h"
 #include "UI/Panel/BuildingManagePanelWidget.h"
 #include "UI/Panel/FactoryPanelWidget.h"
+#include "UI/Panel/WorldMapPanelWidget.h"
+#include "UI/Panel/CountryDetailWidget.h"
+#include "UI/Element/Common/PanelHeaderWidget.h"
+#include "UI/Element/Buttons/CloseButtonWidget.h"
+#include "UI/Element/Trade/CountryNameWidget.h"
+#include "UI/Element/Buttons/CostActionButtonWidget.h"
 #include "UI/Panel/BuildPlacementPanelWidget.h"
 #include "Entity/Building/BuildingBaseActor.h"
 #include "UI/Panel/OfficeMainWidget.h"
-#include "UI/Panel/OfficeRecruitmentPanelWidget.h"
+#include "UI/Panel/OfficeRecruitmentModalWidget.h"
+#include "Office/OfficeRecruitmentFlowSubsystem.h"
 #include "UI/Panel/EmployeeGachaPresentationWidget.h"
 #include "UI/Panel/RewardRevealPresentationWidget.h"
 #include "Data/TutorialMissionCompletionRules.h"
@@ -22,6 +38,14 @@
 #include "Data/TutorialMissionRestoreRules.h"
 #include "Data/TutorialRevenueCompletionRules.h"
 #include "Data/TutorialCompletionStateRules.h"
+#include "Data/TutorialDerivedMissionRules.h"
+#include "Data/TutorialEnhancementGateRules.h"
+#include "Manager/PanelIntroSubsystem.h"
+#include "Manager/EmployeeEquipmentManagerSubsystem.h"
+#include "Manager/SpawnManager.h"
+#include "Entity/Plot/CityPlotActor.h"
+#include "UI/Panel/MenuPanelWidget.h"
+#include "UI/Panel/ShopPanelWidget.h"
 #include "UI/Panel/GachaRevealPresentationWidget.h"
 #include "UI/Panel/WorkstationInfoWidget.h"
 #include "UI/Panel/PitchBoardWidget.h"
@@ -32,15 +56,33 @@
 #include "Manager/BuildingTraitManagerSubsystem.h"
 #include "Manager/BuildingSkinManagerSubsystem.h"
 #include "Manager/ProjectOperationManager.h"
+#include "Manager/MineManager.h"
+#include "Manager/WorldFactoryManager.h"
+#include "Manager/ProductionOrderManager.h"
+#include "Manager/ManufacturingGuideCountryRules.h"
+#include "Table/ProductRecipeTable.h"
+#include "Manager/ManufacturingDevelopmentManager.h"
+#include "Manager/OfficeStageProgressManager.h"
 #include "UI/Panel/BuildingTraitGachaPanelWidget.h"
 #include "UI/Panel/EnhanceStarforceModalWidget.h"
 #include "Manager/CityAcquisitionManager.h"
 #include "Manager/EmployeeManager.h"
 #include "Core/CGGameInstance.h"
+#include "GameMode/CGGameModeBase.h"
 #include "Utils/TutorialDisciplineSeed.h"
 #include "UI/Panel/InGameLayerWidget.h"
 #include "UI/Panel/OfficeLayerWidget.h"
 #include "UI/Panel/EmployeeWindowWidget.h"
+#include "UI/Panel/OfficeEmployeePanelWidget.h"
+#include "UI/Panel/HQManagePanelWidget.h"
+#include "UI/Panel/HQLevelUpCelebrationWidget.h"
+#include "UI/Panel/CityCompanyManageWidget.h"
+#include "UI/Panel/CityCompanyInfoWidget.h"
+#include "UI/Panel/EquipmentGachaPanelWidget.h"
+#include "UI/Panel/GachaPanelBaseWidget.h"
+#include "UI/Panel/OfficeDecorationPanelWidget.h"
+#include "UI/Element/Common/ConfirmCancelWidget.h"
+#include "Office/DecorationTypes.h"
 #include "UI/HUD/MissionTrackerWidget.h"
 #include "UI/HUD/GoalTrackerWidget.h"
 #include "UI/HUD/MissionGuideOverlayWidget.h"
@@ -48,6 +90,9 @@
 #include "Blueprint/WidgetTree.h"
 #include "Player/Components/PlacementHandler.h"
 #include "Player/PlayerCamera.h"
+#include "Office/OfficeManager.h"
+#include "Office/WorkstationActorBase.h"
+#include "UI/Element/Building/UpgradeSlot.h"
 #include "Entity/Factory/BrickFactory.h"
 #include "Kismet/GameplayStatics.h"
 #include "Data/GameSaveData.h"
@@ -67,6 +112,102 @@
 #include "GameFramework/Pawn.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "MoviePlayer.h"
+
+namespace
+{
+	// 모드는 확정 직후 프리뷰를 옮기는 프레임에도 유지된다(연속 배치) — 프리뷰 유무보다 안정적이다
+	EPlacementMode GetTutorialPlacementMode(const UGameInstance* GI)
+	{
+		APlayerController* PC = GI ? GI->GetFirstLocalPlayerController() : nullptr;
+		APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+		const UPlacementHandler* Handler = Pawn ? Pawn->FindComponentByClass<UPlacementHandler>() : nullptr;
+		return Handler ? Handler->GetCurrentPlacementMode() : EPlacementMode::None;
+	}
+
+	// 튜토리얼에서 철거한 회사가 있던 부지 ― 부지 설명 걸음의 대상
+	ACityPlotActor* FindTutorialClearedPlot(const UWorld* World)
+	{
+		const UCityAcquisitionManager* AcqMgr = World ? World->GetSubsystem<UCityAcquisitionManager>() : nullptr;
+		const USpawnManager* Spawns = World ? World->GetSubsystem<USpawnManager>() : nullptr;
+		const int32 ClearedKey = AcqMgr ? AcqMgr->FindFirstCompanyKeyInState(EAcqState::Cleared) : INDEX_NONE;
+		return Spawns && ClearedKey != INDEX_NONE ? Spawns->FindPlotByOccupantKey(ClearedKey) : nullptr;
+	}
+
+	int32 CountPlacedSeats(UWorld* World)
+	{
+		int32 Seats = 0;
+		if (UOfficeManager* Office = World ? World->GetSubsystem<UOfficeManager>() : nullptr)
+		{
+			for (AWorkstationActorBase* Desk : Office->GetPlacedWorkstations())
+			{
+				Seats += IsValid(Desk) ? Desk->GetChairCount() : 0;
+			}
+		}
+		return Seats;
+	}
+
+	bool HasVacantWorkstation(UWorld* World)
+	{
+		if (UOfficeManager* Office = World ? World->GetSubsystem<UOfficeManager>() : nullptr)
+		{
+			for (AWorkstationActorBase* Desk : Office->GetPlacedWorkstations())
+			{
+				if (IsValid(Desk) && Desk->FindEmptyAssignmentSlot() >= 0) return true;
+			}
+		}
+		return false;
+	}
+
+	// 연출 중 숨겨 둔 버튼(뽑기 결과 [확인] 등)은 보일 때까지 기다림으로 둔다 — 안전망이 게이트만 푸는 것보다 문구가 정확하다
+	UWidget* VisibleOrNull(UWidget* Widget)
+	{
+		return Widget && Widget->IsVisible() ? Widget : nullptr;
+	}
+
+	// 채용 직원이 장비(채용 선물)를 끼고 나올 수 있다 — 미션 시작 때 끼고 있던 장비를 기준으로 남기고, 그 밖의 장비를 끼면 체험한 것으로 본다
+	void CollectEquippedInBuilding(const UGameInstance* GI, int32 BuildingIndex, TArray<FGuid>& OutIds)
+	{
+		const UEmployeeEquipmentManagerSubsystem* Equipment = GI ? GI->GetSubsystem<UEmployeeEquipmentManagerSubsystem>() : nullptr;
+		const UEmployeeManager* Employees = GI ? GI->GetSubsystem<UEmployeeManager>() : nullptr;
+		if (!Equipment || !Employees || BuildingIndex == INDEX_NONE)
+		{
+			return;
+		}
+		for (const FEmployeeInstance& Employee : Employees->GetEmployeesInBuilding(BuildingIndex))
+		{
+			for (int32 PartIndex = 0; PartIndex < static_cast<int32>(EEmployeeEquipmentSlot::Count); ++PartIndex)
+			{
+				if (const FEmployeeEquipmentInstance* Item = Equipment->GetEquippedInstance(Employee.EmployeeID, static_cast<EEmployeeEquipmentSlot>(PartIndex)))
+				{
+					OutIds.Add(Item->InstanceId);
+				}
+			}
+		}
+	}
+
+
+	// 대상이 스크롤 목록 안에 있으면 그 스크롤 상자 — 카드가 화면 밖에 걸쳐 있으면 짚어도 누를 수 없다
+	UScrollBox* FindGuideScrollBox(UWidget* Widget)
+	{
+		UWidget* Cur = Widget;
+		for (int32 Hop = 0; Cur && Hop < 32; ++Hop)
+		{
+			if (UPanelWidget* Parent = Cur->GetParent())
+			{
+				if (UScrollBox* Scroll = Cast<UScrollBox>(Parent))
+				{
+					return Scroll;
+				}
+				Cur = Parent;
+				continue;
+			}
+			// 위젯 트리의 뿌리면 그 트리를 가진 유저 위젯에서 바깥 트리로 이어 간다
+			Cur = Cur->GetTypedOuter<UUserWidget>();
+		}
+		return nullptr;
+	}
+}
 
 const FName UMissionManagerSubsystem::OpeningChainStartID = TEXT("M1_CollectBricks");
 
@@ -76,6 +217,40 @@ namespace
 	{
 		APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
 		return PC ? Cast<APlayerCamera>(PC->GetPawn()) : nullptr;
+	}
+
+	// 배치 프리뷰는 플레이어 폰의 PlacementHandler 가 소유한다 (IsPlacementActive 와 같은 경로)
+	AActor* FindPlacementPreviewActor(const UGameInstance* GI)
+	{
+		UWorld* GuideWorld = GI ? GI->GetWorld() : nullptr;
+		APlayerController* PC = GuideWorld ? GuideWorld->GetFirstPlayerController() : nullptr;
+		APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+		UPlacementHandler* Handler = Pawn ? Pawn->FindComponentByClass<UPlacementHandler>() : nullptr;
+		return Handler ? Handler->GetPlacementTargetActor() : nullptr;
+	}
+
+	// 소유 목록의 기본 스킨 — 스킨 매니저의 같은 상수는 cpp 비공개라 여기 둔다
+	constexpr int32 TutorialStarterSkinID = 100;
+
+	// 도시 회사 상태 — 도시 맵은 WorldSubsystem, 사무실처럼 매니저가 비어 있는 맵은 저장값으로 본다
+	bool HasCityCompanyInState(UWorld* CityWorld, const USaveGame_GameData* Save, EAcqState State)
+	{
+		const UCityAcquisitionManager* AcqMgr = CityWorld ? CityWorld->GetSubsystem<UCityAcquisitionManager>() : nullptr;
+		if (AcqMgr && AcqMgr->FindFirstCompanyKeyInState(State) != INDEX_NONE)
+		{
+			return true;
+		}
+		if (Save)
+		{
+			for (const TPair<int32, FCityAcqSave>& Entry : Save->GameData.CityAcq)
+			{
+				if (Entry.Value.State == static_cast<uint8>(State))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 }
 
@@ -92,8 +267,14 @@ void UMissionManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Collection.InitializeDependency<UUIManagerSubsystem>();
 	// M7 OnRevenueCollected 구독용 선초기화 (순서 누락 시 구독 스킵)
 	Collection.InitializeDependency<UProjectOperationManager>();
+	Collection.InitializeDependency<UMineManager>();
+	Collection.InitializeDependency<UWorldFactoryManager>();
 	// OnEmployeeEnhanced 구독용 선초기화 (순서 누락 시 구독 스킵)
 	Collection.InitializeDependency<UEmployeeManager>();
+	Collection.InitializeDependency<URecruitmentManagerSubsystem>();
+	Collection.InitializeDependency<UBuildingTraitManagerSubsystem>();
+	// 도출형 설명 걸음(M29 본사·M31 메뉴)의 코치마크 완료 신호 구독용 선초기화
+	Collection.InitializeDependency<UPanelIntroSubsystem>();
 
 	// 세이브 복원 완료 신호. 진행 중 미션 ID → DT 행 복원 진입점
 	if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
@@ -124,11 +305,27 @@ void UMissionManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	if (UProjectOperationManager* OpMgr = GetGameInstance()->GetSubsystem<UProjectOperationManager>())
 	{
 		OpMgr->OnRevenueCollected.AddDynamic(this, &UMissionManagerSubsystem::HandleRevenueCollected);
+		// 퀘스트 카운터는 명시 수거 전용 신호로만 — OnRevenueCollected 는 틱 적립도 타서 초당 1회 들어온다
+		OpMgr->OnStoredRevenueCollected.AddUObject(this, &UMissionManagerSubsystem::HandleStoredRevenueCollected);
+	}
+	if (UMineManager* MineMgr = GetGameInstance()->GetSubsystem<UMineManager>())
+	{
+		MineMgr->OnResourceClaimed.AddDynamic(this, &UMissionManagerSubsystem::HandleMineResourceClaimed);
+	}
+	if (UWorldFactoryManager* FactoryMgr = GetGameInstance()->GetSubsystem<UWorldFactoryManager>())
+	{
+		FactoryMgr->OnLineClaimed.AddDynamic(this, &UMissionManagerSubsystem::HandleFactoryLineClaimed);
 	}
 	// 직원 강화 완료 구독 (목표판 G9 판정, 스킵 시 G9 영구 미완)
 	if (UEmployeeManager* EmpMgr = GetGameInstance()->GetSubsystem<UEmployeeManager>())
 	{
 		EmpMgr->OnEmployeeEnhanced.AddUObject(this, &UMissionManagerSubsystem::HandleEmployeeEnhanced);
+		EmpMgr->OnEmployeeLevelUp.AddUObject(this, &UMissionManagerSubsystem::HandleEmployeeLevelUp);
+		EmpMgr->OnEmployeeStatPointAllocated.AddUObject(this, &UMissionManagerSubsystem::HandleEmployeeStatPointAllocated);
+	}
+	if (UPanelIntroSubsystem* IntroMgr = GetGameInstance()->GetSubsystem<UPanelIntroSubsystem>())
+	{
+		IntroMgr->OnIntroCompleted.AddUObject(this, &UMissionManagerSubsystem::HandlePanelIntroCompleted);
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[MissionManager] Initialized (OnGameDataLoaded subscribed)"));
@@ -163,10 +360,25 @@ void UMissionManagerSubsystem::Deinitialize()
 	if (UProjectOperationManager* OpMgr = GetGameInstance()->GetSubsystem<UProjectOperationManager>())
 	{
 		OpMgr->OnRevenueCollected.RemoveDynamic(this, &UMissionManagerSubsystem::HandleRevenueCollected);
+		OpMgr->OnStoredRevenueCollected.RemoveAll(this);
+	}
+	if (UMineManager* MineMgr = GetGameInstance()->GetSubsystem<UMineManager>())
+	{
+		MineMgr->OnResourceClaimed.RemoveDynamic(this, &UMissionManagerSubsystem::HandleMineResourceClaimed);
+	}
+	if (UWorldFactoryManager* FactoryMgr = GetGameInstance()->GetSubsystem<UWorldFactoryManager>())
+	{
+		FactoryMgr->OnLineClaimed.RemoveDynamic(this, &UMissionManagerSubsystem::HandleFactoryLineClaimed);
 	}
 	if (UEmployeeManager* EmpMgr = GetGameInstance()->GetSubsystem<UEmployeeManager>())
 	{
 		EmpMgr->OnEmployeeEnhanced.RemoveAll(this);
+		EmpMgr->OnEmployeeLevelUp.RemoveAll(this);
+		EmpMgr->OnEmployeeStatPointAllocated.RemoveAll(this);
+	}
+	if (UPanelIntroSubsystem* IntroMgr = GetGameInstance()->GetSubsystem<UPanelIntroSubsystem>())
+	{
+		IntroMgr->OnIntroCompleted.RemoveAll(this);
 	}
 	// 미션판 G4/G5 — WorldSubsystem 이라 GetSubsystem 로 재조회하지 않고 마지막으로 구독한 인스턴스를 직접 해제
 	if (UCityAcquisitionManager* AcqMgr = CityAcqMgrWeak.Get())
@@ -208,15 +420,30 @@ void UMissionManagerSubsystem::HandleResourceChanged(EResourceType Type, int64 N
 		return;
 	}
 
-	// 노가다 중 3개 도달 → 스포트라이트 해제 + [공장] 버튼으로 패널 열기 유도 (강화 루프 학습)
-	if (GuidePhase <= BrickGuide::TapFactory && NewValue >= BrickGuide::UpgradeNudgeAtBricks)
+	// 첫 배달 뒤 현재 정원을 채우고 증축한다. 복원도 실제 인원과 정원을 따른다.
+	int32 LaborerCount = 0;
+	int32 LaborerCapacity = 0;
+	int32 ExpansionLevel = 1;
+	if (ABrickFactory* Factory = Cast<ABrickFactory>(BrickFactoryWeak.Get()))
 	{
-		SetGuidePhase(BrickGuide::OpenFactory);
+		LaborerCount = Factory->GetDesiredLaborerCount();
+		LaborerCapacity = Factory->GetLaborerCapacity();
+		ExpansionLevel = Factory->GetUpgradeLevel(EFactoryUpgradeType::FactoryExpansion);
+	}
+	UWorld* CurWorld = GetWorld();
+	const ACGGameModeBase* CityMode = CurWorld ? CurWorld->GetAuthGameMode<ACGGameModeBase>() : nullptr;
+	const bool bWatchingFirstDelivery = GuidePhase == BrickGuide::ObserveLaborers
+		&& ((CityMode && CityMode->IsCityOpeningActive()) || GetPhaseElapsedSeconds() < 2.0);
+	const int32 DeliveryPhase = bWatchingFirstDelivery
+		? GuidePhase : BrickGuide::PhaseAfterDelivery(GuidePhase, NewValue, LaborerCount, LaborerCapacity, ExpansionLevel);
+	if (DeliveryPhase != GuidePhase)
+	{
+		SetGuidePhase(DeliveryPhase);
 	}
 
 	OnMissionProgressChanged.Broadcast();
 
-	if (NewValue >= ActiveMissionRow.ConditionAmount)
+	if (BrickGuide::CanComplete(GuidePhase, NewValue, ActiveMissionRow.ConditionAmount))
 	{
 		SetReadyToClaim();
 	}
@@ -229,6 +456,7 @@ void UMissionManagerSubsystem::HandleGameDataLoaded()
 	const FName SavedMissionID = Save ? Save->GameData.CurrentMissionID : NAME_None;
 	const int32 SavedMissionProgress = Save ? Save->GameData.CurrentMissionProgress : 0;
 	const bool bSavedClaimReady = Save && Save->GameData.bCurrentMissionReadyToClaim;
+	const bool bSavedRevenueReceived = Save && Save->GameData.bCurrentMissionRevenueReceived;
 	const bool bSavedTutorialCompleted = Save && Save->GameData.bTutorialCompleted;
 
 	UE_LOG(LogTemp, Log, TEXT("[MissionManager] OnGameDataLoaded: Save=%s SavedMissionID=%s"),
@@ -291,6 +519,10 @@ void UMissionManagerSubsystem::HandleGameDataLoaded()
 		bDevTutorialJumpSessionActive);
 
 	SetActiveMission(Restored);
+	bTutorialRevenueReceived = FTutorialRevenueCompletionRules::RestoreReceipt(
+		bSavedRevenueReceived, SavedMissionID, ActiveMissionID,
+		HasActiveMission() && (ActiveMissionRow.ConditionType == EMissionConditionType::CollectFirstRevenue
+			|| ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject));
 
 	DeskPlaceProgress = FWorkstationMissionProgressRules::ResolveRestoredProgress(
 		SavedMissionID,
@@ -306,14 +538,25 @@ void UMissionManagerSubsystem::HandleGameDataLoaded()
 			FMath::Max(1, ActiveMissionRow.ConditionAmount));
 	}
 
+	DerivedMissionLatches = FTutorialDerivedMissionRules::ResolveRestoredLatches(
+		Save ? Save->GameData.DerivedMissionLatchID : NAME_None,
+		ActiveMissionID,
+		IsDerivedGuideActive(),
+		Save ? Save->GameData.DerivedMissionLatches : TArray<FName>());
+	if (DerivedMissionLatches.Num() > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[MissionManager] 도출형 래치 복원: %s %d개"),
+			*ActiveMissionID.ToString(), DerivedMissionLatches.Num());
+	}
+
 	if (FTutorialMissionRestoreRules::ShouldRestoreClaimReady(
 		bSavedClaimReady,
 		SavedMissionID,
 		ActiveMissionID,
-		HasActiveMission() && !ActiveMissionRow.NextMissionID.IsNone()))
+		HasActiveMission() && ActiveMissionRow.bManualClaim))
 	{
 		bReadyToClaim = true;
-		UE_LOG(LogTemp, Log, TEXT("[MissionManager] 최종 클레임 대기 상태 복원: %s"), *ActiveMissionID.ToString());
+		UE_LOG(LogTemp, Log, TEXT("[MissionManager] 보상 클레임 대기 상태 복원: %s"), *ActiveMissionID.ToString());
 	}
 
 	if (DevMode == ECGStartMode::Sandbox)
@@ -358,7 +601,41 @@ void UMissionManagerSubsystem::HandleGameDataLoaded()
 #endif
 }
 
-void UMissionManagerSubsystem::ApplyDevSandbox()
+void UMissionManagerSubsystem::ApplyDevModeCheat()
+{
+#if !UE_BUILD_SHIPPING
+	// 미션을 비우면 트래커/오버레이/상주 알림이 전부 "체인 없음" 분기로 내려간다.
+	SetActiveMission(NAME_None);
+
+	// 일반 강화·미션판이 열리는 조건이라 dev 점프 래치는 같이 내린다(래치가 남으면 스킵해도 잠긴 채다).
+	bTutorialCompleted = true;
+	bDevTutorialJumpSessionActive = false;
+	bGuideSuspendedForLaunchReward = false;
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(PollTimerHandle);
+	}
+
+	// 트래커는 완료 연출로 스스로 숨는 경로를 안 타므로(중도 종료) 여기서 직접 재settle 시킨다.
+	if (UMissionTrackerWidget* Tracker = GetActiveTracker())
+	{
+		Tracker->RefreshFromManager();
+	}
+	UpdateGuideNotification();
+
+	if (UGoalBoardSubsystem* GoalMgr = GetGameInstance()->GetSubsystem<UGoalBoardSubsystem>())
+	{
+		GoalMgr->UnlockBoard();
+	}
+
+	ApplyDevSandbox(TEXT("Rich"), 20);
+
+	UE_LOG(LogTemp, Warning, TEXT("[MissionManager] DevMode 치트 — 튜토리얼 종료 + 미션판 언락 + 무한모드 적용"));
+#endif
+}
+
+void UMissionManagerSubsystem::ApplyDevSandbox(FName ScenarioOverride, int32 HQLevelOverride)
 {
 	UWorld* World = GetWorld();
 	if (!World)
@@ -368,7 +645,7 @@ void UMissionManagerSubsystem::ApplyDevSandbox()
 
 	// 다음 틱으로 미룬다 — 다른 OnGameDataLoaded 핸들러(ResourceItemManager 등)가 세이브를 먼저
 	// 메모리에 올린 뒤에 덮어써야 샌드박스 값이 살아남는다 (핸들러 호출 순서 비보장 회피).
-	World->GetTimerManager().SetTimerForNextTick([WeakThis = TWeakObjectPtr<UMissionManagerSubsystem>(this)]()
+	World->GetTimerManager().SetTimerForNextTick([WeakThis = TWeakObjectPtr<UMissionManagerSubsystem>(this), ScenarioOverride, HQLevelOverride]()
 	{
 		UMissionManagerSubsystem* Self = WeakThis.Get();
 		UGameInstance* GI = Self ? Self->GetGameInstance() : nullptr;
@@ -380,16 +657,20 @@ void UMissionManagerSubsystem::ApplyDevSandbox()
 		const UCGDevSettings* Dev = GetDefault<UCGDevSettings>();
 
 		// 자원 듬뿍 — 기존 GrantTestResources 재사용 (DT_TestResourceScenarios Row, MarketCap 이 시총 게이트 개방)
-		if (Dev && !Dev->SandboxResourceScenario.IsNone())
+		const FName Scenario = !ScenarioOverride.IsNone()
+			? ScenarioOverride
+			: (Dev ? Dev->SandboxResourceScenario : NAME_None);
+		if (!Scenario.IsNone())
 		{
 			if (UResourceItemManager* Res = GI->GetSubsystem<UResourceItemManager>())
 			{
-				Res->GrantTestResources(Dev->SandboxResourceScenario);
+				// 부팅 자동 적용이라 Diamond 는 건너뛴다 ― 서버 권위 재화다(§7.6 R3). 콘솔 `GrantRes` 는 그대로 넣는다
+				Res->GrantTestResourcesExceptDiamond(Scenario);
 			}
 		}
 
 		// 전체 해금 — HQ 레벨 강제 (HQ 게이트 콘텐츠). 세이브엔 안 쓰고 세션 메모리 + UI 브로드캐스트만.
-		const int32 TargetHQ = Dev ? Dev->SandboxHQLevel : 20;
+		const int32 TargetHQ = HQLevelOverride > 0 ? HQLevelOverride : (Dev ? Dev->SandboxHQLevel : 20);
 		if (USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>())
 		{
 			if (USaveGame_GameData* SD = SaveMgr->GetCurrentSaveData())
@@ -403,7 +684,7 @@ void UMissionManagerSubsystem::ApplyDevSandbox()
 		}
 
 		UE_LOG(LogTemp, Warning, TEXT("[MissionManager] DevSandbox 적용: 자원=%s, HQ=%d (티어/국가 개별 잠금은 시총 게이트 의존 — 안 열리면 시나리오 MarketCap 상향)"),
-			Dev ? *Dev->SandboxResourceScenario.ToString() : TEXT("-"), TargetHQ);
+			*Scenario.ToString(), TargetHQ);
 	});
 }
 
@@ -429,7 +710,7 @@ void UMissionManagerSubsystem::SeedTutorialPrereqs(FName TargetMissionID)
 		// 자원 듬뿍 — M1 벽돌 노가다/M2 건설비용을 통째로 제거 (가장 큰 테스트 고통 해소)
 		if (UResourceItemManager* Res = GI->GetSubsystem<UResourceItemManager>())
 		{
-			Res->GrantTestResources(TEXT("Rich"));
+			Res->GrantTestResourcesExceptDiamond(TEXT("Rich"));
 		}
 
 		// 빌딩 선행: M1/M2(빌딩 만들기 전·중) 외 미션은 지어진 빌딩이 있어야 의미가 있다.
@@ -437,7 +718,8 @@ void UMissionManagerSubsystem::SeedTutorialPrereqs(FName TargetMissionID)
 		// (개발 워크플로: 한 번 건설하면 세이브에 남아 이후 M3+ 점프를 빌딩 재건설 없이 반복 가능)
 		const bool bNeedsBuilding =
 			TargetMissionID != TEXT("M1_CollectBricks") &&
-			TargetMissionID != TEXT("M2_BuildFirstCompany");
+			TargetMissionID != TEXT("M2_UpgradeFactory") &&
+			TargetMissionID != TEXT("M3_BuildFirstCompany");
 		if (bNeedsBuilding)
 		{
 			USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>();
@@ -452,18 +734,21 @@ void UMissionManagerSubsystem::SeedTutorialPrereqs(FName TargetMissionID)
 		}
 
 		// 개발자 M5 점프 전용 테스트 선행조건. 정상 플레이의 채용권 경제 공급에는 관여하지 않는다.
-		if (TargetMissionID == TEXT("M5_FirstRecruit"))
+		if (TargetMissionID == TEXT("M6_FirstRecruit"))
 		{
 			if (UItemInventoryManager* ItemMgr = GI->GetSubsystem<UItemInventoryManager>())
 			{
 				const int32 Owned = ItemMgr->GetItemCount(EItemType::RecruitTicketNormal);
-				if (Owned < 2)
+				const int32 RequiredCount = static_cast<int32>(FMath::Clamp<int64>(Self->ActiveMissionRow.ConditionAmount, 1, MAX_int32));
+				if (Owned < RequiredCount)
 				{
-					ItemMgr->AddItem(EItemType::RecruitTicketNormal, 2 - Owned);
-					UE_LOG(LogTemp, Log, TEXT("[MissionManager] 시드: 일반 채용권 %d장 지급 (M5 개발자 점프)"), 2 - Owned);
+					ItemMgr->AddItem(EItemType::RecruitTicketNormal, RequiredCount - Owned);
+					UE_LOG(LogTemp, Log, TEXT("[MissionManager] 시드: 일반 채용권 %d장 지급 (M5 개발자 점프)"), RequiredCount - Owned);
 				}
 			}
 		}
+
+		Self->SeedDerivedJumpPrereqs(TargetMissionID);
 
 		UE_LOG(LogTemp, Log, TEXT("[MissionManager] SeedTutorialPrereqs 완료 (target=%s)"), *TargetMissionID.ToString());
 	});
@@ -489,17 +774,35 @@ void UMissionManagerSubsystem::DevJumpToMission(FName MissionID)
 
 void UMissionManagerSubsystem::SetActiveMission(FName NewMissionID)
 {
+	const bool bCarryFirstProjectReceipt = bTutorialRevenueReceived
+		&& ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject;
 	if (IsExplainPhaseActive())
 	{
 		ReleaseExplainPresentation();
 	}
 	ActiveMissionID = NAME_None;
 	ActiveMissionRow = FMissionTable();
+	if (URecruitmentManagerSubsystem* RecruitMgr = GetGameInstance()->GetSubsystem<URecruitmentManagerSubsystem>())
+	{
+		RecruitMgr->SeedForcedPrimaryDisciplines({});
+	}
 	GuidePhase = 0;
 	PhaseEnteredAt = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
 	TransitionMissCount = 0;
 	DeskPlaceProgress = 0;
+	bRecruitJobSelected = false;
+	bBuildIndustrySelected = false;
+	bDerivedBuildIndustryPicked = false;
 	bReadyToClaim = false;
+	bTutorialRevenueReceived = false;
+	FactoryBoostStartedAt = -1.0;
+	DerivedMissionLatches.Reset();
+	DerivedFloorSignalAt = -1.0;
+	DerivedDemolishSignalAt = -1.0;
+	DerivedPlotDialogOpenedAt = -1.0;
+	DerivedHQLevelSignalAt = -1.0;
+	bDerivedEvaluatedOnce = false;
+	DerivedIntroPanelWeak.Reset();
 
 	if (NewMissionID.IsNone())
 	{
@@ -518,14 +821,18 @@ void UMissionManagerSubsystem::SetActiveMission(FName NewMissionID)
 
 	ActiveMissionID = NewMissionID;
 	ActiveMissionRow = Row;
+	bTutorialRevenueReceived = bCarryFirstProjectReceipt
+		&& Row.ConditionType == EMissionConditionType::CollectFirstRevenue;
 
-	// 튜토리얼 첫 채용만 직능을 맞춘다. 미션 복원 경로도 이 함수를 지나므로 저장 없이 idempotent.
-	if (ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees)
+	// 튜토리얼 채용(M5 첫 채용·M14·M24 목표 직능 채용)만 직능을 맞춘다. 미션 복원 경로도 이 함수를 지나므로 저장 없이 idempotent.
+	if (ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees
+		|| (ActiveMissionRow.ConditionType == EMissionConditionType::RecruitGoalDiscipline && ActiveMissionRow.bDerivedGuide))
 	{
 		if (URecruitmentManagerSubsystem* RecruitMgr = GetGameInstance()->GetSubsystem<URecruitmentManagerSubsystem>())
 		{
 			RecruitMgr->SeedForcedPrimaryDisciplines(
-				TutorialDisciplineSeed::BuildSeedList(FMath::RandRange(0, 1)));
+				TutorialDisciplineSeed::BuildSeedList(ActiveMissionRow.RequiredRecruitDiscipline,
+					static_cast<int32>(FMath::Clamp<int64>(ActiveMissionRow.ConditionAmount, 0, MAX_int32))));
 		}
 	}
 
@@ -559,6 +866,15 @@ void UMissionManagerSubsystem::TryStartMissionChain()
 	// 레벨 재진입 대비 — 이전 월드의 위젯 포인터 정리 후 재구성
 	DestroyMissionWidgets();
 
+	if (const ACGGameModeBase* CityMode = World->GetAuthGameMode<ACGGameModeBase>())
+	{
+		if (CityMode->IsCityOpeningActive())
+		{
+			World->GetTimerManager().ClearTimer(PollTimerHandle);
+			return;
+		}
+	}
+
 	if (!HasActiveMission())
 	{
 		// 표시 판정은 EnsureMissionWidgets 의 bWantGoalTracker 단독 권한 — 여기서 IsUnlocked 로 한 번 더 거르면
@@ -580,16 +896,13 @@ void UMissionManagerSubsystem::TryStartMissionChain()
 	PhaseEnteredAt = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
 	TransitionMissCount = 0;
 
-	// CollectBricks 강화 넛지 통과 감지 — 공장 강화 델리게이트 구독 (레벨별 1회, AddUnique로 중복 방지).
-	// 시작 미션 타입과 무관하게 구독 — 체인 중간에 CollectBricks 가 와도 신호를 받도록 (핸들러가 타입 가드).
-	// 공장은 MainMap에만 존재하므로 OfficeMap에선 구독 생략.
+	// 공장 액터는 실제 홀드 제스처와 재진입 시 인부 레벨 조회에 사용한다.
 	if (bMainMap)
 	{
 		if (ABrickFactory* Factory = Cast<ABrickFactory>(
 			UGameplayStatics::GetActorOfClass(World, ABrickFactory::StaticClass())))
 		{
 			BrickFactoryWeak = Factory;
-			Factory->OnFactoryUpgraded.AddUniqueDynamic(this, &UMissionManagerSubsystem::HandleFactoryUpgraded);
 		}
 	}
 
@@ -626,6 +939,10 @@ void UMissionManagerSubsystem::TryStartMissionChain()
 				TutorialFirstBuildingWeak = TargetBuilding;
 			}
 		}
+		if (!TutorialFirstBuildingWeak.IsValid())
+		{
+			TutorialFirstBuildingWeak = PickGuideBuilding();
+		}
 		UProjectOperationManager* OpMgr = GetGameInstance()->GetSubsystem<UProjectOperationManager>();
 
 		// 운영조회·포커스·설명타겟이 서로 다른 건물을 보면 그물이 안 닫힌다.
@@ -642,7 +959,7 @@ void UMissionManagerSubsystem::TryStartMissionChain()
 		UE_LOG(LogTemp, Log, TEXT("[MissionManager] M7 도착: Building=%d(설명대상=%d) 운영=%s -> %s"),
 			TargetIdx, ExplainIdx,
 			bHasOperation ? TEXT("있음") : TEXT("없음"),
-			bCanExplain ? TEXT("Explain") : TEXT("PressCollect(설명 건너뜀)"));
+			bCanExplain ? TEXT("Explain") : TEXT("WatchIncome(설명 건너뜀)"));
 		// 운영 진행 게이지가 이 건물 위에 있다 ― 화면 밖이거나 줌이 멀면 설명이 무의미해진다.
 		if (bCanExplain)
 		{
@@ -659,7 +976,7 @@ void UMissionManagerSubsystem::TryStartMissionChain()
 			}
 		}
 
-		SetGuidePhase(bCanExplain ? CollectGuide::Explain : CollectGuide::PressCollect);
+		SetGuidePhase(bCanExplain ? CollectGuide::Explain : CollectGuide::WatchIncome);
 	}
 }
 
@@ -682,11 +999,36 @@ void UMissionManagerSubsystem::NotifyBuildModalOpened(UCommonActivatableWidget* 
 	{
 		return;
 	}
+	// 모달은 열 때마다 첫 산업을 자동 선택한다 — 산업 타일 걸음은 여는 회마다 다시 보여 준다
+	if (IsDerivedGuideActive())
+	{
+		bDerivedBuildIndustryPicked = false;
+		return;
+	}
 
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::BuildFirstBuilding)
 	{
 		BuildModalWeak = Modal;
-		SetGuidePhase(BuildGuide::PickGameCard);
+		SetGuidePhase(bBuildIndustrySelected ? BuildGuide::PickBuilding : BuildGuide::PickIndustry);
+	}
+}
+
+void UMissionManagerSubsystem::NotifyBuildIndustrySelected(UBuildModalWidget* Modal, ECompanyType Industry)
+{
+	if (IsDerivedGuideActive() && (ActiveMissionRow.ConditionType == EMissionConditionType::BuildSecondBuilding
+		|| ActiveMissionRow.ConditionType == EMissionConditionType::BuildIndustry)
+		&& Modal && Modal->IsActivated() && Industry == MakeActiveMissionSpec().Industry)
+	{
+		bDerivedBuildIndustryPicked = true;
+		return;
+	}
+	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::BuildFirstBuilding
+		&& GuidePhase == BuildGuide::PickIndustry && Modal && BuildModalWeak.Get() == Modal
+		&& Modal->IsActivated() && Industry == ECompanyType::Game
+		&& Modal->GetBuildGuideIndustryWidget())
+	{
+		bBuildIndustrySelected = true;
+		SetGuidePhase(BuildGuide::PickBuilding);
 	}
 }
 
@@ -698,7 +1040,7 @@ void UMissionManagerSubsystem::RegisterFactoryPanel(UFactoryPanelWidget* Panel)
 	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks
 		&& GuidePhase == BrickGuide::OpenFactory)
 	{
-		SetGuidePhase(BrickGuide::NudgeUpgrade);
+		SetGuidePhase(BrickGuide::AddLaborer);
 	}
 }
 
@@ -723,21 +1065,73 @@ void UMissionManagerSubsystem::UnregisterFactoryPanel(UFactoryPanelWidget* Panel
 	}
 }
 
-void UMissionManagerSubsystem::HandleFactoryUpgraded(EFactoryUpgradeType /*UpgradeType*/)
+void UMissionManagerSubsystem::NotifyFactoryUpgradePurchased(EFactoryUpgradeType UpgradeType, int32 PurchasedLevels)
 {
+	if (PurchasedLevels > 0)
+	{
+		OnConditionSignal.Broadcast(EMissionConditionType::UpgradeFactoryStats, PurchasedLevels);
+		if (UpgradeType == EFactoryUpgradeType::HoldProductionAmount)
+		{
+			OnConditionSignal.Broadcast(EMissionConditionType::ReachFactoryProductionLevel, 1);
+		}
+	}
+	if (IsDerivedGuideActive())
+	{
+		EvaluateDerivedMissionCompletion();
+		return;
+	}
 	if (!HasActiveMission() || ActiveMissionRow.ConditionType != EMissionConditionType::CollectBricks)
 	{
 		return;
 	}
 
-	// 첫 강화 = 아래 강화 유도, 둘째 강화 = 그라인드. 강화는 Money 게이트라 조기 강화 유실 방지 위해 <= 유지
-	if (GuidePhase <= BrickGuide::NudgeUpgrade)
+	if (!BrickFactoryWeak.IsValid())
 	{
-		SetGuidePhase(BrickGuide::NudgeUpgrade2);
+		BrickFactoryWeak = UGameplayStatics::GetActorOfClass(GetWorld(), ABrickFactory::StaticClass());
 	}
-	else if (GuidePhase == BrickGuide::NudgeUpgrade2)
+	const ABrickFactory* Factory = Cast<ABrickFactory>(BrickFactoryWeak.Get());
+	const int32 PurchasePhase = BrickGuide::PhaseAfterPurchase(GuidePhase, UpgradeType,
+		Factory ? Factory->GetDesiredLaborerCount() : 0,
+		Factory ? Factory->GetLaborerCapacity() : 0);
+	if (PurchasePhase != GuidePhase)
 	{
-		SetGuidePhase(BrickGuide::Grind);
+		SetGuidePhase(PurchasePhase);
+	}
+}
+
+void UMissionManagerSubsystem::NotifyBuildingStatUpgraded(int32 PurchasedLevels)
+{
+	if (PurchasedLevels > 0)
+	{
+		OnConditionSignal.Broadcast(EMissionConditionType::EnhanceBuildingStat, PurchasedLevels);
+	}
+}
+
+void UMissionManagerSubsystem::NotifyManufacturedProductSold(int64 QuantitySold)
+{
+	if (QuantitySold > 0)
+	{
+		OnConditionSignal.Broadcast(EMissionConditionType::SellManufacturedProduct, QuantitySold);
+	}
+}
+
+void UMissionManagerSubsystem::NotifyReserveManufacturingProduct(int32 ReservedQuantity)
+{
+	if (ReservedQuantity > 0)
+	{
+		OnConditionSignal.Broadcast(EMissionConditionType::ReserveManufacturingProduct, ReservedQuantity);
+	}
+}
+
+void UMissionManagerSubsystem::NotifyFactoryBoostStarted()
+{
+	if (!HasActiveMission() || ActiveMissionRow.ConditionType != EMissionConditionType::CollectBricks)
+	{
+		return;
+	}
+	if (GuidePhase == BrickGuide::BoostLaborers)
+	{
+		FactoryBoostStartedAt = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0;
 	}
 }
 
@@ -748,10 +1142,9 @@ void UMissionManagerSubsystem::SetReadyToClaim()
 		return;
 	}
 
-	// NextMissionID 있음 = 체인 중간 → 수령 UI 없이 즉시 진행
-	// 체인 끝만 클레임 대기 (최종 보상 연출 1회)
+	// 명시적으로 수령이 필요한 미션만 클레임 대기로 전환한다.
 	const ETutorialMissionCompletionMode CompletionMode = FTutorialMissionCompletionRules::Resolve(
-		!ActiveMissionRow.NextMissionID.IsNone());
+		ActiveMissionRow.bManualClaim);
 	if (CompletionMode == ETutorialMissionCompletionMode::ImmediateAdvance)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[MissionManager] 중간 미션 즉시 완료: %s"), *ActiveMissionID.ToString());
@@ -769,11 +1162,33 @@ void UMissionManagerSubsystem::SetReadyToClaim()
 	UpdateGuideNotification();
 	OnMissionReadyToClaim.Broadcast(ActiveMissionRow);
 
-	UE_LOG(LogTemp, Log, TEXT("[MissionManager] 최종 보상 클레임 대기 진입: %s"), *ActiveMissionID.ToString());
+	UE_LOG(LogTemp, Log, TEXT("[MissionManager] 보상 클레임 대기 진입: %s"), *ActiveMissionID.ToString());
+}
+
+void UMissionManagerSubsystem::SetRecruitmentPresentationActive(bool bActive)
+{
+	if (bRecruitmentPresentationActive == bActive) { return; }
+	bRecruitmentPresentationActive = bActive;
+	RefreshTrackerPresentationSuppression();
+	if (GuideOverlayWidget)
+	{
+		if (bActive)
+		{
+			GuideOverlayVisibilityBeforeRecruitment = GuideOverlayWidget->GetVisibility();
+			bGuideOverlayVisibilitySavedForRecruitment = true;
+			GuideOverlayWidget->SetVisibility(ESlateVisibility::Hidden);
+		}
+		else if (bGuideOverlayVisibilitySavedForRecruitment)
+		{
+			GuideOverlayWidget->SetVisibility(GuideOverlayVisibilityBeforeRecruitment);
+		}
+	}
+	if (!bActive) { bGuideOverlayVisibilitySavedForRecruitment = false; }
 }
 
 bool UMissionManagerSubsystem::IsClaimPresentable() const
 {
+	if (bRecruitmentPresentationActive) { return false; }
 	// 배치 모드는 확정 후에도 이어진다(연속 배치) — 다음 탭은 배치용이지 수령용이 아니다.
 	if (IsPlacementActive())
 	{
@@ -866,9 +1281,12 @@ void UMissionManagerSubsystem::ShowRewardSplash(const FMissionTable& Mission)
 		{
 			if (URewardRevealPresentationWidget* Overlay = CreateWidget<URewardRevealPresentationWidget>(PC, Cls))
 			{
+				RewardSplashWeak = Overlay;
+				Overlay->OnPresentationClosed.AddUObject(this, &UMissionManagerSubsystem::HandleRewardSplashClosed, TWeakObjectPtr<UUserWidget>(Overlay));
 				// AddToViewport(NativeConstruct: BindWidget 바인드 + 버튼 OnClicked) 먼저 → 그 다음 박스 구성
 				Overlay->AddToViewport(10000); // 가이드(9000)/토스트(9999) 위
 				Overlay->SetupRewards(Mission.Rewards, SplashTitle, /*bToastMode=*/false);
+				RefreshTrackerPresentationSuppression();
 				return;
 			}
 		}
@@ -879,17 +1297,58 @@ void UMissionManagerSubsystem::ShowRewardSplash(const FMissionTable& Mission)
 	URewardClaimSplashWidget* Splash = CreateWidget<URewardClaimSplashWidget>(PC, URewardClaimSplashWidget::StaticClass());
 	if (Splash)
 	{
+		RewardSplashWeak = Splash;
 		Splash->InitSplash(Mission);
 		Splash->AddToViewport(9500); // 가이드 오버레이(9000) 위 / 토스트(9999) 아래
 	}
+}
+
+bool UMissionManagerSubsystem::IsRewardSplashShown() const
+{
+	const UUserWidget* Splash = RewardSplashWeak.Get();
+	return Splash && Splash->IsInViewport();
+}
+
+bool UMissionManagerSubsystem::IsRewardSplashRevealComplete() const
+{
+	const URewardRevealPresentationWidget* Reveal = Cast<URewardRevealPresentationWidget>(RewardSplashWeak.Get());
+	return !IsRewardSplashShown() || !Reveal || Reveal->IsRevealComplete();
+}
+
+void UMissionManagerSubsystem::HandleRewardSplashClosed(TWeakObjectPtr<UUserWidget> ClosedSplash)
+{
+	if (RewardSplashWeak == ClosedSplash)
+	{
+		RewardSplashWeak.Reset();
+	}
+	RefreshTrackerPresentationSuppression();
+	OnRewardSplashClosed.Broadcast();
+}
+
+void UMissionManagerSubsystem::RefreshTrackerPresentationSuppression()
+{
+	if (UMissionTrackerWidget* ActiveTracker = GetActiveTracker()) { ActiveTracker->SetPresentationSuppressed(bRecruitmentPresentationActive); }
+	if (GoalTrackerWidget) { GoalTrackerWidget->SetPresentationSuppressed(ShouldHideGoalTracker()); }
+}
+
+bool UMissionManagerSubsystem::ShouldHideGoalTracker() const
+{
+	if (bRecruitmentPresentationActive || IsRewardSplashShown())
+	{
+		return true;
+	}
+	const UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+	const UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr;
+	return UIBase && UIBase->GetPromptStackCount() > 0;
 }
 
 // 배치 완료 직후 현장 호출 훅. 조건 판정은 매니저 한 곳에
 void UMissionManagerSubsystem::NotifyBuildingPlaced(ABuildingBaseActor* Building)
 {
 	// 건설 채수 도달형 미션 신호 — 판정(보유 채수 절대값)은 GoalBoard 가 수행
-	OnConditionSignal.Broadcast(EMissionConditionType::BuildSecondBuilding);
-	OnConditionSignal.Broadcast(EMissionConditionType::BuildOnClearedPlot);
+	OnConditionSignal.Broadcast(EMissionConditionType::BuildSecondBuilding, 1);
+	OnConditionSignal.Broadcast(EMissionConditionType::BuildOnClearedPlot, 1);
+	OnConditionSignal.Broadcast(EMissionConditionType::BuildIndustry, 1);
 
 	if (!HasActiveMission())
 	{
@@ -903,7 +1362,9 @@ void UMissionManagerSubsystem::NotifyBuildingPlaced(ABuildingBaseActor* Building
 		TutorialFirstBuildingWeak = Building;
 
 		SetReadyToClaim();
+		return;
 	}
+	EvaluateDerivedMissionCompletion();
 }
 
 void UMissionManagerSubsystem::NotifyManagePanelOpened(UBuildingManagePanelWidget* Panel)
@@ -931,6 +1392,7 @@ void UMissionManagerSubsystem::UnregisterOfficeMainWidget(UOfficeMainWidget* Wid
 	if (OfficeMainWeak.Get() == Widget)
 	{
 		OfficeMainWeak.Reset();
+		ResumeGuideAfterLaunchRewardConfirmed();
 	}
 }
 
@@ -947,13 +1409,28 @@ void UMissionManagerSubsystem::UnregisterOfficeLayer(UOfficeLayerWidget* Widget)
 	}
 }
 
-void UMissionManagerSubsystem::NotifyRecruitPanelOpened(UOfficeRecruitmentPanelWidget* Panel)
+void UMissionManagerSubsystem::NotifyOfficeRecruitmentModalOpened(UOfficeRecruitmentModalWidget* Modal)
 {
-	RecruitPanelWeak = Panel;
-	if (HasActiveMission()
-		&& ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees
+	RecruitModalWeak = Modal;
+	GoalRecruitClickedDiscipline = EProductionDiscipline::Count;
+	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees
 		&& GuidePhase == RecruitGuide::OpenRecruit)
 	{
+		SetGuidePhase(bRecruitJobSelected ? RecruitGuide::PressPull : RecruitGuide::PickJob);
+	}
+}
+
+void UMissionManagerSubsystem::NotifyRecruitJobSelected(UOfficeRecruitmentModalWidget* Modal, EProductionDiscipline Discipline)
+{
+	if (Modal && RecruitModalWeak.Get() == Modal)
+	{
+		GoalRecruitClickedDiscipline = Discipline;
+	}
+	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees
+		&& Modal && RecruitModalWeak.Get() == Modal && GuidePhase == RecruitGuide::PickJob
+		&& (GetRequiredRecruitDiscipline() == EProductionDiscipline::Count || GetRequiredRecruitDiscipline() == Discipline))
+	{
+		bRecruitJobSelected = true;
 		SetGuidePhase(RecruitGuide::PressPull);
 	}
 }
@@ -961,6 +1438,11 @@ void UMissionManagerSubsystem::NotifyRecruitPanelOpened(UOfficeRecruitmentPanelW
 void UMissionManagerSubsystem::RegisterGachaPresentation(UEmployeeGachaPresentationWidget* Widget)
 {
 	GachaPresentationWeak = Widget;
+	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees
+		&& GuidePhase <= RecruitGuide::PressPull)
+	{
+		SetGuidePhase(RecruitGuide::PressConfirm);
+	}
 }
 
 void UMissionManagerSubsystem::UnregisterGachaPresentation(UEmployeeGachaPresentationWidget* Widget)
@@ -982,22 +1464,50 @@ void UMissionManagerSubsystem::HandleGachaPullCompleted(const FGachaResultData& 
 	}
 }
 
+void UMissionManagerSubsystem::ReportQuestCounter(EQuestCounter Counter, int64 Amount)
+{
+	// 퀘스트 원장은 미션판/튜토리얼과 결합하지 않는다 — 여기는 기존 팬인 지점을 빌려 신호만 흘린다
+	if (UQuestSubsystem* QuestMgr = GetGameInstance()->GetSubsystem<UQuestSubsystem>())
+	{
+		QuestMgr->ReportCounter(Counter, Amount);
+	}
+}
+
 void UMissionManagerSubsystem::NotifyHireConfirmed(const FGachaResultData& /*Result*/)
 {
-	// 채용 확정 → 채용 패널 [닫기] 유도 (가챠 오버레이는 닫혔지만 채용 패널이 남아 있음)
+	ReportQuestCounter(EQuestCounter::RecruitHire);
+	OnConditionSignal.Broadcast(EMissionConditionType::RecruitGoalDiscipline, 1);
+	// 확인 뒤 목표에 도달했을 때만 패널 닫기를 유도한다. ×1 첫 채용은 다시 뽑기로 돌아간다.
 	if (HasActiveMission()
 		&& ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees
 		&& GuidePhase <= RecruitGuide::PressConfirm)
 	{
-		SetGuidePhase(RecruitGuide::PressCloseRecruit);
+		int64 Current = 0;
+		int64 Target = 0;
+		const bool bReachedTarget = GetMissionProgress(Current, Target)
+			&& FRecruitEmployeesMissionRules::HasReachedTarget(Current, Target);
+		SetGuidePhase(bReachedTarget ? RecruitGuide::PressCloseRecruit : RecruitGuide::PressPull);
 	}
 
 	EvaluateRecruitEmployeesCondition();
+	EvaluateDerivedMissionCompletion();
 }
 
 void UMissionManagerSubsystem::NotifyRecruitPanelClosed()
 {
-	// 착석 실패/벤치 적립 경로에서도 직원 수 절대값으로 완료 여부를 복구한다.
+	RecruitModalWeak.Reset();
+	GoalRecruitClickedDiscipline = EProductionDiscipline::Count;
+	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees)
+	{
+		int64 Current = 0;
+		int64 Target = 0;
+		if (GetMissionProgress(Current, Target)
+			&& !FRecruitEmployeesMissionRules::HasReachedTarget(Current, Target))
+		{
+			SetGuidePhase(RecruitGuide::OpenRecruit);
+		}
+	}
+	// 패널을 닫은 뒤 절대 직원 수로 완료를 판정한다.
 	EvaluateRecruitEmployeesCondition();
 }
 
@@ -1007,9 +1517,31 @@ void UMissionManagerSubsystem::NotifyWorkstationPanelOpened(UWorkstationInfoWidg
 	WorkstationPanelWeak = Panel;
 }
 
+void UMissionManagerSubsystem::NotifyWorkstationPanelClosed(UWorkstationInfoWidget* Panel)
+{
+	if (WorkstationPanelWeak.Get() == Panel)
+	{
+		WorkstationPanelWeak.Reset();
+	}
+}
+
+void UMissionManagerSubsystem::NotifyWorkstationGrowthChanged(bool bPromoted, int32 PurchasedLevels)
+{
+	if (bPromoted)
+	{
+		OnConditionSignal.Broadcast(EMissionConditionType::PromoteFirstWorkstation, 1);
+	}
+	else if (PurchasedLevels > 0)
+	{
+		OnConditionSignal.Broadcast(EMissionConditionType::UpgradeFirstWorkstation, PurchasedLevels);
+	}
+	EvaluateDerivedMissionCompletion();
+}
+
 void UMissionManagerSubsystem::NotifyEmployeeSeated()
 {
 	EvaluateRecruitEmployeesCondition();
+	OnConditionSignal.Broadcast(EMissionConditionType::RecruitGoalDiscipline, 1);
 }
 
 // ===== M6 기획 보드 =====
@@ -1036,6 +1568,17 @@ void UMissionManagerSubsystem::UnregisterPitchBoard(UPitchBoardWidget* Widget)
 void UMissionManagerSubsystem::RegisterLaunchConfirm(ULaunchConfirmWidget* Widget)
 {
 	LaunchConfirmWeak = Widget;
+	if (HasActiveMission()
+		&& ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject
+		&& GuidePhase == InHouseGuide::WatchStrip)
+	{
+		const UOfficeStageProgressManager* StageMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+		if (StageMgr)
+		{
+			// 미달 창은 [출시] 대신 [추가 개발]/[폐기] ― 다이아가 모자란 튜토리얼에서는 폐기 후 다시 착수가 길이다
+			SetGuidePhase(StageMgr->IsLaunchBlocked() ? InHouseGuide::DiscardFailed : InHouseGuide::PressLaunch);
+		}
+	}
 }
 
 void UMissionManagerSubsystem::UnregisterLaunchConfirm(ULaunchConfirmWidget* Widget)
@@ -1043,6 +1586,16 @@ void UMissionManagerSubsystem::UnregisterLaunchConfirm(ULaunchConfirmWidget* Wid
 	if (LaunchConfirmWeak.Get() == Widget)
 	{
 		LaunchConfirmWeak.Reset();
+		if (HasActiveMission()
+			&& ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject
+			&& (GuidePhase == InHouseGuide::WatchStrip || GuidePhase == InHouseGuide::PressLaunch || GuidePhase == InHouseGuide::DiscardFailed))
+		{
+			const UOfficeStageProgressManager* StageMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+			if (StageMgr && StageMgr->GetLifecycle() == EProjectLifecycle::Idle)
+			{
+				SetGuidePhase(InHouseGuide::OpenBoard);
+			}
+		}
 	}
 }
 
@@ -1055,31 +1608,23 @@ void UMissionManagerSubsystem::NotifyInHouseProjectSelected()
 		&& ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject)
 	{
 		SetGuidePhase(InHouseGuide::WatchStrip);
-
-		// 월드 없으면 0.0 대입 — 값이 크게 뒤처져 첫 poll에서 즉시 WatchStrip을 벗어나는 폴백(관찰 스킵)이 의도임을 코드에 남긴다.
-		const UWorld* GuideWorld = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
-		StripWatchEnteredAt = GuideWorld ? GuideWorld->GetTimeSeconds() : 0.0;
 	}
 }
 
 void UMissionManagerSubsystem::NotifyProjectLaunched()
 {
-	// >= WatchStrip — CompleteStep 치트나 Duration 단축 튜닝으로 관찰 4초 안에 출시가 오면 PressLaunch 전이가 아직
-	// 안 됐을 수 있다. 페이즈 상수가 순서를 보장하므로 "관찰 단계 이후 언제든 출시되면 완료"로 읽힌다.
+	ReportQuestCounter(EQuestCounter::ProjectLaunch);
+	OnConditionSignal.Broadcast(EMissionConditionType::LaunchGoalProject, 1);
+	// >= WatchStrip — 개발 완료와 출시 확인창 전환 사이에 출시 신호가 와도 완료를 놓치지 않는다.
 	if (HasActiveMission()
 		&& ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject
 		&& GuidePhase >= InHouseGuide::WatchStrip)
 	{
-		// 출시 즉시 미션 완료 — 운영(3분)은 백그라운드로 돌고, 대기시키지 않는다.
-		// "상시 수집" 안내만 토스트로 알려줌 (수령은 자유, 강제 가이드 없음).
-		if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
-		{
-			UIMgr->ShowNotification(
-				FText::FromString(TEXT("운영 시작! 빌딩에 수익이 쌓이면 [수집] 버튼으로 수령하세요")),
-				5.0f, ENotificationType::Normal);
-		}
+		// 운영은 백그라운드로 시작한다. 다음 단계 안내는 출시 보상 리빌 확인 뒤에 표시한다.
 		SetReadyToClaim();
+		return;
 	}
+	EvaluateDerivedMissionCompletion();
 }
 
 void UMissionManagerSubsystem::NotifyProjectOperationCompleted()
@@ -1094,20 +1639,49 @@ void UMissionManagerSubsystem::NotifyProjectOperationCompleted()
 // ===== M7 CollectFirstRevenue =====
 void UMissionManagerSubsystem::HandleRevenueCollected(int64 Amount)
 {
-	// 실제 양수 수익을 수집했을 때만 M7을 완료한다. 빈 수집 신호는 진행으로 인정하지 않는다.
+	// 지급 사실을 먼저 보존하고, 완료 전이는 설명과 수익 관찰이 끝난 뒤 폴에서 처리한다.
 	if (HasActiveMission()
-		&& ActiveMissionRow.ConditionType == EMissionConditionType::CollectFirstRevenue
-		&& FTutorialRevenueCompletionRules::IsPositiveCollection(Amount))
+		&& (ActiveMissionRow.ConditionType == EMissionConditionType::CollectFirstRevenue
+			|| (ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject && HasLaunchedRequiredProject()))
+		&& FTutorialRevenueCompletionRules::IsPositiveCollection(Amount) && !bTutorialRevenueReceived)
 	{
-		SetReadyToClaim();
+		bTutorialRevenueReceived = true;
+		if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
+		{
+			SaveMgr->RequestDeferredSave();
+		}
+	}
+}
+
+void UMissionManagerSubsystem::HandleStoredRevenueCollected(int64 Amount)
+{
+	// "수익 N회 수거" 원장은 명시 수거 1회 = 1 이어야 한다. 초당 적립이 여기로 들어오면 데일리/위클리가 자동 완성된다.
+	if (Amount > 0) ReportQuestCounter(EQuestCounter::RevenueCollect);
+}
+
+void UMissionManagerSubsystem::HandleMineResourceClaimed(ECountryType /*Country*/, EResourceType /*Resource*/, int64 ClaimedQty)
+{
+	if (ClaimedQty > 0)
+	{
+		OnConditionSignal.Broadcast(EMissionConditionType::CollectMineResource, ClaimedQty);
+	}
+}
+
+void UMissionManagerSubsystem::HandleFactoryLineClaimed(ECountryType /*Country*/, int32 /*LineId*/, int64 FinalQty)
+{
+	if (FinalQty > 0)
+	{
+		OnConditionSignal.Broadcast(EMissionConditionType::CollectFactoryProduct, FinalQty);
 	}
 }
 
 // ===== 미션판 G10 EquipTrait =====
 void UMissionManagerSubsystem::NotifyTraitEquipped()
 {
+	ReportQuestCounter(EQuestCounter::TraitEquip);
 	// 특성 장착은 미션판 G10 조건 — 판정은 GoalBoard 가 한다 (미션 유무와 무관하게 신호를 흘린다)
-	OnConditionSignal.Broadcast(EMissionConditionType::EquipFirstTrait);
+	OnConditionSignal.Broadcast(EMissionConditionType::EquipFirstTrait, 1);
+	EvaluateDerivedMissionCompletion();
 }
 
 void UMissionManagerSubsystem::RegisterTraitGachaPanel(UBuildingTraitGachaPanelWidget* Widget)
@@ -1153,25 +1727,46 @@ void UMissionManagerSubsystem::HandleTraitGachaPulled(const FBuildingTraitGachaR
 
 void UMissionManagerSubsystem::NotifySkinEquipped()
 {
+	ReportQuestCounter(EQuestCounter::SkinEquip);
 	// 스킨 장착은 미션판 G8 조건 — 판정은 GoalBoard 가 한다 (미션 유무와 무관하게 신호를 흘린다)
-	OnConditionSignal.Broadcast(EMissionConditionType::EquipFirstSkin);
+	OnConditionSignal.Broadcast(EMissionConditionType::EquipFirstSkin, 1);
+	if (IsDerivedGuideActive() && ActiveMissionRow.ConditionType == EMissionConditionType::EquipFirstSkin)
+	{
+		AddDerivedLatch(TutorialDerivedLatch::SkinApplied);
+	}
+	EvaluateDerivedMissionCompletion();
 }
 
 void UMissionManagerSubsystem::NotifyBuildingFloorUpgraded()
 {
-	OnConditionSignal.Broadcast(EMissionConditionType::RaiseBuildingFloor);
+	ReportQuestCounter(EQuestCounter::FloorRaise);
+	OnConditionSignal.Broadcast(EMissionConditionType::RaiseBuildingFloor, 1);
+	// 층이 올라가는 모습을 보여 줄 시간을 재는 기준점 — 완료는 연출 뒤로 미룬다(M9 층 상승 관찰)
+	if (IsDerivedGuideActive() && ActiveMissionRow.ConditionType == EMissionConditionType::RaiseBuildingFloor)
+	{
+		DerivedFloorSignalAt = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0;
+	}
+	EvaluateDerivedMissionCompletion();
 }
 
 // ===== 미션판 G11 AcquireFirstPlot =====
 void UMissionManagerSubsystem::NotifyPlotAcquired()
 {
-	OnConditionSignal.Broadcast(EMissionConditionType::AcquireFirstPlot);
+	ReportQuestCounter(EQuestCounter::PlotAcquire);
+	OnConditionSignal.Broadcast(EMissionConditionType::AcquireFirstPlot, 1);
 }
 
 // ===== 미션판 G2 HQLevel =====
 void UMissionManagerSubsystem::NotifyHQLevelChanged()
 {
-	OnConditionSignal.Broadcast(EMissionConditionType::ReachHQLevel);
+	OnConditionSignal.Broadcast(EMissionConditionType::ReachHQLevel, 1);
+	// 축하 연출을 보여 줄 시간을 재는 기준점 — 완료는 연출 뒤로 미룬다(M29 레벨업 관찰)
+	if (IsDerivedGuideActive() && ActiveMissionRow.ConditionType == EMissionConditionType::ReachHQLevel
+		&& DerivedHQLevelSignalAt < 0.0)
+	{
+		DerivedHQLevelSignalAt = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0;
+	}
+	EvaluateDerivedMissionCompletion();
 }
 
 // ===== 강화 모달 등록 (미션판 G9 안내 확장 여지) =====
@@ -1204,19 +1799,48 @@ void UMissionManagerSubsystem::BindCityAcquisitionDelegates(UWorld* World)
 
 void UMissionManagerSubsystem::NotifyCompanyAcquired(int32 /*Key*/)
 {
-	OnConditionSignal.Broadcast(EMissionConditionType::AcquireFirstCompany);
+	ReportQuestCounter(EQuestCounter::CompanyAcquire);
+	OnConditionSignal.Broadcast(EMissionConditionType::AcquireFirstCompany, 1);
+	EvaluateDerivedMissionCompletion();
 }
 
 void UMissionManagerSubsystem::HandleCompanyCleared(int32 /*Key*/)
 {
-	OnConditionSignal.Broadcast(EMissionConditionType::DemolishFirstCompany);
+	OnConditionSignal.Broadcast(EMissionConditionType::DemolishFirstCompany, 1);
+	// 붕괴 연출을 다 보기 전에 다음 미션으로 넘어가지 않게 기준 시각을 남긴다
+	if (IsDerivedGuideActive() && ActiveMissionRow.ConditionType == EMissionConditionType::DemolishFirstCompany)
+	{
+		DerivedDemolishSignalAt = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0;
+	}
+	EvaluateDerivedMissionCompletion();
 }
 
 void UMissionManagerSubsystem::HandleEmployeeEnhanced(int32 /*EmployeeID*/, UEmployeeManager::EEnhanceResult /*Result*/)
 {
-	// G9 완료 = SP 투자가 아니라 강화 실행 — 스타포스를 가르치는 지점이 게임 전체에서 여기뿐이다.
-	// 확률형이라 EEnhanceResult 는 보지 않는다(성공/실패/유지 무관, 시도 1회로 인정 — 자금 고갈로 막히지 않게).
-	OnConditionSignal.Broadcast(EMissionConditionType::InvestFirstStatPoint);
+	ReportQuestCounter(EQuestCounter::EnhanceAttempt);
+	OnConditionSignal.Broadcast(EMissionConditionType::EnhanceFirstEmployee, 1);
+	// 확률형이라 결과와 무관하게 시도 1회를 인정한다
+	if (IsDerivedGuideActive() && ActiveMissionRow.ConditionType == EMissionConditionType::EnhanceFirstEmployee)
+	{
+		AddDerivedLatch(TutorialDerivedLatch::StarEnhanceAttempted);
+	}
+	EvaluateDerivedMissionCompletion();
+}
+
+void UMissionManagerSubsystem::HandleEmployeeLevelUp(int32 /*EmployeeID*/, int32 /*NewLevel*/)
+{
+	OnConditionSignal.Broadcast(EMissionConditionType::LevelUpFirstEmployee, 1);
+	EvaluateDerivedMissionCompletion();
+}
+
+void UMissionManagerSubsystem::HandleEmployeeStatPointAllocated(int32 /*EmployeeID*/)
+{
+	OnConditionSignal.Broadcast(EMissionConditionType::AllocateEmployeeStatPoint, 1);
+	if (IsDerivedGuideActive() && ActiveMissionRow.ConditionType == EMissionConditionType::AllocateEmployeeStatPoint)
+	{
+		AddDerivedLatch(TutorialDerivedLatch::StatPointAllocated);
+	}
+	EvaluateDerivedMissionCompletion();
 }
 
 // ===== M4 PlaceDesks =====
@@ -1226,7 +1850,52 @@ void UMissionManagerSubsystem::NotifyPlacementModeOpened(EOfficePlacementKind Ki
 	if (Kind == EOfficePlacementKind::Desk
 		&& ActiveMissionRow.ConditionType == EMissionConditionType::PlaceDesks
 		&& GuidePhase == DeskGuide::OpenPlacement)
+		SetGuidePhase(DeskGuide::PickDesk);
+}
+
+void UMissionManagerSubsystem::SuspendGuideUntilLaunchRewardConfirmed()
+{
+	if (!HasActiveMission() || ActiveMissionRow.ConditionType != EMissionConditionType::LaunchFirstInHouseProject)
+	{
+		return;
+	}
+	bGuideSuspendedForLaunchReward = true;
+	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+	{
+		UIMgr->ClearGuideNotification();
+	}
+}
+
+void UMissionManagerSubsystem::ResumeGuideAfterLaunchRewardConfirmed()
+{
+	if (!bGuideSuspendedForLaunchReward)
+	{
+		return;
+	}
+	bGuideSuspendedForLaunchReward = false;
+	UpdateGuideNotification();
+}
+
+void UMissionManagerSubsystem::NotifyDeskSelected()
+{
+	if (HasActiveMission()
+		&& ActiveMissionRow.ConditionType == EMissionConditionType::PlaceDesks
+		&& (GuidePhase == DeskGuide::PickDesk || GuidePhase == DeskGuide::OpenPlacement)
+		&& IsDeskPlacementActive())
+	{
 		SetGuidePhase(DeskGuide::Confirm);
+	}
+}
+
+void UMissionManagerSubsystem::NotifyPlacementCatalogClosed()
+{
+	if (HasActiveMission()
+		&& ActiveMissionRow.ConditionType == EMissionConditionType::PlaceDesks
+		&& GuidePhase == DeskGuide::PickDesk
+		&& !IsDeskPlacementActive())
+	{
+		SetGuidePhase(DeskGuide::OpenPlacement);
+	}
 }
 
 void UMissionManagerSubsystem::NotifyOfficePlacementCompleted(EOfficePlacementKind Kind, int32 Count)
@@ -1234,10 +1903,21 @@ void UMissionManagerSubsystem::NotifyOfficePlacementCompleted(EOfficePlacementKi
 	// 그림(벽장식) 배치는 미션판 G7 조건 — 미션 유무와 무관하게 신호를 흘린다
 	if (Kind == EOfficePlacementKind::WallDecoration)
 	{
-		OnConditionSignal.Broadcast(EMissionConditionType::PlaceFirstPainting);
+		OnConditionSignal.Broadcast(EMissionConditionType::PlaceFirstPainting, 1);
 	}
 
 	if (!HasActiveMission()) return;
+	// M13 좌석은 저장 상태로 다시 세므로 카운터를 쓰지 않는다. 그림은 스타터 소품과 구분할 수 없어 신호로 래치한다
+	if (IsDerivedGuideActive())
+	{
+		if (Kind == EOfficePlacementKind::WallDecoration
+			&& ActiveMissionRow.ConditionType == EMissionConditionType::PlaceFirstPainting)
+		{
+			AddDerivedLatch(TutorialDerivedLatch::PaintingPlaced);
+		}
+		EvaluateDerivedMissionCompletion();
+		return;
+	}
 	if (Kind != EOfficePlacementKind::Desk
 		|| ActiveMissionRow.ConditionType != EMissionConditionType::PlaceDesks)
 	{
@@ -1270,6 +1950,11 @@ void UMissionManagerSubsystem::NotifyEmployeeWindowOpened(UEmployeeWindowWidget*
 	EmployeeWindowWeak = Window;
 }
 
+void UMissionManagerSubsystem::NotifyOfficeEmployeePanelOpened(UOfficeEmployeePanelWidget* Panel)
+{
+	OfficeEmployeePanelWeak = Panel;
+}
+
 bool UMissionManagerSubsystem::CompleteActiveMission()
 {
 	if (!HasActiveMission())
@@ -1280,19 +1965,19 @@ bool UMissionManagerSubsystem::CompleteActiveMission()
 	const FName CompletedID = ActiveMissionID;
 	const FMissionTable CompletedRow = ActiveMissionRow;
 	const bool bIsTerminalMission = CompletedRow.NextMissionID.IsNone();
+	const bool bRequiresDurableCommit = CompletedRow.bManualClaim || bIsTerminalMission;
 
 	UResourceItemManager* ResMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>();
 	UItemInventoryManager* ItemMgr = GetGameInstance()->GetSubsystem<UItemInventoryManager>();
 	UGoalBoardSubsystem* GoalMgr = GetGameInstance()->GetSubsystem<UGoalBoardSubsystem>();
 	USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>();
-	if (bIsTerminalMission
-		&& (!GoalMgr || !FTutorialMissionAtomicCommitRules::AreAllFinalRewardsGrantable(
-			CompletedRow.Rewards,
-			ResMgr != nullptr,
-			ItemMgr != nullptr)))
+	if ((bIsTerminalMission && !GoalMgr)
+		|| (CompletedRow.bManualClaim && CompletedRow.Rewards.IsEmpty())
+		|| (bRequiresDurableCommit && !FTutorialMissionAtomicCommitRules::AreRewardsGrantable(
+			CompletedRow.Rewards, ResMgr != nullptr, ItemMgr != nullptr)))
 	{
 		UE_LOG(LogTemp, Error,
-			TEXT("[MissionManager] 피날레 클레임 거부 — 유효한 최종 보상 또는 GoalBoard 없음: %s"),
+			TEXT("[MissionManager] 미션 완료 거부 — 보상 관리자 또는 GoalBoard 없음: %s"),
 			*CompletedID.ToString());
 		return false;
 	}
@@ -1317,12 +2002,14 @@ bool UMissionManagerSubsystem::CompleteActiveMission()
 	const int32 TransitionMissCountBeforeCommit = TransitionMissCount;
 	const int32 DeskPlaceProgressBeforeCommit = DeskPlaceProgress;
 	const double PhaseEnteredAtBeforeCommit = PhaseEnteredAt;
+	const bool bRevenueReceivedBeforeCommit = bTutorialRevenueReceived;
+	const TArray<FName> DerivedLatchesBeforeCommit = DerivedMissionLatches;
 
 	bCompletingMission = true;
 	bReadyToClaim = false;
 	const FTutorialRewardBroadcastDecision PrepareBroadcastDecision =
 		FTutorialMissionAtomicCommitRules::ResolveRewardBroadcastDecision(
-			bIsTerminalMission,
+			bRequiresDurableCommit,
 			/*bSaveSucceeded=*/false);
 
 	// 지급별 자동 저장을 끄고, 다음 미션/클레임 상태까지 전환한 뒤 아래에서 한 번만 저장한다.
@@ -1364,7 +2051,7 @@ bool UMissionManagerSubsystem::CompleteActiveMission()
 	// 보상·다음 미션·Ready clear·GoalBoard unlock을 하나의 디스크 스냅샷으로 커밋한다.
 	const bool bSaveSucceeded = SaveMgr && SaveMgr->SaveGameData();
 	const FTutorialMissionSaveDecision SaveDecision =
-		FTutorialMissionAtomicCommitRules::ResolveSaveDecision(bIsTerminalMission, bSaveSucceeded);
+		FTutorialMissionAtomicCommitRules::ResolveSaveDecision(bRequiresDurableCommit, bSaveSucceeded);
 	if (!SaveDecision.bCommitPreparedState)
 	{
 		if (bPreparedGoalUnlock && GoalMgr)
@@ -1378,6 +2065,8 @@ bool UMissionManagerSubsystem::CompleteActiveMission()
 		TransitionMissCount = TransitionMissCountBeforeCommit;
 		DeskPlaceProgress = DeskPlaceProgressBeforeCommit;
 		PhaseEnteredAt = PhaseEnteredAtBeforeCommit;
+		bTutorialRevenueReceived = bRevenueReceivedBeforeCommit;
+		DerivedMissionLatches = DerivedLatchesBeforeCommit;
 		bTutorialCompleted = bTutorialCompletedBeforeCommit;
 		bDevTutorialJumpSessionActive = bDevJumpSessionBeforeCommit;
 		bReadyToClaim = SaveDecision.bRestoreReadyToClaim && bReadyBeforeCommit;
@@ -1415,10 +2104,11 @@ bool UMissionManagerSubsystem::CompleteActiveMission()
 			TEXT("[MissionManager] 중간 미션 저장 실패 — 메모리 전환 유지, 다음 저장에서 재시도: %s"),
 			*CompletedID.ToString());
 	}
+	LastMissionAdvanceFrame = GFrameCounter;
 
 	const FTutorialRewardBroadcastDecision CommitBroadcastDecision =
 		FTutorialMissionAtomicCommitRules::ResolveRewardBroadcastDecision(
-			bIsTerminalMission,
+			bRequiresDurableCommit,
 			bSaveSucceeded);
 	if (CommitBroadcastDecision.bPublishRewardsAfterCommit)
 	{
@@ -1483,6 +2173,11 @@ void UMissionManagerSubsystem::TryCompleteByResources()
 	{
 		return;
 	}
+	if (IsDerivedGuideActive())
+	{
+		EvaluateDerivedMissionCompletion();
+		return;
+	}
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees)
 	{
 		EvaluateRecruitEmployeesCondition();
@@ -1494,9 +2189,28 @@ void UMissionManagerSubsystem::TryCompleteByResources()
 	}
 
 	UResourceItemManager* ResMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>();
-	if (ResMgr && ResMgr->GetResourceAmount(EResourceType::Brick) >= ActiveMissionRow.ConditionAmount)
+	if (!ResMgr)
 	{
-		// 완료 정책은 다음 미션 유무로 즉시 진행(M1) 또는 최종 클레임(M7)을 결정한다.
+		return;
+	}
+	const int64 Bricks = ResMgr->GetResourceAmount(EResourceType::Brick);
+	const ABrickFactory* Factory = Cast<ABrickFactory>(BrickFactoryWeak.Get());
+	const int32 LaborerCount = Factory ? Factory->GetDesiredLaborerCount() : 0;
+	const int32 LaborerCapacity = Factory ? Factory->GetLaborerCapacity() : 0;
+	const int32 ExpansionLevel = Factory ? Factory->GetUpgradeLevel(EFactoryUpgradeType::FactoryExpansion) : 1;
+	UWorld* CurWorld = GetWorld();
+	const ACGGameModeBase* CityMode = CurWorld ? CurWorld->GetAuthGameMode<ACGGameModeBase>() : nullptr;
+	const bool bWatchingFirstDelivery = GuidePhase == BrickGuide::ObserveLaborers
+		&& ((CityMode && CityMode->IsCityOpeningActive()) || GetPhaseElapsedSeconds() < 2.0);
+	const int32 DeliveryPhase = bWatchingFirstDelivery
+		? GuidePhase : BrickGuide::PhaseAfterDelivery(GuidePhase, Bricks, LaborerCount, LaborerCapacity, ExpansionLevel);
+	if (DeliveryPhase != GuidePhase)
+	{
+		SetGuidePhase(DeliveryPhase);
+	}
+	if (BrickGuide::CanComplete(GuidePhase, Bricks, ActiveMissionRow.ConditionAmount))
+	{
+		// 수령 여부는 미션 행의 bManualClaim 정책으로 결정한다.
 		SetReadyToClaim();
 	}
 }
@@ -1505,6 +2219,12 @@ void UMissionManagerSubsystem::EvaluateRecruitEmployeesCondition()
 {
 	if (!HasActiveMission() || ActiveMissionRow.ConditionType != EMissionConditionType::RecruitEmployees)
 	{
+		return;
+	}
+	const UOfficeRecruitmentFlowSubsystem* Flow = GetWorld() ? GetWorld()->GetSubsystem<UOfficeRecruitmentFlowSubsystem>() : nullptr;
+	if (Flow && Flow->IsBusy())
+	{
+		OnMissionProgressChanged.Broadcast();
 		return;
 	}
 
@@ -1517,7 +2237,19 @@ void UMissionManagerSubsystem::EvaluateRecruitEmployeesCondition()
 
 	if (FRecruitEmployeesMissionRules::HasReachedTarget(Current, Target))
 	{
-		SetReadyToClaim();
+		if (RecruitModalWeak.IsValid())
+		{
+			// 리빌 확인 전에는 [확인]을 유지하고, 확인 뒤 패널 [닫기]를 안내한다.
+			if (GuidePhase != RecruitGuide::PressConfirm)
+			{
+				SetGuidePhase(RecruitGuide::PressCloseRecruit);
+			}
+			OnMissionProgressChanged.Broadcast();
+		}
+		else
+		{
+			SetReadyToClaim();
+		}
 	}
 	else
 	{
@@ -1545,8 +2277,17 @@ void UMissionManagerSubsystem::SetGuidePhase(int32 NewPhase)
 	{
 		ReleaseExplainPresentation();
 	}
-
 	GuidePhase = NewPhase;
+	FactoryBoostStartedAt = -1.0;
+	// 증축 관찰과 저장된 강화 복원의 Hold 안내에서는 열린 패널을 닫아 공장 외형을 보여준다.
+	if (ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks
+		&& (NewPhase == BrickGuide::WatchExpansion || NewPhase == BrickGuide::BoostLaborers))
+	{
+		if (UFactoryPanelWidget* Panel = FactoryPanelWeak.Get())
+		{
+			Panel->RequestClose();
+		}
+	}
 	bExplainAdvancePending = false;
 	ExplainAdvancePendingAt = 0.0;
 	// 설명 페이즈에 들어올 때마다 첫 설명부터 — 스텝은 세션 상태라 재진입이면 지난 값이 이어진다
@@ -1583,52 +2324,98 @@ bool UMissionManagerSubsystem::UsesDelayedHint() const
 
 void UMissionManagerSubsystem::UpdateGuideNotification()
 {
+	if (const ACGGameModeBase* CityMode = GetWorld() ? GetWorld()->GetAuthGameMode<ACGGameModeBase>() : nullptr)
+	{
+		if (CityMode->IsCityOpeningActive()) return;
+	}
+	if (bGuideSuspendedForLaunchReward)
+	{
+		return;
+	}
 	UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
 	if (!UIMgr)
 	{
 		return;
 	}
 
-	// 활성 미션의 현 페이즈 멘토 라인을 상단 상주 알림으로 — 모든 단계를 차근차근 안내.
-	// 클레임 대기 중엔 해제(트래커 카드가 "완료! 탭" 안내를 담당해 중복 메시지 방지).
-	if (HasActiveMission() && !bReadyToClaim)
-	{
-		UIMgr->ShowGuideNotification(GetCurrentMentorLine());
-	}
-	else if (HasActiveMission() && bReadyToClaim)
-	{
-		// 클레임 대기 — 상주 토스트로 미션 카드 탭 유도 (계속 띄워둠)
-		UIMgr->ShowGuideNotification(FText::FromString(TEXT("미션 완료! 미션 카드를 눌러 보상을 받으세요")));
-	}
-	else
-	{
-		// ⚠ 미션판 경로는 **이 else 안**이어야 한다 — 위 두 분기는 `HasActiveMission()` 가드라
-		// 그 안에 끼우면 활성 미션이 없는 미션판 상황에서 영영 안 뜬다(2026-08-05 OnConditionSignal 사고와 동형).
-		const FText StepLine = GetTrackedGoalStepLine();
-		if (!StepLine.IsEmpty())
-		{
-			UIMgr->ShowGuideNotification(StepLine);
-		}
-		else
-		{
-			UIMgr->ClearGuideNotification();
-		}
-	}
+	// 목표는 트래커, 조작 설명은 현재 대상 옆 말풍선이 담당한다.
+	UIMgr->ClearGuideNotification();
 }
 
 void UMissionManagerSubsystem::PollGuideProgress()
 {
 	// 상주 알림 리프레시 — 스포트라이트 대상(공장) 캐시가 첫 틱에 늦게 잡히는 타이밍 흡수 (멱등)
 	UpdateGuideNotification();
-
+	// 도출형(M8~M31)은 아래 M1~M7 페이즈 보정과 섞지 않는다 — 걸음은 매번 상태에서 다시 구한다
+	if (IsDerivedGuideActive())
+	{
+		if (!bReadyToClaim)
+		{
+			PollDerivedGuide();
+		}
+		return;
+	}
+	if (HasActiveMission() && !bReadyToClaim && !bGuideSuspendedForLaunchReward
+		&& ActiveMissionRow.ConditionType == EMissionConditionType::CollectFirstRevenue
+		&& GuidePhase == CollectGuide::ExitOffice && GetWorld()->GetMapName().Contains(TEXT("MainMap")))
+	{
+		TryStartMissionChain();
+		return;
+	}
+	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks
+		&& GuidePhase == BrickGuide::ObserveLaborers)
+	{
+		if (const ACGGameModeBase* CityMode = GetWorld()->GetAuthGameMode<ACGGameModeBase>())
+		{
+			if (CityMode->IsCityOpeningActive())
+			{
+				PhaseEnteredAt = GetWorld()->GetTimeSeconds();
+			}
+		}
+	}
+	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks
+		&& GuidePhase <= BrickGuide::ExpandFactory)
+	{
+		if (!BrickFactoryWeak.IsValid())
+		{
+			BrickFactoryWeak = UGameplayStatics::GetActorOfClass(GetWorld(), ABrickFactory::StaticClass());
+		}
+		TryCompleteByResources();
+	}
+	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks)
+	{
+		const int32 WatchPhase = BrickGuide::PhaseAfterExpansionWatch(GuidePhase, GetPhaseElapsedSeconds());
+		if (WatchPhase != GuidePhase) SetGuidePhase(WatchPhase);
+		if (GuidePhase == BrickGuide::BoostLaborers)
+		{
+			const ABrickFactory* Factory = Cast<ABrickFactory>(BrickFactoryWeak.Get());
+			if (!Factory || !Factory->IsHoldingBoost()) FactoryBoostStartedAt = -1.0;
+			else if (FactoryBoostStartedAt < 0.0) FactoryBoostStartedAt = GetWorld()->GetTimeSeconds();
+			const double HeldSeconds = FactoryBoostStartedAt >= 0.0
+				? GetWorld()->GetTimeSeconds() - FactoryBoostStartedAt : 0.0;
+			const int32 BoostPhase = BrickGuide::PhaseAfterBoost(GuidePhase, HeldSeconds);
+			if (BoostPhase != GuidePhase)
+			{
+				SetGuidePhase(BoostPhase);
+				TryCompleteByResources();
+			}
+		}
+	}
+	if (HasActiveMission() && !bReadyToClaim && !bGuideSuspendedForLaunchReward
+		&& ActiveMissionRow.ConditionType == EMissionConditionType::CollectFirstRevenue
+		&& FTutorialRevenueCompletionRules::CanFinish(bTutorialRevenueReceived,
+			GuidePhase == CollectGuide::WatchIncome, GetPhaseElapsedSeconds()))
+	{
+		SetReadyToClaim();
+	}
 	// (폴백→임베드 승격 로직 제거 — OnLevelLayerReady 신호 뒤에 EnsureMissionWidgets 가 돌므로 레이어가 항상 준비된 상태라
 	//  임베드 트래커를 처음부터 직접 잡는다. 폴백은 레이어에 임베드가 아예 없을 때만 생기는 최후수단으로, 승격 불요.)
 
-	// CollectBricks — 패널을 먼저 연 플레이어 구제: OpenFactory 인데 패널이 이미 열려 있으면 강화 유도로
+	// CollectBricks — 패널을 먼저 연 플레이어 구제.
 	if (HasActiveMission() && ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks
 		&& GuidePhase == BrickGuide::OpenFactory && FactoryPanelWeak.IsValid())
 	{
-		SetGuidePhase(BrickGuide::NudgeUpgrade);
+		SetGuidePhase(BrickGuide::AddLaborer);
 	}
 
 	// M3 EnterOffice — [입장] 페이즈인데 관리 패널이 닫혔으면(미입장) 빌딩 클릭 유도로 후퇴 (2틱 보호).
@@ -1654,11 +2441,14 @@ void UMissionManagerSubsystem::PollGuideProgress()
 	if (HasActiveMission() && !bReadyToClaim
 		&& ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees)
 	{
+		const UOfficeRecruitmentFlowSubsystem* Flow = GetWorld() ? GetWorld()->GetSubsystem<UOfficeRecruitmentFlowSubsystem>() : nullptr;
+		if (Flow && Flow->IsBusy()) { TransitionMissCount = 0; return; }
 		if (GuidePhase == RecruitGuide::PressConfirm && !GachaPresentationWeak.IsValid())
 		{
 			if (++TransitionMissCount >= 2) { SetGuidePhase(RecruitGuide::PressPull); }
 		}
-		else if (GuidePhase == RecruitGuide::PressPull && !RecruitPanelWeak.IsValid())
+		else if ((GuidePhase == RecruitGuide::PickJob || GuidePhase == RecruitGuide::PressPull)
+			&& !RecruitModalWeak.IsValid())
 		{
 			if (++TransitionMissCount >= 2) { SetGuidePhase(RecruitGuide::OpenRecruit); }
 		}
@@ -1669,11 +2459,11 @@ void UMissionManagerSubsystem::PollGuideProgress()
 		return;
 	}
 
-	// M4 — 연속 배치 안내 중 배치 모드를 나갔으면([닫기]/취소) 버튼 유도로 후퇴 (2틱 보호).
-	// PlaceMore 는 배치 확정 직후에만 들어오는 페이즈라, 모드가 꺼졌다 = 플레이어가 배치를 끝내고 나갔다는 뜻.
+	// M4 — 선택 또는 연속 배치 중 배치 모드를 나갔으면([닫기]/취소) 버튼 유도로 후퇴 (2틱 보호).
+	// Confirm/PlaceMore 에서 모드가 꺼졌다 = 플레이어가 배치를 취소하거나 끝내고 나갔다는 뜻.
 	if (HasActiveMission() && !bReadyToClaim
 		&& ActiveMissionRow.ConditionType == EMissionConditionType::PlaceDesks
-		&& GuidePhase == DeskGuide::PlaceMore)
+		&& (GuidePhase == DeskGuide::Confirm || GuidePhase == DeskGuide::PlaceMore))
 	{
 		if (!IsDeskPlacementActive())
 		{
@@ -1686,16 +2476,37 @@ void UMissionManagerSubsystem::PollGuideProgress()
 		return;
 	}
 
-	// M6 — 스트립 관찰은 누를 대상이 없어 신호가 없다. 시간으로 이탈시킨다(가르치고 비켜준다).
+	// 닫기·폐기·재접속 후에도 실제 프로젝트 상태에서 안내를 다시 구한다.
 	if (HasActiveMission() && !bReadyToClaim
-		&& ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject
-		&& GuidePhase == InHouseGuide::WatchStrip)
+		&& ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject)
 	{
-		const UWorld* GuideWorld = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
-		if (GuideWorld && GuideWorld->GetTimeSeconds() - StripWatchEnteredAt >= InHouseGuide::StripWatchSeconds)
+		if (HasLaunchedRequiredProject())
 		{
-			SetGuidePhase(InHouseGuide::PressLaunch);
+			SetReadyToClaim();
+			return;
 		}
+		const UOfficeStageProgressManager* StageMgr = GetWorld()->GetSubsystem<UOfficeStageProgressManager>();
+		if (StageMgr)
+		{
+			switch (StageMgr->GetLifecycle())
+			{
+			case EProjectLifecycle::Idle:
+				SetGuidePhase(PitchBoardWeak.IsValid() && PitchBoardWeak->IsActivated()
+					? InHouseGuide::PickInHouse : InHouseGuide::OpenBoard);
+				break;
+			case EProjectLifecycle::Developing:
+				SetGuidePhase(InHouseGuide::WatchStrip);
+				break;
+			case EProjectLifecycle::LaunchPending:
+				SetGuidePhase(!(LaunchConfirmWeak.IsValid() && LaunchConfirmWeak->IsActivated()) ? InHouseGuide::WatchStrip
+					: StageMgr->IsLaunchBlocked() ? InHouseGuide::DiscardFailed : InHouseGuide::PressLaunch);
+				break;
+			case EProjectLifecycle::Operating:
+			case EProjectLifecycle::ReportPending:
+				break;
+			}
+		}
+		return;
 	}
 
 	if (!HasActiveMission() || ActiveMissionRow.ConditionType != EMissionConditionType::BuildFirstBuilding)
@@ -1703,7 +2514,7 @@ void UMissionManagerSubsystem::PollGuideProgress()
 		return;
 	}
 
-	if (GuidePhase == BuildGuide::PickGameCard)
+	if (GuidePhase == BuildGuide::PickIndustry || GuidePhase == BuildGuide::PickBuilding)
 	{
 		if (BuildModalWeak.IsValid() && BuildModalWeak->IsActivated())
 		{
@@ -1771,6 +2582,47 @@ bool UMissionManagerSubsystem::GetActiveMission(FMissionTable& OutMission) const
 	return true;
 }
 
+bool UMissionManagerSubsystem::GetMissionSequence(int32& OutCurrent, int32& OutTotal) const
+{
+	OutCurrent = 0;
+	OutTotal = 0;
+	UGameInstance* GI = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	if (!HasActiveMission() || !TableMgr)
+	{
+		return false;
+	}
+
+	TSet<FName> Visited;
+	FName MissionID = OpeningChainStartID;
+	while (!MissionID.IsNone())
+	{
+		if (Visited.Contains(MissionID))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[MissionManager] DT_Mission 체인 순환: %s"), *MissionID.ToString());
+			return false;
+		}
+		Visited.Add(MissionID);
+
+		bool bFound = false;
+		const FMissionTable Mission = TableMgr->GetMissionData(MissionID, bFound);
+		if (!bFound)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[MissionManager] DT_Mission 체인 행 누락: %s"), *MissionID.ToString());
+			return false;
+		}
+
+		++OutTotal;
+		if (MissionID == ActiveMissionID)
+		{
+			OutCurrent = OutTotal;
+		}
+		MissionID = Mission.NextMissionID;
+	}
+
+	return OutCurrent > 0;
+}
+
 namespace
 {
 	// 레이아웃 미산출 1프레임과 진짜 고장을 구분하기 위한 지연(약 0.5초 @60fps)
@@ -1828,6 +2680,33 @@ bool UMissionManagerSubsystem::IsGuideTargetActionable(UWidget* Target, FString&
 		return false;
 	}
 
+	// 조상이 숨었거나 거의 투명하면(배치 직후 상단 버튼이 다시 떠오르는 중 등) 링이 빈 배경을 가리킨다
+	float Opacity = 1.f;
+	const UWidget* Ancestor = Target;
+	for (int32 Depth = 0; Ancestor && Depth < 64; ++Depth)
+	{
+		const ESlateVisibility AncestorVis = Ancestor->GetVisibility();
+		if (Ancestor != Target && (AncestorVis == ESlateVisibility::Collapsed || AncestorVis == ESlateVisibility::Hidden))
+		{
+			OutReason = TEXT("AncestorHidden");
+			return false;
+		}
+		Opacity *= Ancestor->GetRenderOpacity();
+		// 트리의 뿌리면 그 트리를 가진 위젯으로 올라간다 ― 다른 위젯이 만들어 따로 띄운 창은 만든 쪽을 조상으로 보지 않는다
+		const UWidget* Parent = Ancestor->GetParent();
+		if (!Parent)
+		{
+			const UUserWidget* Owner = Ancestor->GetTypedOuter<UUserWidget>();
+			Parent = (Owner && Owner->GetRootWidget() == Ancestor) ? Owner : nullptr;
+		}
+		Ancestor = Parent;
+	}
+	if (Opacity < 0.3f)
+	{
+		OutReason = TEXT("Transparent");
+		return false;
+	}
+
 	OutReason.Reset();
 	return true;
 }
@@ -1837,7 +2716,7 @@ bool UMissionManagerSubsystem::IsInputGated() const
 	// 미션 없음/클레임 대기 중엔 게이트 없음 (클레임은 오버레이가 풀스크린 탭으로 별도 처리).
 	// 래치도 함께 정리 — 안 그러면 이 경로를 거친 뒤 같은 문제가 재발했을 때 Ticks 가 이미 임계값을
 	// 넘어 있어 두 번째 경고가 영영 안 뜬다.
-	if (!HasActiveMission() || bReadyToClaim)
+	if (!HasActiveMission() || bReadyToClaim || bGuideSuspendedForLaunchReward)
 	{
 		if (!LastGuideTargetProblemKey.IsEmpty())
 		{
@@ -1894,16 +2773,40 @@ bool UMissionManagerSubsystem::IsInputGated() const
 		return false;
 	}
 
+	// 도출형은 누를 대상이 있을 때만 막는다 — 기다림·배치 확정·설명 코치마크 걸음은 자유 조작
+	if (IsDerivedGuideActive())
+	{
+		const FGoalGuideStep Step = GetDerivedGuideTargets();
+		return Step.Anchor != nullptr && !Step.bObserve
+			&& !FTutorialDerivedMissionRules::IsPlacementConfirmStep(ActiveMissionRow.ConditionType, Step.Index);
+	}
+
 	// 드래그/배치 확정 서브페이즈만 자유 조작(게이트 OFF) — 월드로 드래그·카메라 조작이 필요.
 	// 배치 "버튼 누르기" 서브페이즈(PressBuild/OpenPlacement)는 게이트 ON(그 버튼만 허용).
 	switch (ActiveMissionRow.ConditionType)
 	{
+	case EMissionConditionType::CollectBricks:
+		if (GuidePhase == BrickGuide::AddLaborer || GuidePhase == BrickGuide::ExpandFactory)
+		{
+			if (const UCostActionButtonWidget* PurchaseButton = Cast<UCostActionButtonWidget>(GetCurrentHighlightTarget()))
+			{
+				if (!PurchaseButton->CanAfford()) return false;
+			}
+		}
+		return (GuidePhase == BrickGuide::OpenFactory || GuidePhase == BrickGuide::AddLaborer
+			|| GuidePhase == BrickGuide::ExpandFactory)
+			&& GetCurrentHighlightTarget() != nullptr;
 	case EMissionConditionType::BuildFirstBuilding:
-		// PickGameCard 도 OFF — 어느 빌딩 카드든 눌러야 하니 구멍 하나로 좁히면 안 된다(타겟도 없다).
-		return GuidePhase != BuildGuide::PlaceBuilding && GuidePhase != BuildGuide::PickGameCard;
+		// 첫 건물 카드까지 누를 대상을 좁히고 월드 배치에서는 자유롭게 조작한다.
+		return GuidePhase != BuildGuide::PlaceBuilding;
 	case EMissionConditionType::PlaceDesks:
-		// 배치/연속배치 중엔 게이트 OFF — 월드 탭·카메라 조작이 필요하다. 버튼 유도 페이즈만 ON.
+		// 카탈로그 선택과 배치 중엔 게이트 OFF — 카드 선택·월드 탭·카메라 조작이 필요하다.
 		return GuidePhase == DeskGuide::OpenPlacement;
+	case EMissionConditionType::RecruitEmployees:
+		// 채용 뒤 모달이 스스로 닫히는 동안은 누를 대상이 없다 ― 구멍 없는 딤으로 화면을 잠그지 않는다
+		return GuidePhase != RecruitGuide::PressCloseRecruit || GetCurrentHighlightTarget() != nullptr;
+	case EMissionConditionType::CollectFirstRevenue:
+		return GuidePhase != CollectGuide::WatchIncome;
 	case EMissionConditionType::LaunchFirstInHouseProject:
 		// 스트립은 누를 수 없는 표시용 위젯 — 게이트를 켜면 개발 중 유일한 선택지인 부스트 도박 모달까지 막혀 타임아웃된다.
 		// PickInHouse 도 OFF — 3안 중 무엇을 고를지는 플레이어 몫이라 카드 한 장으로 구멍을 좁히지 않는다.
@@ -1911,6 +2814,19 @@ bool UMissionManagerSubsystem::IsInputGated() const
 	default:
 		return true;
 	}
+}
+
+bool UMissionManagerSubsystem::IsGuideObserveStep() const
+{
+	if (!HasActiveMission() || bReadyToClaim)
+	{
+		return false;
+	}
+	if (IsDerivedGuideActive())
+	{
+		return GetDerivedGuideTargets().bObserve;
+	}
+	return ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject && GuidePhase == InHouseGuide::WatchStrip;
 }
 
 UWidget* UMissionManagerSubsystem::GetClaimSpotlightTarget() const
@@ -1933,15 +2849,30 @@ UWidget* UMissionManagerSubsystem::GetClaimSpotlightTarget() const
 	return Tracker;
 }
 
-UWidget* UMissionManagerSubsystem::GetCurrentHighlightTarget() const
+UWidget* UMissionManagerSubsystem::GetCurrentSecondaryHighlightTarget() const
 {
-	// 클레임 대기 중엔 유도 없음 — 카드 탭만 기다린다
-	if (!HasActiveMission() || bReadyToClaim)
+	if (!HasActiveMission() || bReadyToClaim || bGuideSuspendedForLaunchReward
+		|| ActiveMissionRow.ConditionType != EMissionConditionType::LaunchFirstInHouseProject
+		|| GuidePhase != InHouseGuide::WatchStrip)
 	{
 		return nullptr;
 	}
+	return OfficeMainWeak.IsValid() ? OfficeMainWeak->GetStripRequirementRowWidget() : nullptr;
+}
 
-	// 벽돌 노가다 유도 — 0 공장 액터 스포트라이트, 1 [공장] 버튼(패널 열기), 2 강화 버튼 넛지
+UWidget* UMissionManagerSubsystem::GetCurrentHighlightTarget() const
+{
+	// 클레임 대기 중엔 유도 없음 — 카드 탭만 기다린다
+	if (!HasActiveMission() || bReadyToClaim || bGuideSuspendedForLaunchReward)
+	{
+		return nullptr;
+	}
+	if (IsDerivedGuideActive())
+	{
+		return GetDerivedGuideTargets().Anchor;
+	}
+
+	// 벽돌 생산 유도 — 공장 버튼과 인부 추가 슬롯만 링으로 표시한다.
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks)
 	{
 		if (GuidePhase == BrickGuide::OpenFactory)
@@ -1949,24 +2880,15 @@ UWidget* UMissionManagerSubsystem::GetCurrentHighlightTarget() const
 			// [공장] 버튼 — 공장 패널 열기 유도
 			return BuildOpenWidgetWeak.IsValid() ? BuildOpenWidgetWeak->GetFactoryOpenButtonWidget() : nullptr;
 		}
-		if (GuidePhase == BrickGuide::NudgeUpgrade)
+		if (GuidePhase == BrickGuide::AddLaborer || GuidePhase == BrickGuide::ExpandFactory)
 		{
-			// 패널이 열려 있으면 첫 강화 슬롯, 닫혀 있으면 [공장] 버튼으로 재유도
+			// 패널을 닫았다면 [공장] 버튼으로 다시 안내한다.
 			if (FactoryPanelWeak.IsValid())
 			{
-				if (UWidget* Nudge = FactoryPanelWeak->GetUpgradeNudgeTarget())
-				{
-					return Nudge;
-				}
-			}
-			return BuildOpenWidgetWeak.IsValid() ? BuildOpenWidgetWeak->GetFactoryOpenButtonWidget() : nullptr;
-		}
-		if (GuidePhase == BrickGuide::NudgeUpgrade2)
-		{
-			// 아래(둘째) 강화 슬롯, 닫혀 있으면 [공장] 버튼으로 재유도
-			if (FactoryPanelWeak.IsValid())
-			{
-				if (UWidget* Nudge = FactoryPanelWeak->GetSecondUpgradeNudgeTarget())
+				UWidget* Nudge = GuidePhase == BrickGuide::AddLaborer
+					? FactoryPanelWeak->GetLaborerUpgradeTarget()
+					: FactoryPanelWeak->GetFactoryExpansionUpgradeTarget();
+				if (Nudge)
 				{
 					return Nudge;
 				}
@@ -1975,7 +2897,6 @@ UWidget* UMissionManagerSubsystem::GetCurrentHighlightTarget() const
 		}
 		return nullptr;
 	}
-
 	// M3 EnterOffice — p0(ClickBuilding)은 빌딩 월드 스포트라이트(GetCurrentSpotlightActor)라 링 없음,
 	// p1(PressEnter)에서 ManagePanel [입장] 버튼에 링.
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::EnterOffice)
@@ -1990,22 +2911,32 @@ UWidget* UMissionManagerSubsystem::GetCurrentHighlightTarget() const
 	// M5 RecruitEmployees — p0 [채용] 도크 버튼 / p1 [×N 한번에 채용] / p2 [확인] / p3 [닫기]
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::RecruitEmployees)
 	{
+		const UOfficeRecruitmentFlowSubsystem* Flow = GetWorld() ? GetWorld()->GetSubsystem<UOfficeRecruitmentFlowSubsystem>() : nullptr;
+		if (Flow && Flow->IsBusy()) return nullptr;
 		if (GuidePhase == RecruitGuide::OpenRecruit)
 			return OfficeMainWeak.IsValid() ? OfficeMainWeak->GetRecruitmentButtonWidget() : nullptr;
+		if (GuidePhase == RecruitGuide::PickJob)
+			return RecruitModalWeak.IsValid() ? RecruitModalWeak->GetJobSelectionWidget(GetRequiredRecruitDiscipline()) : nullptr;
 		if (GuidePhase == RecruitGuide::PressPull)
-			return RecruitPanelWeak.IsValid() ? RecruitPanelWeak->GetPullButtonMultiWidget() : nullptr;
+			return RecruitModalWeak.IsValid() ? RecruitModalWeak->GetPullButtonMultiWidget() : nullptr;
 		if (GuidePhase == RecruitGuide::PressConfirm)
 			return GachaPresentationWeak.IsValid() ? GachaPresentationWeak->GetConfirmButtonWidget() : nullptr;
-		if (GuidePhase == RecruitGuide::PressCloseRecruit)
-			return RecruitPanelWeak.IsValid() ? RecruitPanelWeak->GetCloseButtonWidget() : nullptr;
+		// PressCloseRecruit 는 링 대상이 없다 ― 채용 모달은 고용 확정 뒤 스스로 닫힌다
 		return nullptr;
 	}
 
-	// M4 PlaceDesks — p0 [책상 배치] 버튼 / p1·p2 배치 바 [배치] 링 (드래그 손은 제스처 채널)
+	// M4 PlaceDesks — p0 [책상 배치] 버튼 / p1 카탈로그 자유 선택 / p2·p3 배치 바 [배치] 링
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::PlaceDesks)
 	{
 		if (GuidePhase == DeskGuide::OpenPlacement)
 			return OfficeMainWeak.IsValid() ? OfficeMainWeak->GetWorkstationOpenButtonWidget() : nullptr;
+		if (GuidePhase == DeskGuide::PickDesk)
+		{
+			UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+			UUIBase* Base = UIMgr ? UIMgr->GetUIBase() : nullptr;
+			UOfficeWorkstationPanelWidget* Catalog = Base ? Cast<UOfficeWorkstationPanelWidget>(Base->GetActiveBottomWidget()) : nullptr;
+			return Catalog ? Catalog->GetDeskGuideCatalogWidget() : nullptr;
+		}
 		if (GuidePhase == DeskGuide::Confirm || GuidePhase == DeskGuide::PlaceMore)
 			return BuildPlacementPanelWeak.IsValid() ? BuildPlacementPanelWeak->GetPlaceButtonWidget() : nullptr;
 		return nullptr;
@@ -2020,19 +2951,25 @@ UWidget* UMissionManagerSubsystem::GetCurrentHighlightTarget() const
 		if (GuidePhase == InHouseGuide::PickInHouse)
 			return PitchBoardWeak.IsValid() ? PitchBoardWeak->GetRecommendCardCtaWidget() : nullptr;
 		if (GuidePhase == InHouseGuide::WatchStrip)
-			return OfficeMainWeak.IsValid() ? OfficeMainWeak->GetStripRowWidget() : nullptr;
+			return OfficeMainWeak.IsValid() ? OfficeMainWeak->GetStripRequirementRowWidget() : nullptr;
 		if (GuidePhase == InHouseGuide::PressLaunch)
 			return LaunchConfirmWeak.IsValid() ? LaunchConfirmWeak->GetConfirmButtonWidget() : nullptr;
+		if (GuidePhase == InHouseGuide::DiscardFailed)
+			return LaunchConfirmWeak.IsValid() ? LaunchConfirmWeak->GetDiscardButtonWidget() : nullptr;
 		return nullptr;
 	}
 
-	// M7 CollectFirstRevenue — p0 사무실 [뒤로] / p1 순차 설명 / p2 [수집]
+	// M7 CollectFirstRevenue — p0 사무실 [뒤로] / p1 순차 설명 / p2 수익 관찰(타겟 없음)
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::CollectFirstRevenue)
 	{
 		if (GuidePhase == CollectGuide::ExitOffice)
 			return OfficeLayerWeak.IsValid() ? OfficeLayerWeak->GetBackButtonWidget() : nullptr;
-		if (GuidePhase == CollectGuide::PressCollect)
-			return BuildOpenWidgetWeak.IsValid() ? BuildOpenWidgetWeak->GetCollectAllButtonWidget() : nullptr;
+		if (GuidePhase == CollectGuide::WatchIncome)
+		{
+			UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+			UInGameLayerWidget* Layer = UIMgr ? UIMgr->GetInGameLayer() : nullptr;
+			return Layer ? Layer->GetRevenueRateChipWidget() : nullptr;
+		}
 		return nullptr;
 	}
 
@@ -2049,31 +2986,17 @@ UWidget* UMissionManagerSubsystem::GetCurrentHighlightTarget() const
 	{
 		return BuildPlacementPanelWeak.IsValid() ? BuildPlacementPanelWeak->GetPlaceButtonWidget() : nullptr;
 	}
-	// PickGameCard — 링/딤 없음. 어느 빌딩을 세우냐가 곧 플레이어의 선택이고, 문구도 "원하는 빌딩"이라
-	// 첫 카드만 밝히면 안내와 화면이 어긋난다. 산업(게임)은 이미 기본 선택이라 모달 자체가 범위를 좁혀 준다.
+	if (GuidePhase == BuildGuide::PickIndustry)
+	{
+		UBuildModalWidget* Catalog = Cast<UBuildModalWidget>(BuildModalWeak.Get());
+		return Catalog ? Catalog->GetBuildGuideIndustryWidget() : nullptr;
+	}
+	if (GuidePhase == BuildGuide::PickBuilding)
+	{
+		UBuildModalWidget* Catalog = Cast<UBuildModalWidget>(BuildModalWeak.Get());
+		return Catalog ? Catalog->GetBuildGuideFirstCardWidget() : nullptr;
+	}
 	return nullptr;
-}
-
-void UMissionManagerSubsystem::GetCurrentHighlightExtraTargets(TArray<UWidget*>& OutExtras) const
-{
-	OutExtras.Reset();
-
-	if (!HasActiveMission() || bReadyToClaim)
-	{
-		return;
-	}
-
-	// M6 WatchStrip — 점수(스트립 행)와 배속 토글을 같은 딤에서 함께 보여준다.
-	// 점수만 뚫으면 "기다리는 화면"으로 읽혀 배속이 있다는 걸 못 배운 채 15초를 흘려보낸다.
-	if (ActiveMissionRow.ConditionType == EMissionConditionType::LaunchFirstInHouseProject
-		&& GuidePhase == InHouseGuide::WatchStrip
-		&& OfficeMainWeak.IsValid())
-	{
-		if (UWidget* SpeedBtn = OfficeMainWeak->GetStripSpeedButtonWidget())
-		{
-			OutExtras.Add(SpeedBtn);
-		}
-	}
 }
 
 AActor* UMissionManagerSubsystem::GetCurrentSpotlightActor() const
@@ -2082,10 +3005,15 @@ AActor* UMissionManagerSubsystem::GetCurrentSpotlightActor() const
 	{
 		return nullptr;
 	}
+	if (IsDerivedGuideActive())
+	{
+		return GetDerivedGuideTargets().Spot;
+	}
 
-	// 벽돌 노가다 — 공장 액터 스포트라이트 (TapFactory 페이즈)
+	// 자동 생산 관찰과 홀드 학습에서 공장을 밝힌다. 관찰 단계의 손 제스처는 표시하지 않는다.
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks
-		&& GuidePhase == BrickGuide::TapFactory)
+		&& (GuidePhase == BrickGuide::ObserveLaborers || GuidePhase == BrickGuide::WatchExpansion
+			|| GuidePhase == BrickGuide::BoostLaborers))
 	{
 		if (!BrickFactoryWeak.IsValid())
 		{
@@ -2094,13 +3022,12 @@ AActor* UMissionManagerSubsystem::GetCurrentSpotlightActor() const
 		}
 		return BrickFactoryWeak.Get();
 	}
-
 	// M3 EnterOffice — 지은 회사 빌딩 스포트라이트 (ClickBuilding 페이즈, MainMap).
-	// 캡처가 없으면(예: 오피스 직접 재접속 후 MainMap 복귀) null → 스포트라이트 생략, 멘토 라인만 유지.
+	// 새 월드에서는 저장된 회사 목록으로 재탐색한다.
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::EnterOffice
 		&& GuidePhase == EnterOfficeGuide::ClickBuilding)
 	{
-		return TutorialFirstBuildingWeak.Get();
+		return TutorialFirstBuildingWeak.IsValid() ? TutorialFirstBuildingWeak.Get() : PickGuideBuilding();
 	}
 
 	return nullptr;
@@ -2109,20 +3036,46 @@ AActor* UMissionManagerSubsystem::GetCurrentSpotlightActor() const
 EGestureHintKind UMissionManagerSubsystem::GetCurrentGesture() const
 {
 	if (!HasActiveMission() || bReadyToClaim) return EGestureHintKind::None;
+	if (IsDerivedGuideActive())
+	{
+		// 페이즈는 0.25초 늦게 따라오므로 손 모양도 지금 걸음에서 정한다. 월드 대상은 탭, 버튼은 링이 맡는다
+		const FGoalGuideStep Step = GetDerivedGuideTargets();
+		if (FTutorialDerivedMissionRules::IsPlacementConfirmStep(ActiveMissionRow.ConditionType, Step.Index))
+		{
+			return EGestureHintKind::Drag;
+		}
+		return Step.Spot && !Step.bObserve ? EGestureHintKind::Tap : EGestureHintKind::None;
+	}
 	return GuideGestureRules::ResolveGesture(ActiveMissionRow.ConditionType, GuidePhase);
 }
 
 float UMissionManagerSubsystem::GetGuideDimScale() const
 {
 	if (!HasActiveMission() || bReadyToClaim) return 1.f;
+	if (IsDerivedGuideActive())
+	{
+		const FGoalGuideStep Step = GetDerivedGuideTargets();
+		return Step.bObserve || FTutorialDerivedMissionRules::IsPlacementConfirmStep(ActiveMissionRow.ConditionType, Step.Index) ? 0.f : 1.f;
+	}
 	return GuideGestureRules::ResolveDimScale(ActiveMissionRow.ConditionType, GuidePhase);
 }
 
 AActor* UMissionManagerSubsystem::GetCurrentGestureAnchorActor() const
 {
 	if (!HasActiveMission() || bReadyToClaim) return nullptr;
+	if (IsDerivedGuideActive())
+	{
+		const FGoalGuideStep Step = GetDerivedGuideTargets();
+		if (FTutorialDerivedMissionRules::IsPlacementConfirmStep(ActiveMissionRow.ConditionType, Step.Index))
+		{
+			return FindPlacementPreviewActor(GetGameInstance());
+		}
+		return Step.Spot;
+	}
 	switch (GuideGestureRules::ResolveAnchor(ActiveMissionRow.ConditionType, GuidePhase))
 	{
+	case EGestureAnchorKind::SpotlightActor:
+		return GetCurrentSpotlightActor();
 	case EGestureAnchorKind::BrickFactory:
 		if (!BrickFactoryWeak.IsValid())
 		{
@@ -2130,14 +3083,7 @@ AActor* UMissionManagerSubsystem::GetCurrentGestureAnchorActor() const
 		}
 		return BrickFactoryWeak.Get();
 	case EGestureAnchorKind::PlacementPreview:
-	{
-		// 배치 프리뷰는 플레이어 폰의 PlacementHandler 가 소유한다 (IsPlacementActive 와 같은 경로)
-		UWorld* GuideWorld = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr;
-		APlayerController* PC = GuideWorld ? GuideWorld->GetFirstPlayerController() : nullptr;
-		APawn* Pawn = PC ? PC->GetPawn() : nullptr;
-		UPlacementHandler* Handler = Pawn ? Pawn->FindComponentByClass<UPlacementHandler>() : nullptr;
-		return Handler ? Handler->GetPlacementTargetActor() : nullptr;
-	}
+		return FindPlacementPreviewActor(GetGameInstance());
 	default:
 		return nullptr;
 	}
@@ -2182,14 +3128,11 @@ bool UMissionManagerSubsystem::GetExplainTargetForStep(int32 Step, UWidget*& Out
 		Layer->GetRevenueRateChipWidget(),
 		Layer->GetVaultGaugeWidgetForBuilding(Idx),
 	};
-	const FGuideExplainCopy StepCopy[ExplainStepCount] = {
-		{ NSLOCTEXT("Guide", "ExplainRateEyebrow", "수입"),
-		  NSLOCTEXT("Guide", "ExplainRateBody",   "회사가 지금 벌어들이는 수입입니다."),
-		  EGuideTooltipDir::Up },
-		{ NSLOCTEXT("Guide", "ExplainBarEyebrow", "진행"),
-		  NSLOCTEXT("Guide", "ExplainBarBody",    "다 차면 프로젝트가 끝납니다."),
-		  EGuideTooltipDir::Right },
-	};
+	if (!ActiveMissionRow.ExplainLines.IsValidIndex(Step)
+		|| ActiveMissionRow.ExplainLines[Step].IsEmpty())
+	{
+		return false;
+	}
 
 	// 이 스텝 하나만 본다 — 둘을 한꺼번에 요구하면 Bar 하나가 없을 때 수입 설명까지 못 뜬다.
 	FString Reason;
@@ -2207,7 +3150,8 @@ bool UMissionManagerSubsystem::GetExplainTargetForStep(int32 Step, UWidget*& Out
 	}
 
 	OutTarget = StepTargets[Step];
-	OutCopy = StepCopy[Step];
+	OutCopy.Body = ActiveMissionRow.ExplainLines[Step];
+	OutCopy.Dir = Step == 0 ? EGuideTooltipDir::Up : EGuideTooltipDir::Right;
 	return true;
 }
 
@@ -2232,7 +3176,7 @@ void UMissionManagerSubsystem::AdvanceExplainPhase(bool bWaitForNextTarget)
 	switch (ResolveGuideExplainAdvanceAction(ExplainStep, ExplainStepCount, bNextTargetReady))
 	{
 	case EGuideExplainAdvanceAction::FinishExplainPhase:
-		SetGuidePhase(CollectGuide::PressCollect);
+		SetGuidePhase(CollectGuide::WatchIncome);
 		return;
 	case EGuideExplainAdvanceAction::CommitNextStep:
 		ExplainStep = NextStep;
@@ -2287,12 +3231,34 @@ void UMissionManagerSubsystem::ResolvePendingExplainAdvance(float TimeoutSeconds
 	const int32 StepAfterSkipped = ResolveNextExplainStep(NextStep, ExplainStepCount);
 	if (StepAfterSkipped == INDEX_NONE)
 	{
-		SetGuidePhase(CollectGuide::PressCollect);
+		SetGuidePhase(CollectGuide::WatchIncome);
 	}
 	else
 	{
 		ExplainStep = StepAfterSkipped;
 	}
+}
+
+bool UMissionManagerSubsystem::HasLaunchedRequiredProject() const
+{
+	USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>();
+	const USaveGame_GameData* Save = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr;
+	if (!Save || ActiveMissionRow.RequiredProjectIndex <= 0) return false;
+	const UCGGameInstance* CGInstance = Cast<UCGGameInstance>(GetGameInstance());
+	int32 BuildingIndex = CGInstance ? CGInstance->GetCurrentManagedBuildingIndex() : INDEX_NONE;
+	if (BuildingIndex == INDEX_NONE && Save->GameData.Buildings.Num() == 1)
+	{
+		BuildingIndex = Save->GameData.Buildings[0].BuildingIndex;
+	}
+	for (const FBuildingEntitySaveData& Building : Save->GameData.Buildings)
+	{
+		if (Building.BuildingIndex == BuildingIndex)
+		{
+			return FTutorialMissionRestoreRules::HasRequiredLaunch(Save->GameData.ShippedProjects,
+				BuildingIndex, Building.BuildingData.CompanyType, ActiveMissionRow.RequiredProjectIndex);
+		}
+	}
+	return false;
 }
 
 ABuildingBaseActor* UMissionManagerSubsystem::PickGuideBuilding() const
@@ -2315,15 +3281,743 @@ ABuildingBaseActor* UMissionManagerSubsystem::PickGuideBuilding() const
 	return EntityMgr->GetBuildingByIndex(LastIdx);
 }
 
+// ===== 도출형 튜토리얼 (M8~M31) =====
+
+int32 UMissionManagerSubsystem::GetTutorialCompanyIndex(int32 Order) const
+{
+	UGameInstance* GI = GetGameInstance();
+	USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+	const USaveGame_GameData* Save = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr;
+	TArray<int32> OwnedIndices;
+	if (Save)
+	{
+		// 공장은 Buildings 가 아니라 FactoryData 에 있어 회사만 남는다
+		for (const FBuildingEntitySaveData& Building : Save->GameData.Buildings)
+		{
+			OwnedIndices.Add(Building.BuildingIndex);
+		}
+	}
+	// 막 지은 회사는 다음 저장 전까지 세이브에 없다 — 이 맵의 회사도 합친다
+	UWorld* CurWorld = GetWorld();
+	if (const UEntityManager* Entities = CurWorld ? CurWorld->GetSubsystem<UEntityManager>() : nullptr)
+	{
+		for (const ABuildingBaseActor* Building : Entities->GetBuildings())
+		{
+			if (IsValid(Building))
+			{
+				OwnedIndices.Add(Building->GetBuildingIndex());
+			}
+		}
+	}
+	const int32 CompanyIndex = FTutorialDerivedMissionRules::ResolveCompanyIndexByOrder(OwnedIndices, Order);
+	if (CompanyIndex != INDEX_NONE || Order > 1)
+	{
+		return CompanyIndex;
+	}
+	const ABuildingBaseActor* Fallback = PickGuideBuilding();
+	return Fallback ? Fallback->GetBuildingIndex() : INDEX_NONE;
+}
+
+int32 UMissionManagerSubsystem::GetActiveTutorialCompanyIndex() const
+{
+	return GetTutorialCompanyIndex(IsDerivedGuideActive() ? ActiveMissionRow.TutorialCompanyOrder : 1);
+}
+
+const FBuildingEntitySaveData* UMissionManagerSubsystem::FindTutorialCompanySave(int32 CompanyIndex) const
+{
+	UGameInstance* GI = GetGameInstance();
+	USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+	const USaveGame_GameData* Save = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr;
+	if (!Save || CompanyIndex == INDEX_NONE)
+	{
+		return nullptr;
+	}
+	return Save->GameData.Buildings.FindByPredicate([CompanyIndex](const FBuildingEntitySaveData& Building)
+	{
+		return Building.BuildingIndex == CompanyIndex;
+	});
+}
+
+ABuildingBaseActor* UMissionManagerSubsystem::FindTutorialCompanyActor(int32 CompanyIndex) const
+{
+	UWorld* CurWorld = GetWorld();
+	UEntityManager* Entities = CurWorld ? CurWorld->GetSubsystem<UEntityManager>() : nullptr;
+	return Entities && CompanyIndex != INDEX_NONE ? Entities->GetBuildingByIndex(CompanyIndex) : nullptr;
+}
+
+FContentGuideSpec UMissionManagerSubsystem::MakeActiveMissionSpec() const
+{
+	FContentGuideSpec Spec;
+	if (!HasActiveMission())
+	{
+		return Spec;
+	}
+	Spec.Condition = ActiveMissionRow.ConditionType;
+	Spec.BuildingIndex = GetActiveTutorialCompanyIndex();
+	Spec.Discipline = ActiveMissionRow.RequiredRecruitDiscipline;
+	Spec.TargetProjectIndex = ActiveMissionRow.RequiredProjectIndex;
+	Spec.ConditionAmount = ActiveMissionRow.ConditionAmount;
+	Spec.Industry = ActiveMissionRow.RequiredIndustry;
+	if (Spec.Industry == ECompanyType::None)
+	{
+		const int32 FirstCompanyIndex = GetTutorialCompanyIndex();
+		if (const FBuildingEntitySaveData* FirstCompany = FindTutorialCompanySave(FirstCompanyIndex))
+		{
+			Spec.Industry = FirstCompany->BuildingData.CompanyType;
+		}
+		else if (const ABuildingBaseActor* FirstActor = FindTutorialCompanyActor(FirstCompanyIndex))
+		{
+			Spec.Industry = FirstActor->GetCompanyType();
+		}
+	}
+	Spec.bForcedTutorial = true;
+	return Spec;
+}
+
+FGoalGuideStep UMissionManagerSubsystem::GetDerivedStep() const
+{
+	return IsDerivedGuideActive() ? ResolveContentStep(MakeActiveMissionSpec()) : FGoalGuideStep();
+}
+
+FGoalGuideStep UMissionManagerSubsystem::GetDerivedGuideTargets() const
+{
+	if (!IsDerivedGuideActive() || bReadyToClaim || IsPanelIntroPlaying())
+	{
+		return FGoalGuideStep();
+	}
+	return GetDerivedStep();
+}
+
+bool UMissionManagerSubsystem::IsPanelIntroPlaying() const
+{
+	const UGameInstance* GI = GetGameInstance();
+	const UPanelIntroSubsystem* IntroMgr = GI ? GI->GetSubsystem<UPanelIntroSubsystem>() : nullptr;
+	return IntroMgr && IntroMgr->IsIntroPlaying();
+}
+
+bool UMissionManagerSubsystem::HasDerivedLatch(const TCHAR* LatchName) const
+{
+	return LatchName && DerivedMissionLatches.Contains(FName(LatchName));
+}
+
+bool UMissionManagerSubsystem::IsCompanyEnhancementUnlocked() const
+{
+	return FTutorialEnhancementGateRules::IsCompanyEnhancementUnlocked(bTutorialCompleted, IsDerivedGuideActive());
+}
+
+void UMissionManagerSubsystem::AddDerivedLatch(const TCHAR* LatchName)
+{
+	if (!LatchName || !IsDerivedGuideActive())
+	{
+		return;
+	}
+	const FName Latch(LatchName);
+	if (DerivedMissionLatches.Contains(Latch))
+	{
+		return;
+	}
+	DerivedMissionLatches.Add(Latch);
+	UE_LOG(LogTemp, Log, TEXT("[MissionGuide] 래치 기록 ― %s %s"), *ActiveMissionID.ToString(), LatchName);
+	// 이벤트형은 그 순간을 놓치면 흔적이 없어 래치 시점에 저장을 건다
+	if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
+	{
+		SaveMgr->RequestDeferredSave();
+	}
+}
+
+void UMissionManagerSubsystem::HandlePanelIntroCompleted(FName PanelKey)
+{
+	if (!IsDerivedGuideActive() || bReadyToClaim)
+	{
+		return;
+	}
+	if (const TCHAR* Latch = FTutorialDerivedMissionRules::ResolveIntroLatch(ActiveMissionRow.ConditionType, PanelKey))
+	{
+		AddDerivedLatch(Latch);
+		EvaluateDerivedMissionCompletion();
+	}
+}
+
+void UMissionManagerSubsystem::PollDerivedGuide()
+{
+	const FGoalGuideStep Step = GetDerivedStep();
+	if (UScrollBox* Scroll = FindGuideScrollBox(Step.Anchor))
+	{
+		Scroll->ScrollWidgetIntoView(Step.Anchor, true, EDescendantScrollDestination::IntoView);
+	}
+	// 문구·트래커 채널은 페이즈를 본다. 대상은 게터가 매 틱 다시 구하므로 여기서는 번호만 맞춘다
+	if (Step.Index != INDEX_NONE && Step.Index != GuidePhase)
+	{
+		SetGuidePhase(Step.Index);
+	}
+	// 인수할 회사·철거한 부지는 첫 화면 밖에 있다 — 셰브론만 보고 찾아가게 두지 않고 대상이 바뀔 때 한 번 데려간다
+	if (Step.Spot != DerivedFocusedSpotWeak.Get())
+	{
+		const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+		if (Step.Spot != DerivedPendingSpotWeak.Get())
+		{
+			DerivedPendingSpotWeak = Step.Spot;
+			DerivedSpotSeenAt = Now;
+		}
+		const bool bLoadingShown = IsMoviePlayerEnabled() && GetMoviePlayer()->IsMovieCurrentlyPlaying();
+		if (bLoadingShown)
+		{
+			DerivedSpotSeenAt = Now;
+		}
+		APlayerCamera* Camera = IsValid(Step.Spot) && !bLoadingShown && Now - DerivedSpotSeenAt >= 0.5
+			? FindPlayerCamera(GetWorld()) : nullptr;
+		if (!Step.Spot || Camera)
+		{
+			DerivedFocusedSpotWeak = Step.Spot;
+			if (Camera)
+			{
+				Camera->FocusOnActor(Step.Spot, 0.5f, false);
+			}
+		}
+	}
+	UpdateDerivedPresentation(Step);
+	EvaluateDerivedMissionCompletion();
+}
+
+void UMissionManagerSubsystem::UpdateDerivedPresentation(const FGoalGuideStep& Step)
+{
+	UWorld* CurWorld = GetWorld();
+	const double Now = CurWorld ? CurWorld->GetTimeSeconds() : 0.0;
+
+	// 설명 패널이 닫혔으면 다시 열 때 코치마크를 처음부터 띄울 수 있게 기록을 지운다
+	const UCommonActivatableWidget* IntroPanel = Cast<UCommonActivatableWidget>(DerivedIntroPanelWeak.Get());
+	if (!IntroPanel || !IntroPanel->IsActivated())
+	{
+		DerivedIntroPanelWeak.Reset();
+	}
+
+	UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+	UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr;
+	UCommonActivatableWidget* TopPrompt = UIBase ? UIBase->GetActivePromptWidget() : nullptr;
+
+	// 설명 걸음에 들어오면 패널 코치마크를 한 번 띄운다. 기록 없이 끝나면(앵커 누락 등) 같은 패널에 무한 재생하지 않고 통과시킨다
+	// 보상 띠가 지나가는 동안 코치마크를 시작하면 첫 장이 띠 밑에서 지나간다 ― 띠가 걷힌 뒤 시작한다
+	const bool bRewardToastShown = UIMgr && UIMgr->IsRewardToastShown();
+	auto PlayIntroOnce = [this, bRewardToastShown](auto* Panel, const TCHAR* Latch)
+	{
+		if (!Panel || !Panel->IsActivated() || HasDerivedLatch(Latch) || Panel->IsPanelIntroPlaying() || bRewardToastShown)
+		{
+			return;
+		}
+		if (DerivedIntroPanelWeak.Get() == Panel)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[MissionGuide] 설명 코치마크가 완료 기록 없이 끝났습니다 ― %s %s 걸음을 통과로 처리합니다"),
+				*ActiveMissionID.ToString(), Latch);
+			AddDerivedLatch(Latch);
+			return;
+		}
+		DerivedIntroPanelWeak = Panel;
+		if (!Panel->PlayPanelIntro())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[MissionGuide] 설명 코치마크를 시작하지 못했습니다(DT_PanelIntro 확인) ― %s %s 걸음을 통과로 처리합니다"),
+				*ActiveMissionID.ToString(), Latch);
+			AddDerivedLatch(Latch);
+		}
+	};
+
+	switch (ActiveMissionRow.ConditionType)
+	{
+	case EMissionConditionType::ExplainPlot:
+	{
+		// 철거한 회사가 있던 부지의 구매 창을 일정 시간 읽어야 설명을 본 것으로 친다
+		ACityPlotActor* Plot = FindTutorialClearedPlot(CurWorld);
+		// 「이 땅의 회사를 모두 비우면」이 어느 땅인지 보이게 설명 내내 부지 바닥을 밝혀 둔다
+		if (Plot)
+		{
+			Plot->HoldSelectionHighlight();
+		}
+		if (!Plot || !Plot->IsPurchaseDialogOpen())
+		{
+			DerivedPlotDialogOpenedAt = -1.0;
+			break;
+		}
+		if (DerivedPlotDialogOpenedAt < 0.0)
+		{
+			DerivedPlotDialogOpenedAt = Now;
+		}
+		if (FTutorialDerivedMissionRules::ShouldLatchPlotExplain(DerivedPlotDialogOpenedAt, Now))
+		{
+			AddDerivedLatch(TutorialDerivedLatch::PlotDialogSeen);
+		}
+		break;
+	}
+	case EMissionConditionType::ReachHQLevel:
+		if (Step.Index == HQLevelUpGuide::Explain)
+		{
+			PlayIntroOnce(Cast<UHQManagePanelWidget>(TopPrompt), TutorialDerivedLatch::HQIntroDone);
+		}
+		break;
+	case EMissionConditionType::MenuTour:
+		if (Step.Index == MenuTourGuide::ExplainMenu)
+		{
+			PlayIntroOnce(Cast<UMenuPanelWidget>(TopPrompt), TutorialDerivedLatch::MenuIntroDone);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+void UMissionManagerSubsystem::EvaluateDerivedMissionCompletion()
+{
+	if (!IsDerivedGuideActive() || bReadyToClaim || bCompletingMission)
+	{
+		return;
+	}
+	// 같은 프레임에 이미 한 미션이 넘어갔으면 다음 폴에서 본다 — 설명 없이 연달아 건너뛰는 미션을 로그로 드러내려고
+	if (LastMissionAdvanceFrame == GFrameCounter)
+	{
+		return;
+	}
+	const bool bFirstEvaluation = !bDerivedEvaluatedOnce;
+	bDerivedEvaluatedOnce = true;
+	// 레벨업 보상 지급의 자원 변경이 레벨업 신호보다 먼저 판정을 부를 수 있다 — 오른 레벨을 처음 본 순간부터 연출 시간을 잰다
+	if (!bFirstEvaluation && ActiveMissionRow.ConditionType == EMissionConditionType::ReachHQLevel && DerivedHQLevelSignalAt < 0.0)
+	{
+		USaveLoadManager* SaveMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<USaveLoadManager>() : nullptr;
+		if (SaveMgr && SaveMgr->GetHQLevel() >= FTutorialDerivedMissionRules::ResolveTarget(ActiveMissionRow.ConditionAmount))
+		{
+			DerivedHQLevelSignalAt = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0;
+		}
+	}
+	if (ActiveMissionRow.ConditionType == EMissionConditionType::EquipFirstEquipment && !HasDerivedLatch(TutorialDerivedLatch::EquipBaseline))
+	{
+		TArray<FGuid> Worn;
+		CollectEquippedInBuilding(GetGameInstance(), GetActiveTutorialCompanyIndex(), Worn);
+		for (const FGuid& InstanceId : Worn)
+		{
+			AddDerivedLatch(*FTutorialDerivedMissionRules::MakeEquipHadLatch(InstanceId).ToString());
+		}
+		AddDerivedLatch(TutorialDerivedLatch::EquipBaseline);
+	}
+	if (!IsDerivedMissionConditionMet())
+	{
+		return;
+	}
+	if (bFirstEvaluation)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[MissionGuide] 이미 충족된 미션을 건너뜁니다 ― %s"), *ActiveMissionID.ToString());
+	}
+	SetReadyToClaim();
+}
+
+bool UMissionManagerSubsystem::IsDerivedMissionConditionMet() const
+{
+	UGameInstance* GI = GetGameInstance();
+	UCGGameInstance* CGInstance = Cast<UCGGameInstance>(GI);
+	UWorld* CurWorld = GetWorld();
+	USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+	const USaveGame_GameData* Save = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr;
+	const UEmployeeManager* Employees = GI ? GI->GetSubsystem<UEmployeeManager>() : nullptr;
+	const int64 Amount = ActiveMissionRow.ConditionAmount;
+	const int32 Target = FTutorialDerivedMissionRules::ResolveTarget(Amount);
+	const double Now = CurWorld ? CurWorld->GetTimeSeconds() : 0.0;
+	const int32 CompanyIndex = GetActiveTutorialCompanyIndex();
+	const ABuildingBaseActor* CompanyActor = FindTutorialCompanyActor(CompanyIndex);
+	const FBuildingEntitySaveData* CompanySave = FindTutorialCompanySave(CompanyIndex);
+	// 사무실 실물 책상은 그 회사 사무실에 있을 때만 믿는다. 그 밖에서는 저장된 배치를 센다
+	const UOfficeManager* LiveOffice = CurWorld && CGInstance && CGInstance->IsInOfficeMap()
+		&& CGInstance->GetCurrentManagedBuildingIndex() == CompanyIndex
+		? CurWorld->GetSubsystem<UOfficeManager>() : nullptr;
+	const FOfficeSaveData* SavedOffice = Save && CompanyIndex != INDEX_NONE
+		? Save->GameData.OfficeDataMap.Find(CompanyIndex) : nullptr;
+
+	switch (ActiveMissionRow.ConditionType)
+	{
+	case EMissionConditionType::UpgradeFactoryStats:
+	{
+		if (!BrickFactoryWeak.IsValid() && CurWorld && !(CGInstance && CGInstance->IsInOfficeMap()))
+		{
+			BrickFactoryWeak = UGameplayStatics::GetActorOfClass(CurWorld, ABrickFactory::StaticClass());
+		}
+		const ABrickFactory* Factory = Cast<ABrickFactory>(BrickFactoryWeak.Get());
+		// 패널까지 닫혀야 끝 — 열린 패널이 다음 미션의 도크 버튼을 덮는다
+		return Factory && !FactoryPanelWeak.IsValid() && FTutorialDerivedMissionRules::AreFactoryStatsReached(
+			Factory->GetUpgradeLevel(EFactoryUpgradeType::HoldProductionSpeed),
+			Factory->GetUpgradeLevel(EFactoryUpgradeType::HoldProductionAmount),
+			Amount);
+	}
+	case EMissionConditionType::RaiseBuildingFloor:
+	{
+		const int32 FloorLevel = CompanyActor
+			? CompanyActor->GetEnhancementLevel(EBuildingEnhancementType::BuildingFloor)
+			: (CompanySave ? CompanySave->BuildingData.Body_Module_Copies : 0);
+		const UBuildingManagePanelWidget* Manage = ManagePanelWeak.Get();
+		return FTutorialDerivedMissionRules::IsFloorRaiseDone(
+			FloorLevel, Amount, DerivedFloorSignalAt, Now, Manage && Manage->IsActivated());
+	}
+	case EMissionConditionType::EnhanceBuildingStat:
+	{
+		// 빌드업(층)은 M9 몫이라 세지 않는다
+		if (CompanyActor)
+		{
+			const UEnum* EnhanceEnum = StaticEnum<EBuildingEnhancementType>();
+			for (int32 EnumIndex = 0; EnhanceEnum && EnumIndex < EnhanceEnum->NumEnums() - 1; ++EnumIndex)
+			{
+				const EBuildingEnhancementType Type = static_cast<EBuildingEnhancementType>(EnhanceEnum->GetValueByIndex(EnumIndex));
+				if (Type != EBuildingEnhancementType::BuildingFloor && CompanyActor->GetEnhancementLevel(Type) >= Target)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+		if (CompanySave)
+		{
+			for (const TPair<EBuildingEnhancementType, int32>& Entry : CompanySave->BuildingData.EnhancementLevels)
+			{
+				if (Entry.Key != EBuildingEnhancementType::BuildingFloor && Entry.Value >= Target)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	case EMissionConditionType::EquipFirstTrait:
+	{
+		const UBuildingTraitManagerSubsystem* TraitMgr = GI ? GI->GetSubsystem<UBuildingTraitManagerSubsystem>() : nullptr;
+		if (!TraitMgr || CompanyIndex == INDEX_NONE)
+		{
+			return false;
+		}
+		// 조회 결과는 빈 칸(None)까지 최대 칸 수로 채워 온다 — 실제로 낀 특성만 센다
+		int32 Equipped = 0;
+		for (const FName& TraitId : TraitMgr->GetEquippedTraits(CompanyIndex))
+		{
+			if (!TraitId.IsNone()) ++Equipped;
+		}
+		return Equipped >= Target;
+	}
+	case EMissionConditionType::EquipFirstSkin:
+	{
+		const UBuildingSkinManagerSubsystem* SkinMgr = GI ? GI->GetSubsystem<UBuildingSkinManagerSubsystem>() : nullptr;
+		if (!SkinMgr)
+		{
+			return false;
+		}
+		// 배치 때 붙는 건물별 기본 스킨은 소유 목록에 없다 — 소유한 가챠 스킨이 걸려 있어야 「기본 스킨이 아니다」
+		const int32 AppliedSkin = CompanyActor ? CompanyActor->GetAppliedSkinID()
+			: (CompanySave ? CompanySave->BuildingData.AppliedSkinID : 0);
+		const bool bWearsGachaSkin = AppliedSkin > 0 && AppliedSkin != TutorialStarterSkinID && SkinMgr->IsSkinOwned(AppliedSkin);
+		return bWearsGachaSkin || (HasDerivedLatch(TutorialDerivedLatch::SkinApplied) && SkinMgr->HasAnyGachaSkin());
+	}
+	case EMissionConditionType::PlaceSecondDesk:
+	{
+		int32 Seats = 0;
+		if (LiveOffice)
+		{
+			for (const AWorkstationActorBase* Desk : LiveOffice->GetPlacedWorkstations())
+			{
+				Seats += IsValid(Desk) ? Desk->GetChairCount() : 0;
+			}
+		}
+		else if (SavedOffice)
+		{
+			for (const FWorkstationSaveData& Desk : SavedOffice->OfficeWorkstations)
+			{
+				Seats += Desk.ChairStates.Num();
+			}
+		}
+		return Seats >= Target;
+	}
+	case EMissionConditionType::RecruitGoalDiscipline:
+	{
+		// 사원증 리빌 도중 다음 미션으로 넘어가 연출을 끊지 않는다
+		const UOfficeRecruitmentFlowSubsystem* Flow = CurWorld ? CurWorld->GetSubsystem<UOfficeRecruitmentFlowSubsystem>() : nullptr;
+		if ((Flow && Flow->IsBusy()) || bRecruitmentPresentationActive || !Employees || CompanyIndex == INDEX_NONE)
+		{
+			return false;
+		}
+		int32 Count = 0;
+		for (const FEmployeeInstance& Employee : Employees->GetEmployeesInBuilding(CompanyIndex))
+		{
+			if (GetPrimaryDisciplineSlot(Employee) == static_cast<int32>(ActiveMissionRow.RequiredRecruitDiscipline))
+			{
+				++Count;
+			}
+		}
+		return Count >= Target;
+	}
+	case EMissionConditionType::LevelUpFirstEmployee:
+		if (Employees && CompanyIndex != INDEX_NONE)
+		{
+			for (const FEmployeeInstance& Employee : Employees->GetEmployeesInBuilding(CompanyIndex))
+			{
+				if (Employee.Level >= Target)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	case EMissionConditionType::AllocateEmployeeStatPoint:
+		return HasDerivedLatch(TutorialDerivedLatch::StatPointAllocated);
+	case EMissionConditionType::EnhanceFirstEmployee:
+		return HasDerivedLatch(TutorialDerivedLatch::StarEnhanceAttempted);
+	case EMissionConditionType::EquipFirstEquipment:
+	{
+		if (!HasDerivedLatch(TutorialDerivedLatch::EquipBaseline))
+		{
+			return false;
+		}
+		TArray<FGuid> Worn;
+		CollectEquippedInBuilding(GI, CompanyIndex, Worn);
+		return FTutorialDerivedMissionRules::CountNewlyWornEquipment(Worn, DerivedMissionLatches) >= Target;
+	}
+	case EMissionConditionType::UpgradeFirstWorkstation:
+	{
+		constexpr EWorkstationUpgradeType GrowthTypes[] = {
+			EWorkstationUpgradeType::Processing, EWorkstationUpgradeType::Tools, EWorkstationUpgradeType::Environment };
+		if (LiveOffice)
+		{
+			for (const AWorkstationActorBase* Desk : LiveOffice->GetPlacedWorkstations())
+			{
+				for (const EWorkstationUpgradeType Type : GrowthTypes)
+				{
+					if (IsValid(Desk) && Desk->GetUpgradeLevel(Type) >= Target)
+					{
+						return true;
+					}
+				}
+			}
+			return false;
+		}
+		if (SavedOffice)
+		{
+			for (const FWorkstationSaveData& Desk : SavedOffice->OfficeWorkstations)
+			{
+				for (const EWorkstationUpgradeType Type : GrowthTypes)
+				{
+					// 저장 맵에 없는 항목은 기본 Lv1 (AWorkstationActorBase::GetUpgradeLevel 과 같은 규칙)
+					if (FMath::Max(1, Desk.UpgradeLevels.FindRef(Type)) >= Target)
+					{
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+	case EMissionConditionType::PlaceFirstPainting:
+		// 스타터 프리셋 그림과 구분할 수 없어 저장된 그림 수로는 판정하지 않는다
+		return HasDerivedLatch(TutorialDerivedLatch::PaintingPlaced);
+	case EMissionConditionType::LaunchGoalProject:
+		return Save && CompanySave && FTutorialMissionRestoreRules::HasRequiredLaunch(Save->GameData.ShippedProjects,
+			CompanyIndex, CompanySave->BuildingData.CompanyType, ActiveMissionRow.RequiredProjectIndex);
+	// 배치 미리보기도 건물 목록에 잠깐 올라온다 — 확정해 저장된 건물만 세고, 배치 중엔 끝내지 않는다
+	case EMissionConditionType::BuildSecondBuilding:
+		return GetTutorialPlacementMode(GI) != EPlacementMode::Building && Save && Save->GameData.Buildings.Num() >= Target;
+	case EMissionConditionType::BuildIndustry:
+	{
+		const ECompanyType Industry = MakeActiveMissionSpec().Industry;
+		int32 SavedCount = 0;
+		if (Save)
+		{
+			for (const FBuildingEntitySaveData& Building : Save->GameData.Buildings)
+			{
+				SavedCount += Building.BuildingData.CompanyType == Industry ? 1 : 0;
+			}
+		}
+		return Industry != ECompanyType::None && GetTutorialPlacementMode(GI) != EPlacementMode::Building && SavedCount >= Target;
+	}
+	case EMissionConditionType::AcquireFirstCompany:
+		return HasCityCompanyInState(CurWorld, Save, EAcqState::Milking)
+			|| HasCityCompanyInState(CurWorld, Save, EAcqState::Depleted)
+			|| HasCityCompanyInState(CurWorld, Save, EAcqState::Cleared);
+	case EMissionConditionType::SkipCompanyRecovery:
+		return HasCityCompanyInState(CurWorld, Save, EAcqState::Depleted)
+			|| HasCityCompanyInState(CurWorld, Save, EAcqState::Cleared);
+	case EMissionConditionType::DemolishFirstCompany:
+		return FTutorialDerivedMissionRules::IsDemolishDone(
+			HasCityCompanyInState(CurWorld, Save, EAcqState::Cleared), DerivedDemolishSignalAt, Now);
+	case EMissionConditionType::ExplainPlot:
+		// 열람 시각은 창이 닫히면 -1 로 돌아간다 — 다 읽고 닫았을 때 끝난다
+		return FTutorialDerivedMissionRules::IsPlotExplainDone(
+			HasDerivedLatch(TutorialDerivedLatch::PlotDialogSeen), DerivedPlotDialogOpenedAt >= 0.0);
+	case EMissionConditionType::ReachHQLevel:
+	{
+		// 축하 창을 닫을 때까지 머문다 ― 다음 미션이 「먼저 이 창을 닫아요」로 해금 소식을 덮지 않게
+		UUIManagerSubsystem* UIMgr = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+		UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr;
+		const UCommonActivatableWidget* TopPrompt = UIBase ? UIBase->GetActivePromptWidget() : nullptr;
+		return SaveMgr && !(TopPrompt && TopPrompt->IsA<UHQLevelUpCelebrationWidget>())
+			&& FTutorialDerivedMissionRules::IsHQLevelUpDone(SaveMgr->GetHQLevel(), Amount, DerivedHQLevelSignalAt, Now);
+	}
+	case EMissionConditionType::MenuTour:
+	{
+		UUIManagerSubsystem* UIMgr = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+		UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr;
+		UCommonActivatableWidget* TopPrompt = UIBase ? UIBase->GetActivePromptWidget() : nullptr;
+		return FTutorialDerivedMissionRules::IsMenuTourDone(
+			HasDerivedLatch(TutorialDerivedLatch::MenuIntroDone),
+			TopPrompt != nullptr);
+	}
+	default:
+		return false;
+	}
+}
+
+bool UMissionManagerSubsystem::IsDerivedShortfallStep(const FGoalGuideStep& Step) const
+{
+	if (Step.Spot || !FTutorialDerivedMissionRules::IsPurchaseStep(ActiveMissionRow.ConditionType, Step.Index))
+	{
+		return false;
+	}
+	if (!Step.Anchor)
+	{
+		return true;
+	}
+	// 레이아웃 전 1프레임(ZeroSize)은 부족이 아니다 — 꺼진 버튼만 부족으로 읽는다
+	FString Reason;
+	return !IsGuideTargetActionable(Step.Anchor, Reason) && Reason == TEXT("Disabled");
+}
+
+void UMissionManagerSubsystem::SeedDerivedJumpPrereqs(FName TargetMissionID)
+{
+#if !UE_BUILD_SHIPPING
+	UGameInstance* GI = GetGameInstance();
+	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	bool bTargetFound = false;
+	const FMissionTable TargetRow = TableMgr ? TableMgr->GetMissionData(TargetMissionID, bTargetFound) : FMissionTable();
+	if (!bTargetFound || !TargetRow.bDerivedGuide)
+	{
+		return;
+	}
+
+	// 대상 앞 체인 행들의 보상 합 = 정상 플레이라면 이미 받았을 몫(M7 수령분). 모자란 만큼만 채운다
+	TMap<EResourceType, int64> RequiredResources;
+	TMap<EItemType, int32> RequiredItems;
+	// 대상 미션이 다루는 회사(두 번째 회사 직원 채우기 등)까지는 지어져 있어야 한다
+	int32 RequiredBuildings = FMath::Max(1, TargetRow.TutorialCompanyOrder);
+	int32 RequiredHQLevel = 1;
+	int32 FirstLaunchProject = 0;
+	TSet<FName> VisitedIDs;
+	FName ChainID = OpeningChainStartID;
+	while (!ChainID.IsNone() && ChainID != TargetMissionID && !VisitedIDs.Contains(ChainID))
+	{
+		VisitedIDs.Add(ChainID);
+		bool bFound = false;
+		const FMissionTable Row = TableMgr->GetMissionData(ChainID, bFound);
+		if (!bFound)
+		{
+			break;
+		}
+		for (const FMissionReward& Reward : Row.Rewards)
+		{
+			if (Reward.ResourceType != EResourceType::None && Reward.Amount > 0)
+			{
+				RequiredResources.FindOrAdd(Reward.ResourceType) += Reward.Amount;
+			}
+			if (Reward.ItemType != EItemType::None && Reward.ItemAmount > 0)
+			{
+				RequiredItems.FindOrAdd(Reward.ItemType) += Reward.ItemAmount;
+			}
+		}
+		if (Row.ConditionType == EMissionConditionType::BuildSecondBuilding)
+		{
+			RequiredBuildings = FMath::Max(RequiredBuildings, FTutorialDerivedMissionRules::ResolveTarget(Row.ConditionAmount));
+		}
+		// 산업 지정 건설은 기존 회사에 더해 짓는 것이라 개수가 늘어난다
+		if (Row.ConditionType == EMissionConditionType::BuildIndustry)
+		{
+			RequiredBuildings += FTutorialDerivedMissionRules::ResolveTarget(Row.ConditionAmount);
+		}
+		if (Row.ConditionType == EMissionConditionType::ReachHQLevel)
+		{
+			RequiredHQLevel = FMath::Max(RequiredHQLevel, FTutorialDerivedMissionRules::ResolveTarget(Row.ConditionAmount));
+		}
+		if (Row.ConditionType == EMissionConditionType::LaunchFirstInHouseProject)
+		{
+			FirstLaunchProject = Row.RequiredProjectIndex;
+		}
+		ChainID = Row.NextMissionID;
+	}
+
+	if (UResourceItemManager* Res = GI->GetSubsystem<UResourceItemManager>())
+	{
+		for (const TPair<EResourceType, int64>& Required : RequiredResources)
+		{
+			const int64 Owned = Res->GetResourceAmount(Required.Key);
+			if (Owned < Required.Value)
+			{
+				Res->StoreResource(Required.Key, Required.Value - Owned);
+				UE_LOG(LogTemp, Log, TEXT("[MissionManager] 시드: 자원 %d 을 %lld 보충 (도출형 점프 %s)"),
+					static_cast<int32>(Required.Key), Required.Value - Owned, *TargetMissionID.ToString());
+			}
+		}
+	}
+	if (UItemInventoryManager* Items = GI->GetSubsystem<UItemInventoryManager>())
+	{
+		for (const TPair<EItemType, int32>& Required : RequiredItems)
+		{
+			const int32 Owned = Items->GetItemCount(Required.Key);
+			if (Owned < Required.Value)
+			{
+				Items->AddItem(Required.Key, Required.Value - Owned);
+				UE_LOG(LogTemp, Log, TEXT("[MissionManager] 시드: 아이템 %d 을 %d 보충 (도출형 점프 %s)"),
+					static_cast<int32>(Required.Key), Required.Value - Owned, *TargetMissionID.ToString());
+			}
+		}
+	}
+
+	USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>();
+	const USaveGame_GameData* Save = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr;
+	const int32 BuildingCount = Save ? Save->GameData.Buildings.Num() : 0;
+	if (BuildingCount < RequiredBuildings)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[MissionManager] 시드: '%s'는 건물 %d채가 선행 필요(현재 %d채). 자동 건설은 하지 않으니 직접 지은 뒤 점프할 것."),
+			*TargetMissionID.ToString(), RequiredBuildings, BuildingCount);
+	}
+	const int32 CurrentHQLevel = SaveMgr ? SaveMgr->GetHQLevel() : 1;
+	if (CurrentHQLevel < RequiredHQLevel)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[MissionManager] 시드: '%s'는 본사 Lv.%d 가 선행 필요(현재 Lv.%d). 자동 레벨업은 하지 않으니 본사 패널에서 직접 올린 뒤 점프할 것."),
+			*TargetMissionID.ToString(), RequiredHQLevel, CurrentHQLevel);
+	}
+	const FBuildingEntitySaveData* Company = FindTutorialCompanySave(GetTutorialCompanyIndex());
+	if (FirstLaunchProject > 0 && (!Save || !Company || !FTutorialMissionRestoreRules::HasRequiredLaunch(
+		Save->GameData.ShippedProjects, Company->BuildingIndex, Company->BuildingData.CompanyType, FirstLaunchProject)))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[MissionManager] 시드: 첫 게임(프로젝트 %d) 출시 이력이 없습니다. 사무실에서 Proj_Seed 치트로 이력을 채운 뒤 진행할 것."),
+			FirstLaunchProject);
+	}
+#else
+	(void)TargetMissionID;
+#endif
+}
+
 namespace CGRGoalGuideStep
 {
-// G9 스킬 걸음 — 2번(SP 투자) → 3번(별 강화) 전이 판정.
-// 투자 이력이 생기면 넘어간다: DT 문구가 "투자하고, 강화를 1회" 이므로 1점만 넣어도 다음 걸음이다
-// (전량 소진을 요구하면 SP 가 남은 플레이어는 같은 문구에 갇힌다 — 2026-08-13 신고).
-// SP 가 0 이면 [+] 가 비활성이라 지목이 무의미하므로 이력이 없어도 넘어간다.
-int32 ResolveStatInvestStep(bool bHasInvestedAny, bool bInvestCellEnabled)
+bool CanGuideDeskGrowth(const AWorkstationActorBase* Desk, bool bPromotion)
 {
-	return (bHasInvestedAny || !bInvestCellEnabled) ? 3 : 2;
+	if (!IsValid(Desk)) return false;
+	if (bPromotion) return Desk->CanPromoteSetup();
+	for (EWorkstationUpgradeType Type : { EWorkstationUpgradeType::Processing, EWorkstationUpgradeType::Tools,
+		EWorkstationUpgradeType::Environment })
+	{
+		FWorkstationUpgradeQuote Quote;
+		if (Desk->GetUpgradeQuote(Type, 1, false, Quote) && Quote.bValid
+			&& Quote.Count > 0 && Quote.TotalCost <= Quote.Available) return true;
+	}
+	return false;
+}
+
+// 현재 직원이 레벨업할 수 없어도 안내는 직원 선택 단계에 머문다.
+int32 ResolveEmployeeGrowthStep(bool bInTargetOffice, bool bWindowOpen, bool bStarModalOpen, bool bStarGoal)
+{
+	if (!bInTargetOffice) return 0;
+	if (bStarGoal && bStarModalOpen) return 3;
+	if (!bWindowOpen) return 1;
+	return 2;
 }
 
 int32 ResolveRaiseFloorStep(bool bInOffice, bool bManagePanelOpen, bool bEnhancementTabActive)
@@ -2337,30 +4031,6 @@ int32 ResolveRaiseFloorStep(bool bInOffice, bool bManagePanelOpen, bool bEnhance
 		return 1;
 	}
 	return bEnhancementTabActive ? 3 : 2;
-}
-}
-
-namespace
-{
-// 누구든 직능에 1점이라도 넣었는가 — 세이브 파생(InvestedDisciplinePoints)이라 재접속에도 유지된다.
-// 로스터 게터가 사본을 주는 것은 이 클래스의 기존 관례 — 호출은 [강화] 가능한 프레임으로 한정해 상한을 둔다
-bool HasAnyInvestedDisciplinePoint(const UEmployeeManager* EmpMgr)
-{
-	if (!EmpMgr)
-	{
-		return false;
-	}
-	for (const FEmployeeInstance& Emp : EmpMgr->GetAllEmployees())
-	{
-		for (int32 Invested : Emp.InvestedDisciplinePoints)
-		{
-			if (Invested > 0)
-			{
-				return true;
-			}
-		}
-	}
-	return false;
 }
 }
 
@@ -2381,11 +4051,884 @@ FGoalGuideStep UMissionManagerSubsystem::GetTrackedGoalStep() const
 	{
 		return Step;
 	}
+	const EGoalState GoalState = GoalMgr->GetGoalState(TrackedID, Row);
+	if (GoalState != EGoalState::InProgress)
+	{
+		return Step;
+	}
+
+	FContentGuideSpec Spec;
+	Spec.Condition = Row.ConditionType;
+	Spec.ConditionAmount = Row.ConditionAmount;
+	Spec.BuildingIndex = GoalMgr->GetGuideBuildingIndex(TrackedID);
+	Spec.Discipline = Row.RequiredDiscipline;
+	Spec.TargetProjectIndex = Row.TargetProjectIndex;
+	Spec.Industry = Row.CompanyType;
+	return ResolveContentStep(Spec);
+}
+
+namespace
+{
+	CGRGoalGuideStep::EGuidePromptKind ClassifyTutorialGuidePrompt(const UCommonActivatableWidget* Prompt)
+	{
+		using CGRGoalGuideStep::EGuidePromptKind;
+		if (!Prompt) return EGuidePromptKind::None;
+		if (Prompt->IsA<UBuildingTraitGachaPanelWidget>()) return EGuidePromptKind::CompanyGacha;
+		if (Prompt->IsA<UEquipmentGachaPanelWidget>()) return EGuidePromptKind::EquipmentGacha;
+		if (Prompt->IsA<UBuildModalWidget>()) return EGuidePromptKind::BuildModal;
+		if (Prompt->IsA<UCityCompanyInfoWidget>()) return EGuidePromptKind::CompanyInfo;
+		if (Prompt->IsA<UConfirmCancelWidget>()) return EGuidePromptKind::ConfirmCancel;
+		if (Prompt->IsA<UHQManagePanelWidget>()) return EGuidePromptKind::HQPanel;
+		if (Prompt->IsA<UHQLevelUpCelebrationWidget>()) return EGuidePromptKind::HQLevelUpCelebration;
+		if (Prompt->IsA<UMenuPanelWidget>()) return EGuidePromptKind::MenuPanel;
+		if (Prompt->IsA<UShopPanelWidget>()) return EGuidePromptKind::ShopPanel;
+		if (Prompt->IsA<UEnhanceStarforceModalWidget>()) return EGuidePromptKind::StarforceModal;
+		return EGuidePromptKind::Other;
+	}
+
+	// 닫기 게터가 있는 창만 짚는다 — 없으면 대상 없이 풀어 두어 플레이어가 직접 닫게 한다(가두지 않는 쪽)
+	UWidget* FindTutorialPanelCloseButton(const UCommonActivatableWidget* Panel)
+	{
+		if (const UGachaPanelBaseWidget* Gacha = Cast<UGachaPanelBaseWidget>(Panel)) return Gacha->GetCloseButtonWidget();
+		if (const UEquipmentGachaPanelWidget* EquipGacha = Cast<UEquipmentGachaPanelWidget>(Panel)) return EquipGacha->GetCloseButtonWidget();
+		if (const UMenuPanelWidget* Menu = Cast<UMenuPanelWidget>(Panel)) return Menu->GetCloseButtonWidget();
+		if (const UShopPanelWidget* Shop = Cast<UShopPanelWidget>(Panel)) return Shop->GetCloseButtonWidget();
+		if (const UWorkstationInfoWidget* DeskInfo = Cast<UWorkstationInfoWidget>(Panel)) return DeskInfo->GetCloseButtonWidget();
+		if (const UBuildingManagePanelWidget* CompanyPanel = Cast<UBuildingManagePanelWidget>(Panel)) return CompanyPanel->GetCloseButtonWidget();
+		if (const UHQManagePanelWidget* HQPanel = Cast<UHQManagePanelWidget>(Panel)) return HQPanel->GetCloseButtonWidget();
+		if (const UHQLevelUpCelebrationWidget* Celebration = Cast<UHQLevelUpCelebrationWidget>(Panel)) return Celebration->GetCloseTargetWidget();
+		if (const UFactoryPanelWidget* Factory = Cast<UFactoryPanelWidget>(Panel)) return Factory->GetCloseButtonWidget();
+		if (const UEnhanceStarforceModalWidget* Starforce = Cast<UEnhanceStarforceModalWidget>(Panel)) return Starforce->GetCloseButtonWidget();
+		if (const UProjectReportWidget* Report = Cast<UProjectReportWidget>(Panel)) return Report->GetCloseTargetWidget();
+		if (const UCityCompanyManageWidget* AcquiredPanel = Cast<UCityCompanyManageWidget>(Panel)) return AcquiredPanel->GetCloseButtonWidget();
+		if (const UPlotPurchasePanelWidget* PlotPanel = Cast<UPlotPurchasePanelWidget>(Panel)) return PlotPanel->GetCloseButtonWidget();
+		if (const UOfficeEmployeePanelWidget* EmployeePanel = Cast<UOfficeEmployeePanelWidget>(Panel)) return EmployeePanel->GetCloseButtonWidget();
+		if (const UOfficeDecorationPanelWidget* DecorationPanel = Cast<UOfficeDecorationPanelWidget>(Panel)) return DecorationPanel->GetCloseButtonWidget();
+		if (const UOfficeWorkstationPanelWidget* DeskCatalog = Cast<UOfficeWorkstationPanelWidget>(Panel)) return DeskCatalog->GetCloseButtonWidget();
+		return nullptr;
+	}
+
+	// 아래쪽 스택 패널이 이 미션 흐름의 것인가 — 앞 미션에서 열어 둔 패널이 다음 대상을 덮으면 먼저 닫게 한다
+	bool IsTutorialBottomPanelInFlow(EMissionConditionType Condition, const UCommonActivatableWidget* Bottom)
+	{
+		if (!Bottom) return true;
+		if (Bottom->IsA<UFactoryPanelWidget>()) return Condition == EMissionConditionType::UpgradeFactoryStats;
+		if (Bottom->IsA<UCityCompanyManageWidget>())
+			return Condition == EMissionConditionType::SkipCompanyRecovery || Condition == EMissionConditionType::DemolishFirstCompany;
+		if (Bottom->IsA<UPlotPurchasePanelWidget>()) return Condition == EMissionConditionType::ExplainPlot;
+		if (Bottom->IsA<UOfficeEmployeePanelWidget>())
+			return Condition == EMissionConditionType::LevelUpFirstEmployee || Condition == EMissionConditionType::AllocateEmployeeStatPoint
+				|| Condition == EMissionConditionType::EnhanceFirstEmployee || Condition == EMissionConditionType::EquipFirstEquipment;
+		if (Bottom->IsA<UOfficeDecorationPanelWidget>()) return Condition == EMissionConditionType::PlaceFirstPainting;
+		if (Bottom->IsA<UOfficeWorkstationPanelWidget>())
+			return Condition == EMissionConditionType::PlaceSecondDesk || Condition == EMissionConditionType::RecruitGoalDiscipline;
+		return true;
+	}
+
+
+	// 연출은 닫힐 때 부모에서 떨어진다 — 약참조가 GC 전까지 남아도 화면에 없으면 닫힌 것
+	bool IsTutorialGachaRevealShown(const UGachaRevealPresentationWidget* Reveal)
+	{
+		return Reveal && (Reveal->IsInViewport() || Reveal->GetParent() != nullptr);
+	}
+
+	// 살 수 없는 구매 버튼은 짚지 않는다 — 대상이 비면 부족 문구로 바뀌고 게이트가 풀려 재화를 모으러 갈 수 있다
+	UWidget* KeepTutorialAnchorIfAffordable(UWidget* Button)
+	{
+		const UCostActionButtonWidget* CostButton = Cast<UCostActionButtonWidget>(Button);
+		return CostButton && !CostButton->CanAfford() ? nullptr : Button;
+	}
+
+	// 직원 패널의 [장비 뽑기]는 보유 0개 부위의 빈 칸을 눌렀을 때만 뜬다 — 그런 부위가 있는지와 끼지 않은 장비가 있는지
+	void ResolveTutorialEquipmentStock(const UGameInstance* GI, bool& bOutOwnsUnequipped, bool& bOutPanelGachaReachable)
+	{
+		bOutOwnsUnequipped = false;
+		bOutPanelGachaReachable = false;
+		const UEmployeeEquipmentManagerSubsystem* Equipment = GI ? GI->GetSubsystem<UEmployeeEquipmentManagerSubsystem>() : nullptr;
+		const UTableManagerSubsystem* Tables = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+		if (!Equipment || !Tables)
+		{
+			return;
+		}
+		TArray<int32> OwnedPerPart;
+		OwnedPerPart.Init(0, static_cast<int32>(EEmployeeEquipmentSlot::Count));
+		for (const TPair<FGuid, FEmployeeEquipmentInstance>& Pair : Equipment->GetState().Instances)
+		{
+			if (Equipment->GetInstanceEmployee(Pair.Key) == INDEX_NONE)
+			{
+				bOutOwnsUnequipped = true;
+			}
+			const FEmployeeEquipmentDefinitionRow* Definition = Tables->FindEmployeeEquipmentDefinition(Pair.Value.DefinitionId);
+			const int32 PartIndex = Definition ? static_cast<int32>(Definition->EquipmentSlot) : INDEX_NONE;
+			if (OwnedPerPart.IsValidIndex(PartIndex))
+			{
+				++OwnedPerPart[PartIndex];
+			}
+		}
+		bOutPanelGachaReachable = OwnedPerPart.Contains(0);
+	}
+}
+
+bool UMissionManagerSubsystem::ResolveForcedTutorialStep(const FContentGuideSpec& Spec, FGoalGuideStep& Step) const
+{
+	using namespace CGRGoalGuideStep;
+
+	UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	if (!GI)
+	{
+		return false;
+	}
+	UWorld* CurWorld = GetWorld();
+	const bool bInOffice = GI->IsInOfficeMap();
+	const bool bInTargetOffice = bInOffice
+		&& (Spec.BuildingIndex == INDEX_NONE || GI->GetCurrentManagedBuildingIndex() == Spec.BuildingIndex);
+	UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>();
+	UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr;
+	UCommonActivatableWidget* TopPrompt = UIBase ? UIBase->GetActivePromptWidget() : nullptr;
+	UCommonActivatableWidget* TopBottom = UIBase ? UIBase->GetActiveBottomWidget() : nullptr;
+	UEntityManager* Entities = CurWorld ? CurWorld->GetSubsystem<UEntityManager>() : nullptr;
+	ABuildingBaseActor* Company = Entities && Spec.BuildingIndex != INDEX_NONE
+		? Entities->GetBuildingByIndex(Spec.BuildingIndex) : nullptr;
+	UBuildingManagePanelWidget* Manage = ManagePanelWeak.Get();
+	if (Manage && !Manage->IsActivated()) Manage = nullptr;
+	const bool bCompanyPanel = Manage && Company && Manage->GetTargetBuilding() == Company;
+	UBuildingManagePanelWidget* OtherPanel = Manage && !bCompanyPanel ? Manage : nullptr;
+	// 이 걸음의 대상이 다른 창에 가려 그 창의 닫기를 짚을 때는 걸음 문구 대신 「먼저 이 창을 닫아요」를 쓴다
+	auto CloseFirst = [&Step](UWidget* Close) { Step.Index = INDEX_NONE; return Close; };
+	// 도크는 아래쪽 패널에 덮이면 비활성되며 등록이 풀린다 — 도크 버튼 걸음은 덮은 패널 [닫기]로 대신한다
+	UBuildOpenWidget* Dock = BuildOpenWidgetWeak.Get();
+	// 바닥 스택은 맨 위 하나만 그린다 — 덮인 도크 버튼은 옛 지오메트리만 남아 게이트 구멍이 허공에 뚫린다
+	UOfficeMainWidget* OfficeDock = OfficeMainWeak.Get();
+	if (OfficeDock && TopBottom != OfficeDock) OfficeDock = nullptr;
+	UCityAcquisitionManager* AcqMgr = CurWorld ? CurWorld->GetSubsystem<UCityAcquisitionManager>() : nullptr;
+	const int32 Target = FTutorialDerivedMissionRules::ResolveTarget(Spec.ConditionAmount);
+
+	if (IsRewardSplashShown())
+	{
+		Step.Index = INDEX_NONE;
+		return true;
+	}
+
+	// 운영 결산 창은 어느 미션 흐름에도 속하지 않는다 — 운영이 끝나면 아무 걸음 위에나 뜨므로 [확인]부터
+	if (const UProjectReportWidget* Report = Cast<UProjectReportWidget>(TopPrompt))
+	{
+		Step.Index = INDEX_NONE;
+		Step.Anchor = VisibleOrNull(Report->GetCloseTargetWidget());
+		return true;
+	}
+	// 흐름 밖 창이 떠 있으면 그 창부터 — 닫기 게터가 없으면 대상 없이 풀어 두고, 번호는 비워 직전 걸음 문구를 유지한다
+	if (!IsPromptInFlow(Spec.Condition, ClassifyTutorialGuidePrompt(TopPrompt)))
+	{
+		Step.Index = INDEX_NONE;
+		Step.Anchor = FindTutorialPanelCloseButton(TopPrompt);
+		return true;
+	}
+	if (!IsTutorialBottomPanelInFlow(Spec.Condition, TopBottom))
+	{
+		if (UWidget* BottomClose = FindTutorialPanelCloseButton(TopBottom))
+		{
+			Step.Index = INDEX_NONE;
+			Step.Anchor = BottomClose;
+			return true;
+		}
+	}
+
+	auto ExitOfficeAt = [this, &Step](int32 Index)
+	{
+		Step.Index = Index;
+		Step.Anchor = OfficeLayerWeak.IsValid() ? OfficeLayerWeak->GetBackButtonWidget() : nullptr;
+	};
+	// 사무실 걸음인데 다른 곳이면: 다른 사무실은 [나가기], 도시는 다른 회사 패널 닫기 → 첫 회사 패널 [입장] → 첫 회사 지목
+	auto MoveToTargetOffice = [&Step, &ExitOfficeAt, &CloseFirst, bInOffice, OtherPanel, bCompanyPanel, Manage, Company](int32 Index)
+	{
+		if (bInOffice)
+		{
+			ExitOfficeAt(Index);
+			return;
+		}
+		Step.Index = Index;
+		if (OtherPanel) Step.Anchor = CloseFirst(OtherPanel->GetCloseButtonWidget());
+		else if (bCompanyPanel) Step.Anchor = Manage->GetEnterOfficeButtonWidget();
+		else Step.Spot = Company;
+	};
+	// 같은 종류지만 이 걸음의 대상이 아닌 창(다른 회사 인수 창·다른 확인 창) — 대상 없이 풀어 둔다
+	auto ReleaseForUnrelatedPrompt = [&Step]()
+	{
+		Step.Index = INDEX_NONE;
+		Step.Anchor = nullptr;
+		Step.Spot = nullptr;
+	};
+
+	switch (Spec.Condition)
+	{
+	case EMissionConditionType::UpgradeFactoryStats:
+	{
+		if (!BrickFactoryWeak.IsValid() && CurWorld && !bInOffice)
+		{
+			BrickFactoryWeak = UGameplayStatics::GetActorOfClass(CurWorld, ABrickFactory::StaticClass());
+		}
+		const ABrickFactory* Factory = Cast<ABrickFactory>(BrickFactoryWeak.Get());
+		UFactoryPanelWidget* FactoryPanel = FactoryPanelWeak.Get();
+		const bool bSpeedReached = Factory && Factory->GetUpgradeLevel(EFactoryUpgradeType::HoldProductionSpeed) >= Target;
+		const bool bCapacityReached = Factory && Factory->GetUpgradeLevel(EFactoryUpgradeType::HoldProductionAmount) >= Target;
+		Step.Index = ResolveFactoryStatStep(bInOffice, FactoryPanel != nullptr, bSpeedReached, bCapacityReached);
+		if (Step.Index == FactoryStatGuide::ExitOffice)
+		{
+			ExitOfficeAt(FactoryStatGuide::ExitOffice);
+		}
+		else if (Step.Index == FactoryStatGuide::ClosePanel)
+		{
+			Step.Anchor = FactoryPanel ? FactoryPanel->GetCloseButtonWidget() : nullptr;
+		}
+		else if (Step.Index == FactoryStatGuide::OpenFactory)
+		{
+			Step.Anchor = Dock ? Dock->GetFactoryOpenButtonWidget() : CloseFirst(FindTutorialPanelCloseButton(TopBottom));
+		}
+		else
+		{
+			Step.Anchor = KeepTutorialAnchorIfAffordable(FactoryPanel->GetUpgradeTarget(Step.Index == FactoryStatGuide::UpgradeSpeed
+				? EFactoryUpgradeType::HoldProductionSpeed : EFactoryUpgradeType::HoldProductionAmount));
+		}
+		return true;
+	}
+
+	case EMissionConditionType::RaiseBuildingFloor:
+	{
+		const bool bFloorReached = Company && Company->GetEnhancementLevel(EBuildingEnhancementType::BuildingFloor) >= Target;
+		Step.Index = ResolveForcedRaiseFloorStep(bInOffice, OtherPanel != nullptr, bCompanyPanel,
+			bCompanyPanel && Manage->IsEnhancementTabActive(), bFloorReached);
+		switch (Step.Index)
+		{
+		case RaiseFloorGuide::ExitOffice:      ExitOfficeAt(RaiseFloorGuide::ExitOffice); break;
+		case RaiseFloorGuide::CloseOtherPanel: Step.Anchor = OtherPanel->GetCloseButtonWidget(); break;
+		// 층은 패널 뒤 건물에서 오른다 — 잠시 지켜본 뒤 같은 패널에서 다음 미션(자금 강화)으로 이어진다
+		case RaiseFloorGuide::WatchFloorRise:  break;
+		case RaiseFloorGuide::TapCompany:      Step.Spot = Company; break;
+		case RaiseFloorGuide::OpenEnhanceTab:  Step.Anchor = Manage->GetEnhancementTabButtonWidget(); break;
+		default:                               Step.Anchor = KeepTutorialAnchorIfAffordable(Manage->GetBuildingFloorUpgradeButtonWidget()); break;
+		}
+		return true;
+	}
+
+	case EMissionConditionType::EnhanceBuildingStat:
+		Step.Index = ResolveEnhanceStatStep(bInOffice, bCompanyPanel, bCompanyPanel && Manage->IsEnhancementTabActive());
+		if (Step.Index == EnhanceStatGuide::ExitOffice)
+		{
+			ExitOfficeAt(EnhanceStatGuide::ExitOffice);
+		}
+		else if (Step.Index == EnhanceStatGuide::TapCompany)
+		{
+			if (OtherPanel) Step.Anchor = CloseFirst(OtherPanel->GetCloseButtonWidget());
+			else Step.Spot = Company;
+		}
+		else if (Step.Index == EnhanceStatGuide::OpenEnhanceTab)
+		{
+			Step.Anchor = Manage->GetEnhancementTabButtonWidget();
+		}
+		else
+		{
+			Step.Anchor = Manage->GetFirstAffordableStatEnhanceButtonWidget();
+		}
+		return true;
+
+	case EMissionConditionType::EquipFirstTrait:
+	case EMissionConditionType::EquipFirstSkin:
+	{
+		const bool bTrait = Spec.Condition == EMissionConditionType::EquipFirstTrait;
+		UBuildingTraitGachaPanelWidget* Shell = Cast<UBuildingTraitGachaPanelWidget>(TopPrompt);
+		UGachaRevealPresentationWidget* Reveal = GachaRevealWeak.Get();
+		bool bOwnsResult = false;
+		if (bTrait)
+		{
+			// 이 회사에 바로 끼울 수 있는 특성이어야 뽑기 걸음이 끝난 것(업종 제한·이미 낀 특성 제외)
+			const UBuildingTraitManagerSubsystem* TraitMgr = GI->GetSubsystem<UBuildingTraitManagerSubsystem>();
+			if (TraitMgr && Spec.BuildingIndex != INDEX_NONE)
+			{
+				const TArray<FName> EquippedHere = TraitMgr->GetEquippedTraits(Spec.BuildingIndex);
+				for (const TPair<FName, int32>& Owned : TraitMgr->GetInventory().OwnedTraits)
+				{
+					if (Owned.Value > 0 && !EquippedHere.Contains(Owned.Key)
+						&& TraitMgr->CanEquipTraitToBuilding(Spec.BuildingIndex, Owned.Key))
+					{
+						bOwnsResult = true;
+						break;
+					}
+				}
+			}
+		}
+		else
+		{
+			const UBuildingSkinManagerSubsystem* SkinMgr = GI->GetSubsystem<UBuildingSkinManagerSubsystem>();
+			bOwnsResult = SkinMgr && SkinMgr->HasAnyGachaSkin();
+		}
+
+		FCompanyGachaGuideFlags Flags;
+		Flags.bInOffice = bInOffice;
+		Flags.bRevealOpen = IsTutorialGachaRevealShown(Reveal);
+		Flags.bGachaOpen = Shell != nullptr;
+		Flags.bWrongCategory = Shell && Shell->IsSkinCategory() == bTrait;
+		Flags.bOwnsResult = bOwnsResult;
+		Flags.bCompanyPanelOpen = bCompanyPanel;
+		Flags.bTargetTabActive = bCompanyPanel && (bTrait ? Manage->IsTraitTabActive() : Manage->IsSkinTabActive());
+		Step.Index = ResolveCompanyGachaStep(Flags);
+		switch (Step.Index)
+		{
+		case TraitGuide::ExitOffice:    ExitOfficeAt(TraitGuide::ExitOffice); break;
+		case TraitGuide::OpenGacha:     Step.Anchor = Dock ? Dock->GetGachaButtonWidget() : CloseFirst(FindTutorialPanelCloseButton(TopBottom)); break;
+		case TraitGuide::PickCategory:  Step.Anchor = bTrait ? Shell->GetTraitCategoryTabWidget() : Shell->GetSkinCategoryTabWidget(); break;
+		// 고급 배너는 보석을 쓴다 — 받은 일반 뽑기권으로 뽑게 일반 배너부터
+		case TraitGuide::PressPull:     Step.Anchor = Shell->IsAdvancedBannerSelected() ? Shell->GetNormalBannerWidget() : Shell->GetPullButtonWidget(); break;
+		case TraitGuide::ConfirmReveal: Step.Anchor = VisibleOrNull(Reveal->GetConfirmButtonWidget()); break;
+		case TraitGuide::CloseGacha:    Step.Anchor = Shell->GetCloseButtonWidget(); break;
+		case TraitGuide::OpenTraitTab:
+			if (OtherPanel) Step.Anchor = CloseFirst(OtherPanel->GetCloseButtonWidget());
+			else if (bCompanyPanel) Step.Anchor = bTrait ? Manage->GetTraitTabButtonWidget() : Manage->GetSkinTabButtonWidget();
+			else Step.Spot = Company;
+			break;
+		default:
+			if (bTrait)
+			{
+				Step.Anchor = Manage->GetTraitEquipButtonIfOpen();
+				if (!Step.Anchor) Step.Anchor = Manage->GetEquippableTraitCardWidget(TutorialPulledTraitID);
+			}
+			else
+			{
+				Step.Anchor = Manage->GetSkinExteriorSubTabWidget();
+				if (!Step.Anchor) Step.Anchor = Manage->GetOwnedGachaSkinCardWidget();
+			}
+			break;
+		}
+		return true;
+	}
+
+	case EMissionConditionType::PlaceSecondDesk:
+	case EMissionConditionType::PlaceFirstPainting:
+	{
+		const bool bDesk = Spec.Condition == EMissionConditionType::PlaceSecondDesk;
+		const EPlacementMode Mode = GetTutorialPlacementMode(GI);
+		UOfficeWorkstationPanelWidget* DeskCatalog = bDesk ? Cast<UOfficeWorkstationPanelWidget>(TopBottom) : nullptr;
+		UOfficeDecorationPanelWidget* DecoCatalog = bDesk ? nullptr : Cast<UOfficeDecorationPanelWidget>(TopBottom);
+		Step.Index = ResolveOfficePlacementStep(bInTargetOffice, DeskCatalog != nullptr || DecoCatalog != nullptr,
+			Mode == (bDesk ? EPlacementMode::Workstation : EPlacementMode::WallDecoration));
+		if (Step.Index == SecondDeskGuide::EnterOffice)
+		{
+			MoveToTargetOffice(SecondDeskGuide::EnterOffice);
+		}
+		else if (Step.Index == SecondDeskGuide::Confirm)
+		{
+			Step.Anchor = BuildPlacementPanelWeak.IsValid() ? BuildPlacementPanelWeak->GetPlaceButtonWidget() : nullptr;
+			// 여러 개를 놓는 미션은 같은 말을 되풀이하면 놓였는지 모른다 ― 마지막 하나는 「하나 더」로 말한다
+			if (bDesk && Target >= 2 && CountPlacedSeats(CurWorld) == Target - 1)
+			{
+				Step.Index = SecondDeskGuide::ConfirmMore;
+			}
+		}
+		else if (Step.Index == SecondDeskGuide::PickDesk)
+		{
+			if (DeskCatalog)
+			{
+				Step.Anchor = DeskCatalog->GetDeskGuideCatalogWidget();
+			}
+			else
+			{
+				Step.Anchor = DecoCatalog->IsCategoryListed(EDecorationCategory::Picture)
+					? DecoCatalog->GetCheapestAffordableCardWidget(EDecorationCategory::Picture)
+					: DecoCatalog->GetCategoryNavigationWidget(EDecorationCategory::Picture);
+			}
+		}
+		else if (OfficeDock)
+		{
+			Step.Anchor = bDesk ? OfficeDock->GetWorkstationOpenButtonWidget() : OfficeDock->GetDecorationOpenButtonWidget();
+		}
+		else
+		{
+			Step.Anchor = CloseFirst(FindTutorialPanelCloseButton(TopBottom));
+		}
+		return true;
+	}
+
+	case EMissionConditionType::EquipFirstEquipment:
+	{
+		// 앞 미션의 별 강화 카드는 활성화하지 않는 오버레이라 패널 판정이 못 본다 ― 결과를 본 뒤 직접 닫게 한다
+		if (UEnhanceStarforceModalWidget* StarCard = StarforceModalWeak.Get(); StarCard && StarCard->GetParent())
+		{
+			Step.Anchor = CloseFirst(StarCard->GetCloseButtonWidget());
+			return true;
+		}
+		UOfficeEmployeePanelWidget* EmpPanel = Cast<UOfficeEmployeePanelWidget>(TopBottom);
+		UEquipmentGachaPanelWidget* EquipGacha = Cast<UEquipmentGachaPanelWidget>(TopPrompt);
+		UGachaRevealPresentationWidget* Reveal = GachaRevealWeak.Get();
+		// 장비 결과 연출은 장비 작업 공간이 따로 띄운다 — 공용 등록이 없으면 그쪽을 본다
+		if (!IsTutorialGachaRevealShown(Reveal) && EquipGacha)
+		{
+			Reveal = EquipGacha->GetActiveReveal();
+		}
+		FEquipmentGuideFlags Flags;
+		ResolveTutorialEquipmentStock(GI, Flags.bOwnsUnequipped, Flags.bPanelGachaReachable);
+		Flags.bInTargetOffice = bInTargetOffice;
+		Flags.bRevealOpen = IsTutorialGachaRevealShown(Reveal);
+		Flags.bGachaOpen = EquipGacha != nullptr;
+		Flags.bEmployeePanelOpen = EmpPanel != nullptr;
+		Flags.bEquipmentTabActive = EmpPanel && EmpPanel->IsEquipmentTabActive();
+		Flags.bPanelGachaVisible = EmpPanel && EmpPanel->GetEquipmentGachaButtonWidget() != nullptr;
+		Step.Index = ResolveEquipmentStep(Flags);
+		switch (Step.Index)
+		{
+		case EquipmentGuide::EnterOffice:
+			MoveToTargetOffice(EquipmentGuide::EnterOffice);
+			break;
+		case EquipmentGuide::OpenEmployee:
+			Step.Anchor = OfficeDock ? OfficeDock->GetEmployeeButtonWidget() : CloseFirst(FindTutorialPanelCloseButton(TopBottom));
+			break;
+		case EquipmentGuide::PickSlot:
+			Step.Anchor = Flags.bEquipmentTabActive ? EmpPanel->GetEmptyEquipmentSlotWidget() : EmpPanel->GetEquipmentTabButtonWidget();
+			break;
+		case EquipmentGuide::OpenGacha:
+			// 패널 안 진입이 없으면 도크 [장비] — 패널이 덮고 있으면 도크가 안 보이므로 대상 없이 둔다
+			if (EmpPanel) Step.Anchor = EmpPanel->GetEquipmentGachaButtonWidget();
+			else Step.Anchor = OfficeDock ? OfficeDock->GetEquipmentGachaButtonWidget() : CloseFirst(FindTutorialPanelCloseButton(TopBottom));
+			break;
+		case EquipmentGuide::PressPull:
+			Step.Anchor = EquipGacha->IsNormalTicketSelected() ? EquipGacha->GetPullOneButtonWidget() : EquipGacha->GetNormalTicketTabWidget();
+			break;
+		case EquipmentGuide::ConfirmReveal:
+			Step.Anchor = VisibleOrNull(Reveal->GetConfirmButtonWidget());
+			break;
+		case EquipmentGuide::CloseGacha:
+			Step.Anchor = EquipGacha->GetCloseButtonWidget();
+			break;
+		default:
+			Step.Anchor = EmpPanel->GetEquipDetailEquipButtonWidget();
+			if (!Step.Anchor) Step.Anchor = EmpPanel->GetUnequippedEquipmentEntryWidget();
+			if (!Step.Anchor) Step.Anchor = EmpPanel->GetAllEquipmentPartsChipWidget();
+			break;
+		}
+		return true;
+	}
+
+	case EMissionConditionType::BuildSecondBuilding:
+	case EMissionConditionType::BuildIndustry:
+	{
+		UBuildModalWidget* Modal = Cast<UBuildModalWidget>(TopPrompt);
+		// 모달은 첫 산업을 자동 선택한다 — 목표 산업을 직접 누르기 전이나 다른 산업이 골라져 있으면 카드로 넘어가지 않는다
+		const bool bIndustryPending = Modal && Spec.Industry != ECompanyType::None
+			&& (!bDerivedBuildIndustryPicked || Modal->GetSelectedIndustry() != Spec.Industry);
+		Step.Index = ResolveSecondBuildingStep(bInOffice, Modal != nullptr, bIndustryPending,
+			GetTutorialPlacementMode(GI) == EPlacementMode::Building);
+		switch (Step.Index)
+		{
+		case SecondBuildingGuide::ExitOffice:   ExitOfficeAt(SecondBuildingGuide::ExitOffice); break;
+		case SecondBuildingGuide::OpenBuild:    Step.Anchor = Dock ? Dock->GetBuildOpenButtonWidget() : CloseFirst(FindTutorialPanelCloseButton(TopBottom)); break;
+		case SecondBuildingGuide::PickIndustry: Step.Anchor = Modal->GetIndustryTileWidget(Spec.Industry); break;
+		case SecondBuildingGuide::PickBuilding: Step.Anchor = Modal->GetBuildGuideBestCardWidget(); break;
+		default: Step.Anchor = BuildPlacementPanelWeak.IsValid() ? BuildPlacementPanelWeak->GetPlaceButtonWidget() : nullptr; break;
+		}
+		return true;
+	}
+
+	case EMissionConditionType::AcquireFirstCompany:
+	{
+		// 필수 튜토리얼에서만 가장 싼 회사를 지목한다(성장 도움말은 선택을 플레이어에게 맡긴다)
+		const int32 TargetKey = AcqMgr ? AcqMgr->FindCheapestAcquirableCompanyKey() : INDEX_NONE;
+		UCityCompanyInfoWidget* Info = Cast<UCityCompanyInfoWidget>(TopPrompt);
+		if (Info && (TargetKey == INDEX_NONE || Info->GetCompanyKey() != TargetKey))
+		{
+			ReleaseForUnrelatedPrompt();
+			return true;
+		}
+		Step.Index = ResolveAcquireStep(bInOffice, Info != nullptr);
+		if (Step.Index == AcquireGuide::ExitOffice) ExitOfficeAt(AcquireGuide::ExitOffice);
+		else if (Step.Index == AcquireGuide::PressAcquire) Step.Anchor = Info->GetAcquireButtonWidget();
+		else Step.Spot = AcqMgr && TargetKey != INDEX_NONE ? AcqMgr->GetCompanyActor(TargetKey) : nullptr;
+		return true;
+	}
+
+	case EMissionConditionType::SkipCompanyRecovery:
+	{
+		const int32 TargetKey = AcqMgr ? AcqMgr->FindFirstCompanyKeyInState(EAcqState::Milking) : INDEX_NONE;
+		UCityCompanyInfoWidget* Info = Cast<UCityCompanyInfoWidget>(TopPrompt);
+		UCityCompanyManageWidget* CompanyPanel = Cast<UCityCompanyManageWidget>(TopBottom);
+		if (CompanyPanel && (TargetKey == INDEX_NONE || CompanyPanel->GetCompanyKey() != TargetKey)) CompanyPanel = nullptr;
+		UWidget* SkipConfirm = CompanyPanel ? CompanyPanel->GetSkipConfirmButtonWidget() : nullptr;
+		// 인수 직후 결과 창이 남아 있다 — 그 [확인]이 관리 창을 연다
+		const bool bResultPending = Info && Info->IsAwaitingResultConfirm();
+		if (TopPrompt && !bResultPending && !SkipConfirm)
+		{
+			ReleaseForUnrelatedPrompt();
+			return true;
+		}
+		Step.Index = ResolveSkipRecoveryStep(bInOffice, bResultPending, CompanyPanel != nullptr, SkipConfirm != nullptr);
+		switch (Step.Index)
+		{
+		case SkipRecoveryGuide::ExitOffice: ExitOfficeAt(SkipRecoveryGuide::ExitOffice); break;
+		case SkipRecoveryGuide::PressSkip:  Step.Anchor = CompanyPanel->GetSkipRecoveryButtonWidget(); break;
+		case SkipRecoveryGuide::Confirm:    Step.Anchor = SkipConfirm; break;
+		case SkipRecoveryGuide::ConfirmResult: Step.Anchor = Info->GetAcquireButtonWidget(); break;
+		default: Step.Spot = AcqMgr && TargetKey != INDEX_NONE ? AcqMgr->GetCompanyActor(TargetKey) : nullptr; break;
+		}
+		return true;
+	}
+
+	case EMissionConditionType::DemolishFirstCompany:
+	{
+		int32 TargetKey = AcqMgr ? AcqMgr->FindFirstCompanyKeyInState(EAcqState::Depleted) : INDEX_NONE;
+		if (TargetKey == INDEX_NONE && AcqMgr)
+		{
+			TargetKey = AcqMgr->FindFirstCompanyKeyInState(EAcqState::Milking);
+		}
+		const bool bDemolished = AcqMgr && AcqMgr->FindFirstCompanyKeyInState(EAcqState::Cleared) != INDEX_NONE;
+		UCityCompanyManageWidget* CompanyPanel = Cast<UCityCompanyManageWidget>(TopBottom);
+		if (CompanyPanel && (TargetKey == INDEX_NONE || CompanyPanel->GetCompanyKey() != TargetKey)) CompanyPanel = nullptr;
+		// 다 회수한 회사는 확인 없이 바로 철거된다 — 확인 창은 회수 중 철거에만 뜬다
+		UWidget* DemolishConfirm = CompanyPanel ? CompanyPanel->GetDemolishConfirmButtonWidget() : nullptr;
+		if (TopPrompt && !DemolishConfirm)
+		{
+			ReleaseForUnrelatedPrompt();
+			return true;
+		}
+		Step.Index = ResolveDemolishStep(bInOffice, bDemolished, CompanyPanel != nullptr, DemolishConfirm != nullptr);
+		switch (Step.Index)
+		{
+		case DemolishGuide::ExitOffice:    ExitOfficeAt(DemolishGuide::ExitOffice); break;
+		case DemolishGuide::Confirm:       Step.Anchor = DemolishConfirm; break;
+		case DemolishGuide::PressDemolish: Step.Anchor = CompanyPanel->GetDemolishButtonWidget(); break;
+		case DemolishGuide::TapCompany:    Step.Spot = AcqMgr && TargetKey != INDEX_NONE ? AcqMgr->GetCompanyActor(TargetKey) : nullptr; break;
+		default:
+		{
+			// 회수금은 철거 순간 지갑에 들어온다 ― 무너지는 건물 옆에서 그 이유를 말한다
+			const int32 ClearedKey = AcqMgr ? AcqMgr->FindFirstCompanyKeyInState(EAcqState::Cleared) : INDEX_NONE;
+			Step.Spot = AcqMgr && ClearedKey != INDEX_NONE ? AcqMgr->GetCompanyActor(ClearedKey) : nullptr;
+			Step.bObserve = Step.Spot != nullptr;
+			break;
+		}
+		}
+		return true;
+	}
+
+	case EMissionConditionType::ExplainPlot:
+	{
+		const int32 ClearedKey = AcqMgr ? AcqMgr->FindFirstCompanyKeyInState(EAcqState::Cleared) : INDEX_NONE;
+		ACityPlotActor* Plot = FindTutorialClearedPlot(CurWorld);
+		const bool bDialogOpen = Plot && Plot->IsPurchaseDialogOpen();
+		if (TopPrompt && !bDialogOpen)
+		{
+			ReleaseForUnrelatedPrompt();
+			return true;
+		}
+		Step.Index = ResolvePlotExplainStep(bInOffice, bDialogOpen, HasDerivedLatch(TutorialDerivedLatch::PlotDialogSeen));
+		if (Step.Index == PlotExplainGuide::ExitOffice)
+		{
+			ExitOfficeAt(PlotExplainGuide::ExitOffice);
+		}
+		else if (Step.Index == PlotExplainGuide::Explain)
+		{
+			// 설명은 잠긴 [인수] 옆에서 한다 ― [닫기]에 붙이면 닫으라는 말로 읽힌다
+			Step.Anchor = Plot->GetPurchaseDialogConfirmButtonWidget();
+			Step.bObserve = true;
+		}
+		else if (Step.Index == PlotExplainGuide::CloseDialog)
+		{
+			Step.Anchor = Plot->GetPurchaseDialogCloseButtonWidget();
+		}
+		else
+		{
+			// 철거된 건물은 숨겨져도 자리는 남는다 — 그 자리를 짚어야 다른 입주 회사 클릭 영역과 겹치지 않는다
+			AActor* ClearedActor = AcqMgr ? AcqMgr->GetCompanyActor(ClearedKey) : nullptr;
+			Step.Spot = ClearedActor ? ClearedActor : Plot;
+		}
+		return true;
+	}
+
+	case EMissionConditionType::ReachHQLevel:
+	{
+		UHQManagePanelWidget* HQ = Cast<UHQManagePanelWidget>(TopPrompt);
+		USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>();
+		const bool bLevelReached = SaveMgr && SaveMgr->GetHQLevel() >= Target;
+		Step.Index = ResolveHQLevelUpStep(bInOffice, HQ != nullptr, HQ && HQ->IsGrowthTabActive(),
+			HasDerivedLatch(TutorialDerivedLatch::HQIntroDone), bLevelReached);
+		switch (Step.Index)
+		{
+		case HQLevelUpGuide::ExitOffice:    ExitOfficeAt(HQLevelUpGuide::ExitOffice); break;
+		case HQLevelUpGuide::OpenHQ:        Step.Anchor = Dock ? Dock->GetHeadquartersButtonWidget() : CloseFirst(FindTutorialPanelCloseButton(TopBottom)); break;
+		// 성장 탭이 아니면 탭, 성장 탭이면 [레벨업] — 조건 미달로 꺼져 있으면 게이트가 풀리고 부족 문구가 뜬다
+		case HQLevelUpGuide::OpenGrowthTab:
+		case HQLevelUpGuide::PressLevelUp:  Step.Anchor = HQ->GetGrowthGuideTargetWidget(); break;
+		case HQLevelUpGuide::WatchLevelUp:  Step.Anchor = Cast<UHQLevelUpCelebrationWidget>(TopPrompt) ? FindTutorialPanelCloseButton(TopPrompt) : nullptr; break;
+		default: break; // 설명은 코치마크가 진행한다
+		}
+		return true;
+	}
+
+	case EMissionConditionType::MenuTour:
+	{
+		UMenuPanelWidget* Menu = Cast<UMenuPanelWidget>(TopPrompt);
+		Step.Index = ResolveMenuTourStep(bInOffice, Menu != nullptr,
+			HasDerivedLatch(TutorialDerivedLatch::MenuIntroDone));
+		switch (Step.Index)
+		{
+		case MenuTourGuide::ExitOffice: ExitOfficeAt(MenuTourGuide::ExitOffice); break;
+		case MenuTourGuide::OpenMenu:   Step.Anchor = Dock ? Dock->GetMenuButtonWidget() : CloseFirst(FindTutorialPanelCloseButton(TopBottom)); break;
+		case MenuTourGuide::CloseMenu:  Step.Anchor = Menu->GetCloseButtonWidget(); break;
+		default: break; // 설명 걸음 — 코치마크가 진행한다
+		}
+		return true;
+	}
+
+	// 아래 사무실 조건은 성장 도움말 걸음을 그대로 쓴다 — 회사 지정·도시 쪽 정리·성장 도움말이 못 보는 화면만 여기서 덧댄다
+	case EMissionConditionType::RecruitGoalDiscipline:
+	case EMissionConditionType::LevelUpFirstEmployee:
+	case EMissionConditionType::AllocateEmployeeStatPoint:
+	case EMissionConditionType::EnhanceFirstEmployee:
+	case EMissionConditionType::UpgradeFirstWorkstation:
+	case EMissionConditionType::LaunchGoalProject:
+	{
+		int32 Hired = 0;
+		// 방금 뽑은 직원으로 정원이 차도 리빌이 끝나면 미션이 넘어간다 — 그 사이 「정원이 찼어요」로 도시를 보내지 않는다
+		if (Spec.Condition == EMissionConditionType::RecruitGoalDiscipline && Spec.BuildingIndex != INDEX_NONE)
+		{
+			const UEmployeeManager* HiredEmployees = GI->GetSubsystem<UEmployeeManager>();
+			if (HiredEmployees)
+			{
+				for (const FEmployeeInstance& Employee : HiredEmployees->GetEmployeesInBuilding(Spec.BuildingIndex))
+				{
+					if (GetPrimaryDisciplineSlot(Employee) == static_cast<int32>(Spec.Discipline))
+					{
+						++Hired;
+					}
+				}
+			}
+			if (Hired >= Target)
+			{
+				Step.Index = INDEX_NONE;
+				return true;
+			}
+		}
+		if (!bInOffice && OtherPanel)
+		{
+			Step.Index = Spec.Condition == EMissionConditionType::RecruitGoalDiscipline ? RecruitDisciplineGuide::EnterOffice
+				: Spec.Condition == EMissionConditionType::UpgradeFirstWorkstation ? DeskUpgradeGuide::EnterOffice
+				: Spec.Condition == EMissionConditionType::LaunchGoalProject ? LaunchGoalGuide::EnterOffice
+				: EmployeeGrowthGuide::EnterOffice;
+			Step.Anchor = CloseFirst(OtherPanel->GetCloseButtonWidget());
+			return true;
+		}
+		const UEmployeeManager* Staff = GI->GetSubsystem<UEmployeeManager>();
+		const int32 StaffBuilding = Spec.BuildingIndex != INDEX_NONE ? Spec.BuildingIndex : GI->GetCurrentManagedBuildingIndex();
+		const bool bSeatOpen = Staff && StaffBuilding >= 0
+			&& Staff->GetEmployeeCountInBuilding(StaffBuilding) < Staff->GetBuildingEmployeeCapacity(StaffBuilding, false);
+		if (Spec.Condition == EMissionConditionType::RecruitGoalDiscipline && bInTargetOffice && bSeatOpen
+			&& !HasVacantWorkstation(CurWorld))
+		{
+			// 성장 도움말은 [책상]까지만 짚는다 — 필수 튜토리얼은 카탈로그·배치 확정까지 이어 줘야 멈추지 않는다
+			if (GetTutorialPlacementMode(GI) == EPlacementMode::Workstation)
+			{
+				Step.Index = RecruitDisciplineGuide::ConfirmVacantDesk;
+				Step.Anchor = BuildPlacementPanelWeak.IsValid() ? BuildPlacementPanelWeak->GetPlaceButtonWidget() : nullptr;
+				return true;
+			}
+			if (UOfficeWorkstationPanelWidget* DeskCatalog = Cast<UOfficeWorkstationPanelWidget>(TopBottom))
+			{
+				Step.Index = RecruitDisciplineGuide::PickVacantDesk;
+				Step.Anchor = DeskCatalog->GetDeskGuideCatalogWidget();
+				return true;
+			}
+		}
+		// 한 명만 더 필요하면 일괄 채용으로 정원을 넘겨 채우지 않는다 ― 다음 미션이 다시 「정원이 찼어요」로 돌아간다
+		if (Spec.Condition == EMissionConditionType::RecruitGoalDiscipline && bInTargetOffice && Spec.BuildingIndex != INDEX_NONE
+			&& Target - Hired == 1 && GoalRecruitClickedDiscipline == Spec.Discipline)
+		{
+			UOfficeRecruitmentModalWidget* Modal = RecruitModalWeak.Get();
+			if (Modal && Modal->IsActivated())
+			{
+				Step.Index = RecruitDisciplineGuide::PressPull;
+				Step.Anchor = Modal->GetPullButtonSingleWidget();
+				return true;
+			}
+		}
+		if (Spec.Condition == EMissionConditionType::EnhanceFirstEmployee && bInTargetOffice)
+		{
+			// 사무실 직원 패널의 별 강화 카드는 활성화하지 않는 오버레이라 성장 도움말 판정이 못 본다
+			UEnhanceStarforceModalWidget* StarCard = StarforceModalWeak.Get();
+			if (StarCard && (StarCard->IsActivated() || StarCard->GetParent() != nullptr))
+			{
+				Step.Index = EmployeeGrowthGuide::PressStarAttempt;
+				Step.Anchor = StarCard->GetEnhanceActionButtonWidget();
+				return true;
+			}
+		}
+		if (Spec.Condition == EMissionConditionType::LaunchGoalProject && bInTargetOffice)
+		{
+			const UOfficeStageProgressManager* Stage = CurWorld ? CurWorld->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+			const EProjectLifecycle Lifecycle = Stage ? Stage->GetLifecycle() : EProjectLifecycle::Idle;
+			if (Lifecycle == EProjectLifecycle::LaunchPending && Stage->IsLaunchBlocked())
+			{
+				ULaunchConfirmWidget* FailedLaunch = LaunchConfirmWeak.Get();
+				Step.Index = LaunchGoalGuide::DiscardFailed;
+				Step.Anchor = FailedLaunch && FailedLaunch->IsActivated() ? FailedLaunch->GetDiscardButtonWidget() : nullptr;
+				return true;
+			}
+			if (Lifecycle == EProjectLifecycle::Developing)
+			{
+				// 목표 프로젝트 개발 중에 「첫 게임 운영이 끝나면」 기다림 문구는 틀린 말이다 — [출시] 대기로 읽는다
+				Step.Index = ResolveForcedBusyProjectStep(Stage->GetProgressData().ProjectID == Spec.TargetProjectIndex);
+				Step.Anchor = OfficeDock ? OfficeDock->GetStripRequirementRowWidget() : nullptr;
+				Step.bObserve = Step.Anchor != nullptr;
+				return true;
+			}
+			// 앞 게임 운영이 끝나야 새 기획안을 연다 ― 말없이 기다리게 두지 않고 남은 시간 옆에서 이유를 말한다
+			if (Lifecycle == EProjectLifecycle::Operating && Stage->GetProgressData().ProjectID != Spec.TargetProjectIndex)
+			{
+				Step.Index = LaunchGoalGuide::WaitRunning;
+				Step.Anchor = OfficeDock ? OfficeDock->GetStripOperationTimeWidget() : nullptr;
+				Step.bObserve = Step.Anchor != nullptr;
+				return true;
+			}
+			// 카드가 미달 경고로 「그래도 개발」을 띄우면 그 말 그대로 안내한다 ― 예상치는 편차를 뺀 보수적 값이다
+			UPitchBoardWidget* RiskBoard = PitchBoardWeak.Get();
+			if (Lifecycle == EProjectLifecycle::Idle && RiskBoard && RiskBoard->IsActivated()
+				&& RiskBoard->IsProjectCardGateRisk(Spec.TargetProjectIndex))
+			{
+				Step.Index = LaunchGoalGuide::PressStartRisk;
+				Step.Anchor = RiskBoard->GetProjectCardCtaWidget(Spec.TargetProjectIndex);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	default:
+		return false;
+	}
+}
+
+bool UMissionManagerSubsystem::ResolveGoalProjectPreparation(const FContentGuideSpec& Spec, FGoalGuideStep& OutStep) const
+{
+	if (Spec.bForcedTutorial) { return false; }
+	const UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	UWorld* CurrentWorld = GetWorld();
+	const UOfficeStageProgressManager* Stage = CurrentWorld
+		? CurrentWorld->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	if (!GI || !GI->IsInOfficeMap() || !Stage || Stage->GetLifecycle() != EProjectLifecycle::Idle) { return false; }
+	const int32 BuildingIndex = GI->GetCurrentManagedBuildingIndex();
+	const double Now = FPlatformTime::Seconds();
+	if (GoalProjectEstimateWorld.Get() != CurrentWorld || GoalProjectEstimateBuilding != BuildingIndex
+		|| GoalProjectEstimateIndex != Spec.TargetProjectIndex || Now - GoalProjectEstimateAt >= 1.0)
+	{
+		GoalProjectEstimateWorld = CurrentWorld;
+		GoalProjectEstimateBuilding = BuildingIndex;
+		GoalProjectEstimateIndex = Spec.TargetProjectIndex;
+		GoalProjectEstimateAt = Now;
+		bGoalProjectNeedsPreparation = false;
+		GoalProjectWeakDiscipline = INDEX_NONE;
+		const UTableManagerSubsystem* Tables = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+		bool bFound = false;
+		const FProjectData Project = Tables ? Tables->GetProjectData(Spec.Industry, Spec.TargetProjectIndex, bFound) : FProjectData();
+		if (bFound)
+		{
+			TArray<FEstimateWorkerInput> Roster;
+			Stage->BuildContributorRoster(Roster);
+			const FProjectOutlookEstimate Outlook = Stage->EstimateProjectOutlook(Roster, Project);
+			bGoalProjectNeedsPreparation = !Outlook.bIsValid || Outlook.bGateRisk;
+			const TArray<int32> Weights{Project.Weight_Plan, Project.Weight_Dev, Project.Weight_Graphics,
+				Project.Weight_Sound, Project.Weight_Server, Project.Weight_QA};
+			const int32 MaxWeight = FMath::Max(Weights);
+			const float TargetBase = FStageProgressData::ComputeDisciplineTargetBase(
+				Project.GetRequiredScore(1), Project.GetRequiredScore(2), Project.GetRequiredScore(3));
+			TArray<float> Targets;
+			for (int32 Weight : Weights) { Targets.Add(FStageProgressData::ComputeDisciplineTarget(Weight, MaxWeight, TargetBase)); }
+			float WorstRatio = 0.f;
+			PitchBoardText::FindWorstDiscipline(Outlook.ExpectedDisciplineScores, Targets, GoalProjectWeakDiscipline, WorstRatio);
+		}
+	}
+	UWorkstationInfoWidget* DeskPanel = WorkstationPanelWeak.Get();
+	if (DeskPanel && !DeskPanel->IsActivated()) { DeskPanel = nullptr; }
+	if (!bGoalProjectNeedsPreparation)
+	{
+		if (!DeskPanel) { return false; }
+		OutStep.Index = LaunchGoalGuide::Goal::ClosePreparationPanel;
+		OutStep.Anchor = DeskPanel->GetCloseButtonWidget();
+		return true;
+	}
+	if (UPitchBoardWidget* Board = PitchBoardWeak.Get(); Board && Board->IsActivated())
+	{
+		OutStep.Index = LaunchGoalGuide::Goal::CloseForPreparation;
+		OutStep.Anchor = Board->GetCloseButtonWidget();
+		return true;
+	}
+	if (UOfficeEmployeePanelWidget* EmployeePanel = OfficeEmployeePanelWeak.Get(); EmployeePanel && EmployeePanel->IsActivated())
+	{
+		OutStep.Index = LaunchGoalGuide::Goal::PreparationAlternatives;
+		OutStep.Anchor = EmployeePanel;
+		OutStep.bObserve = true;
+		return true;
+	}
+	UEmployeeManager* Employees = GetGameInstance()->GetSubsystem<UEmployeeManager>();
+	UOfficeManager* Office = CurrentWorld->GetSubsystem<UOfficeManager>();
+	AWorkstationActorBase* PreparationDesk = nullptr;
+	int32 BestPoints = 0;
+	if (Employees && Office && GoalProjectWeakDiscipline != INDEX_NONE)
+	{
+		for (AWorkstationActorBase* Desk : Office->GetPlacedWorkstations())
+		{
+			if (!CGRGoalGuideStep::CanGuideDeskGrowth(Desk, false)
+				&& !CGRGoalGuideStep::CanGuideDeskGrowth(Desk, true)) { continue; }
+			for (int32 SeatIndex = 0; SeatIndex < Desk->GetChairCount(); ++SeatIndex)
+			{
+				const FEmployeeInstance* Employee = Employees->FindEmployee(Desk->GetAssignedEmployeeID(SeatIndex));
+				const int32 Points = Employee && Employee->DisciplinePoints.IsValidIndex(GoalProjectWeakDiscipline)
+					? Employee->DisciplinePoints[GoalProjectWeakDiscipline] : 0;
+				if (Points > BestPoints) { BestPoints = Points; PreparationDesk = Desk; }
+			}
+		}
+	}
+	if (DeskPanel)
+	{
+		const bool bTargetDesk = PreparationDesk && DeskPanel->GetWorkstation() == PreparationDesk;
+		OutStep.Index = bTargetDesk ? LaunchGoalGuide::Goal::UpgradePreparationDesk : LaunchGoalGuide::Goal::CloseForPreparation;
+		OutStep.Anchor = bTargetDesk ? DeskPanel->GetFirstAffordableGrowthButton(false) : DeskPanel->GetCloseButtonWidget();
+		if (bTargetDesk && !OutStep.Anchor)
+		{
+			OutStep.Index = LaunchGoalGuide::Goal::ReducePreparationBulk;
+			OutStep.Anchor = DeskPanel;
+			OutStep.bObserve = true;
+		}
+	}
+	else if (PreparationDesk)
+	{
+		OutStep.Index = LaunchGoalGuide::Goal::PickPreparationDesk;
+		OutStep.Spot = PreparationDesk;
+	}
+	else
+	{
+		OutStep.Index = LaunchGoalGuide::Goal::PreparationAlternatives;
+		OutStep.Anchor = OfficeMainWeak.IsValid() ? OfficeMainWeak->GetEmployeeButtonWidget() : nullptr;
+	}
+	return true;
+}
+
+FGoalGuideStep UMissionManagerSubsystem::ResolveContentStep(const FContentGuideSpec& Spec) const
+{
+	FGoalGuideStep Step;
+
+	UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	if (!GI)
+	{
+		return Step;
+	}
+	// 필수 튜토리얼만 성장 도움말이 플레이어 선택에 맡기던 대상까지 짚는다. 성장 도움말(false)은 아래 공용 판정 그대로
+	if (Spec.bForcedTutorial && ResolveForcedTutorialStep(Spec, Step))
+	{
+		return Step;
+	}
 
 	// 판정에 쓰는 것은 전부 "지금 무엇이 열려 있는가" — 저장된 진행도가 아니다.
 	// 그래서 플레이어가 어디로 새든 다음 조회에서 맞는 걸음이 나온다(후퇴 로직 불필요)
 	const bool bInOffice = GI->IsInOfficeMap();
+	const int32 GuideBuildingIndex = Spec.BuildingIndex;
+	const bool bInTargetOffice = bInOffice && (GuideBuildingIndex == INDEX_NONE
+		|| GI->GetCurrentManagedBuildingIndex() == GuideBuildingIndex);
 	UBuildingManagePanelWidget* Manage = ManagePanelWeak.Get();
+	if (Manage && !Manage->IsActivated()) Manage = nullptr;
 	UBuildOpenWidget* Dock = BuildOpenWidgetWeak.Get();
 	UOfficeMainWidget* OfficeDock = OfficeMainWeak.Get();
 
@@ -2396,53 +4939,422 @@ FGoalGuideStep UMissionManagerSubsystem::GetTrackedGoalStep() const
 		Step.Anchor = OfficeLayerWeak.IsValid() ? OfficeLayerWeak->GetBackButtonWidget() : nullptr;
 	};
 	// 사무실 목표인데 도시에 있으면: 관리 패널이 열려 있으면 [입장], 아니면 회사 자체를 비춘다
-	auto EnterOffice = [this, Manage, &Step]()
+	auto EnterOffice = [this, Manage, GuideBuildingIndex, &Step]()
 	{
 		Step.Index = 0;
-		if (Manage)
+		if (Manage && (GuideBuildingIndex == INDEX_NONE ||
+			(Manage->GetTargetBuilding() && Manage->GetTargetBuilding()->GetBuildingIndex() == GuideBuildingIndex)))
 		{
 			Step.Anchor = Manage->GetEnterOfficeButtonWidget();
 		}
 		else
 		{
-			Step.Spot = PickGuideBuilding();
+			UEntityManager* Entities = GetWorld() ? GetWorld()->GetSubsystem<UEntityManager>() : nullptr;
+			Step.Spot = GuideBuildingIndex != INDEX_NONE && Entities
+				? Entities->GetBuildingByIndex(GuideBuildingIndex) : PickGuideBuilding();
 		}
 	};
 
-	switch (Row.ConditionType)
+	switch (Spec.Condition)
 	{
 	case EMissionConditionType::PlaceFirstPainting:        // G7 그림 — 사무실
 		if (!bInOffice) { EnterOffice(); }
 		else { Step.Index = 1; Step.Anchor = OfficeDock ? OfficeDock->GetDecorationOpenButtonWidget() : nullptr; }
 		break;
 
-	case EMissionConditionType::InvestFirstStatPoint:      // G9 직원 성장 — 사무실, 완료는 [강화] 실행
-		if (!bInOffice)
+	case EMissionConditionType::UpgradeFactoryStats:
+	case EMissionConditionType::ReachFactoryProductionLevel:
+		if (bInOffice) { ExitOffice(); }
+		else if (UFactoryPanelWidget* FactoryPanel = FactoryPanelWeak.Get(); FactoryPanel && FactoryPanel->IsActivated())
 		{
-			EnterOffice();
-		}
-		else if (UEnhanceStarforceModalWidget* Starforce = StarforceModalWeak.Get())
-		{
-			Step.Index = 3;
-			Step.Anchor = Starforce->GetEnhanceActionButtonWidget();
-		}
-		else if (UEmployeeWindowWidget* EmpWin = EmployeeWindowWeak.Get())
-		{
-			// 투자 이력 판정은 세이브를 타는 파생값 — 재시작에도 유지되고 새 세이브 필드가 필요 없다 (G8/G10 보유 판정과 같은 축).
-			// ⚠ 게터의 non-null 로 SP 유무를 대신 읽지 말 것: 셀은 항상 존재하고 SP 0 은 GetIsEnabled 로만 드러난다
-			UWidget* Plus = EmpWin->GetFirstSkillInvestButtonWidget();
-			const bool bInvestCellEnabled = Plus && Plus->GetIsEnabled();
-			// SP 가 없으면 결과가 이미 3 이라 로스터를 훑지 않는다(매 틱 호출 경로)
-			const bool bInvestedAny = bInvestCellEnabled
-				&& HasAnyInvestedDisciplinePoint(GetGameInstance()->GetSubsystem<UEmployeeManager>());
-			Step.Index = CGRGoalGuideStep::ResolveStatInvestStep(bInvestedAny, bInvestCellEnabled);
-			Step.Anchor = (Step.Index == 2) ? Plus : EmpWin->GetEnhanceButtonWidget();
+			Step.Index = 2;
+			Step.Anchor = Spec.Condition == EMissionConditionType::ReachFactoryProductionLevel
+				? FactoryPanel->GetUpgradeTarget(EFactoryUpgradeType::HoldProductionAmount)
+				: FactoryPanel->GetFirstAffordableUpgradeTarget();
+			if (!Step.Anchor) { Step.Anchor = FactoryPanel; Step.bObserve = true; }
 		}
 		else
 		{
 			Step.Index = 1;
-			Step.Anchor = OfficeDock ? OfficeDock->GetEmployeeButtonWidget() : nullptr;
+			Step.Anchor = Dock ? Dock->GetFactoryOpenButtonWidget() : nullptr;
 		}
+		break;
+
+	case EMissionConditionType::CollectMineResource:
+	case EMissionConditionType::CollectFactoryProduct:
+	case EMissionConditionType::SellManufacturedProduct:
+	{
+		if (bInOffice) { ExitOffice(); break; }
+		UUIManagerSubsystem* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+		UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
+		UCommonActivatableWidget* Prompt = UIBase ? UIBase->GetActivePromptWidget() : nullptr;
+		UWorldMapPanelWidget* Map = Cast<UWorldMapPanelWidget>(Prompt);
+		UCountryDetailWidget* Detail = Cast<UCountryDetailWidget>(Prompt);
+		if (!Detail && Map) { Detail = Cast<UCountryDetailWidget>(Map->GetActiveDrawerWidget()); }
+		const UTableManagerSubsystem* Tables = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+		const UMineManager* Mines = GetGameInstance()->GetSubsystem<UMineManager>();
+		const UWorldFactoryManager* Factories = GetGameInstance()->GetSubsystem<UWorldFactoryManager>();
+		const UProductionOrderManager* Orders = GetGameInstance()->GetSubsystem<UProductionOrderManager>();
+		const TArray<FCountryInfoTable> Countries = Tables ? Tables->GetAllCountryInfos() : TArray<FCountryInfoTable>();
+		TArray<TPair<EResourceType, int32>> RecipeMaterials;
+		TArray<EResourceType> NeededMaterials;
+		int32 TargetProductIndex = Spec.TargetProjectIndex;
+		int32 TargetQuantity = 1;
+		bool bHasPendingOrder = false;
+		bool bHasRecipe = false;
+		bool bHasMatchingFactoryLine = false;
+		const bool bMineGoal = Spec.Condition == EMissionConditionType::CollectMineResource;
+		const bool bFactoryGoal = Spec.Condition == EMissionConditionType::CollectFactoryProduct;
+		if ((bMineGoal || bFactoryGoal) && Spec.Industry != ECompanyType::None)
+		{
+			if (Orders)
+			{
+				for (const FProductionOrder& Order : Orders->GetAllOrders())
+				{
+					if (Order.CompanyType != Spec.Industry || Order.RemainingQuantity <= 0
+						|| (TargetProductIndex > 0 && Order.ProjectIndex != TargetProductIndex)
+						|| (Spec.BuildingIndex != INDEX_NONE && Order.SourceBuildingID != Spec.BuildingIndex)) { continue; }
+					TargetProductIndex = Order.ProjectIndex;
+					TargetQuantity = bMineGoal ? Order.RemainingQuantity : 1;
+					bHasPendingOrder = true;
+					break;
+				}
+			}
+			if (Factories)
+			{
+				for (const FCountryInfoTable& CountryRow : Countries)
+				{
+					for (const FWorldFactoryLineState& Line : Factories->GetActiveLines(CountryRow.CountryType))
+					{
+						if (Line.CompanyType != Spec.Industry || (TargetProductIndex > 0 && Line.ProductIndex != TargetProductIndex)) { continue; }
+						bHasMatchingFactoryLine = true;
+						if (TargetProductIndex <= 0) { TargetProductIndex = Line.ProductIndex; }
+						break;
+					}
+					if (bHasMatchingFactoryLine) { break; }
+				}
+			}
+			// 제품 미지정 반복 목표에는 해당 업종의 첫 레시피를 사용한다.
+			if (TargetProductIndex <= 0) { TargetProductIndex = 1; }
+			const FProductRecipeTable Recipe = Tables
+				? Tables->GetProductRecipe(Spec.Industry, TargetProductIndex, bHasRecipe) : FProductRecipeTable();
+			if (bHasRecipe)
+			{
+				Recipe.CollectMaterials(RecipeMaterials);
+				const UResourceItemManager* Resources = GetGameInstance()->GetSubsystem<UResourceItemManager>();
+				const TMap<EResourceType, int64> Inventory = Resources ? Resources->GetAllResources() : TMap<EResourceType, int64>();
+				NeededMaterials = ManufacturingGuideCountryRules::MissingMaterials(RecipeMaterials, Inventory, TargetQuantity);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[GoalGuide] Missing recipe for industry %d, product %d"),
+					static_cast<int32>(Spec.Industry), TargetProductIndex);
+			}
+		}
+		const bool bRecoverMaterials = bFactoryGoal && ManufacturingGuideCountryRules::ShouldRecoverMaterials(
+			bHasMatchingFactoryLine, bHasPendingOrder, bHasRecipe, NeededMaterials);
+		if (Detail)
+		{
+			Step.Index = 3;
+			if (Detail->IsProductionStartPopupOpen()
+				|| (bMineGoal && Detail->GetCurrentTabIndex() != UCountryDetailWidget::TAB_INDEX_MINE))
+			{
+				Step.bObserve = true;
+				break;
+			}
+			const FCountryInfoTable* DetailCountry = Countries.FindByPredicate([Detail](const FCountryInfoTable& Row)
+			{
+				return Row.CountryType == Detail->GetCurrentCountry();
+			});
+			const bool bCanMineNeeded = DetailCountry && DetailCountry->bSupportsMine
+				&& NeededMaterials.ContainsByPredicate([DetailCountry](EResourceType Resource)
+				{
+					return DetailCountry->MinableResources.Contains(Resource);
+				});
+			const bool bWrongFactory = bFactoryGoal && !bRecoverMaterials && DetailCountry
+				&& !ManufacturingGuideCountryRules::SupportsFactoryIndustry(*DetailCountry, Spec.Industry);
+			if (bFactoryGoal && ((bRecoverMaterials && !bCanMineNeeded)
+				|| (!bRecoverMaterials && (bWrongFactory || Detail->GetCurrentTabIndex() == UCountryDetailWidget::TAB_INDEX_MINE))))
+			{
+				Step.Index = 5;
+				UPanelHeaderWidget* Header = Cast<UPanelHeaderWidget>(Detail->GetWidgetFromName(TEXT("PanelHeader")));
+				Step.Anchor = Header ? VisibleOrNull(Header->GetCloseButton()) : nullptr;
+				if (!Step.Anchor) { Step.Anchor = Detail; Step.bObserve = true; }
+				break;
+			}
+			if (bRecoverMaterials) { Step.Index = 4; }
+			const int32 WantedTab = (bMineGoal || bRecoverMaterials)
+				? UCountryDetailWidget::TAB_INDEX_MINE
+				: bFactoryGoal
+					? UCountryDetailWidget::TAB_INDEX_FACTORY : UCountryDetailWidget::TAB_INDEX_PORT;
+			const FName TargetName = Detail->GetCurrentTabIndex() == WantedTab
+				? bMineGoal || bRecoverMaterials ? TEXT("MineHero")
+					: bFactoryGoal ? TEXT("FactoryHero") : TEXT("PortHero")
+				: bMineGoal || bRecoverMaterials ? TEXT("MineTab")
+					: bFactoryGoal ? TEXT("FactoryTab") : TEXT("PortTab");
+			UWidget* Target = VisibleOrNull(Detail->GetWidgetFromName(TargetName));
+			const FVector2D TargetSize = Target ? Target->GetCachedGeometry().GetLocalSize() : FVector2D::ZeroVector;
+			Step.Anchor = TargetSize.X > 1.f && TargetSize.Y > 1.f ? Target : nullptr;
+			if (!Step.Anchor) { Step.Anchor = Detail; Step.bObserve = true; }
+			else if (Detail->GetCurrentTabIndex() == WantedTab) { Step.bObserve = true; }
+		}
+		else if (Map)
+		{
+			if (Map->IsDrawerOpen())
+			{
+				Step.Index = 3;
+				Step.Anchor = Map;
+				Step.bObserve = true;
+				break;
+			}
+			Step.Index = 2;
+			UWidget* FirstEligible = nullptr;
+			UWidget* BestMedallion = nullptr;
+			int32 BestPriority = INDEX_NONE;
+			for (const FCountryInfoTable& CountryRow : Countries)
+			{
+				const bool bSelectMine = bMineGoal || bRecoverMaterials;
+				const bool bSupportsTarget = bSelectMine
+					? CountryRow.bSupportsMine
+					: bFactoryGoal
+						? ManufacturingGuideCountryRules::SupportsFactoryIndustry(CountryRow, Spec.Industry) : CountryRow.bSupportsTrade;
+				if (!bSupportsTarget || !OverseasActions::IsCountryUnlocked(GetGameInstance(), CountryRow.CountryType)) { continue; }
+				const TObjectPtr<UCountryNameWidget>* Medallion = Map->GetMedallions().Find(CountryRow.CountryType);
+				if (!Medallion || !Medallion->Get() || !Medallion->Get()->IsVisible()) { continue; }
+				const FVector2D PinSize = Medallion->Get()->GetCachedGeometry().GetLocalSize();
+				if (PinSize.X <= 1.f || PinSize.Y <= 1.f) { continue; }
+				if (!FirstEligible && !bSelectMine) { FirstEligible = Medallion->Get(); }
+				int32 Priority = 0;
+				if (bSelectMine)
+				{
+					TArray<EResourceType> ActiveResources;
+					if (Mines)
+					{
+						for (const FMineLineState& Line : Mines->GetMineLines(CountryRow.CountryType))
+						{
+							ActiveResources.Add(Line.Resource);
+						}
+					}
+					Priority = ManufacturingGuideCountryRules::MinePriority(CountryRow, RecipeMaterials, NeededMaterials, ActiveResources);
+					if (Priority == INDEX_NONE) { continue; }
+				}
+				else if (bFactoryGoal)
+				{
+					for (const FWorldFactoryLineState& Line : Factories ? Factories->GetActiveLines(CountryRow.CountryType) : TArray<FWorldFactoryLineState>())
+					{
+						if ((Spec.Industry == ECompanyType::None || Line.CompanyType == Spec.Industry)
+							&& (TargetProductIndex <= 0 || Line.ProductIndex == TargetProductIndex)) { Priority = 1; break; }
+					}
+				}
+				else { Priority = CountryRow.bIsTradeHub ? 1 : 0; }
+				if (Priority > BestPriority) { BestPriority = Priority; BestMedallion = Medallion->Get(); }
+			}
+			Step.Anchor = BestMedallion ? BestMedallion : FirstEligible ? FirstEligible : static_cast<UWidget*>(Map);
+			Step.bObserve = Step.Anchor == Map;
+		}
+		else
+		{
+			Step.Index = 1;
+			Step.Anchor = Dock ? Dock->GetWorldMapButtonWidget() : nullptr;
+		}
+		break;
+	}
+
+	case EMissionConditionType::ReserveManufacturingProduct:
+	{
+		if (!bInTargetOffice) { bInOffice ? ExitOffice() : EnterOffice(); break; }
+		UPitchBoardWidget* Board = PitchBoardWeak.Get();
+		if (!Board || !Board->IsActivated())
+		{
+			Step.Index = 1;
+			Step.Anchor = OfficeDock ? OfficeDock->GetOpenBoardButtonWidget() : nullptr;
+			break;
+		}
+		const int32 ProductIndex = FMath::Max(1, Spec.TargetProjectIndex);
+		Step.Anchor = Board->GetProjectCardCtaWidget(ProductIndex);
+		if (!Step.Anchor)
+		{
+			Step.Index = 2;
+			Step.Anchor = Board->GetProjectTileWidget(ProductIndex);
+			if (!Step.Anchor) { Step.Anchor = Board; Step.bObserve = true; }
+			break;
+		}
+		const UManufacturingDevelopmentManager* Development = GetGameInstance()->GetSubsystem<UManufacturingDevelopmentManager>();
+		const FManufacturingResearchStatus Research = Development
+			? Development->GetResearchStatus(GuideBuildingIndex != INDEX_NONE
+				? GuideBuildingIndex : GI->GetCurrentManagedBuildingIndex(), ProductIndex)
+			: FManufacturingResearchStatus();
+		Step.Index = Research.bResearched ? 4 : 3;
+		if (Research.bInProgress) { Step.Anchor = Board; Step.bObserve = true; }
+		break;
+	}
+
+	case EMissionConditionType::LevelUpFirstEmployee:
+	case EMissionConditionType::AllocateEmployeeStatPoint:
+	case EMissionConditionType::EnhanceFirstEmployee:
+	{
+		const bool bStarGoal = Spec.Condition == EMissionConditionType::EnhanceFirstEmployee;
+		UEmployeeWindowWidget* EmpWin = EmployeeWindowWeak.Get();
+		if (EmpWin && !EmpWin->IsActivated()) EmpWin = nullptr;
+		UEnhanceStarforceModalWidget* Starforce = StarforceModalWeak.Get();
+		if (Starforce && !Starforce->IsActivated()) Starforce = nullptr;
+		// 직원창이 없고 사무실 직원 패널이 떠 있으면 패널 버튼을 앵커로 쓴다
+		UOfficeEmployeePanelWidget* EmpPanel = EmpWin ? nullptr : OfficeEmployeePanelWeak.Get();
+		if (EmpPanel && EmpPanel->IsActivated())
+		{
+			Step.Index = CGRGoalGuideStep::ResolveEmployeeGrowthStep(bInTargetOffice, true, Starforce != nullptr, bStarGoal);
+			if (Step.Index == 0) { bInOffice ? ExitOffice() : EnterOffice(); }
+			else if (Step.Index == 3) { Step.Anchor = Starforce->GetEnhanceActionButtonWidget(); }
+			else if (bStarGoal) { Step.Anchor = EmpPanel->GetEnhanceButtonWidget(); }
+			else
+			{
+				UWidget* GrowthButton = Spec.Condition == EMissionConditionType::AllocateEmployeeStatPoint
+					? EmpPanel->GetStatPointTargetWidget() : EmpPanel->GetLevelUpButtonWidget();
+				if (GrowthButton && GrowthButton->GetIsEnabled()) Step.Anchor = GrowthButton;
+				else Step.Index = 3;
+			}
+			break;
+		}
+		Step.Index = CGRGoalGuideStep::ResolveEmployeeGrowthStep(
+			bInTargetOffice, EmpWin != nullptr, Starforce != nullptr, bStarGoal);
+		if (Step.Index == 0) { bInOffice ? ExitOffice() : EnterOffice(); }
+		else if (Step.Index == 1) { Step.Anchor = OfficeDock ? OfficeDock->GetEmployeeButtonWidget() : nullptr; }
+		else if (Step.Index == 3) { Step.Anchor = Starforce->GetEnhanceActionButtonWidget(); }
+		else if (bStarGoal) { Step.Anchor = EmpWin->GetEnhanceButtonWidget(); }
+		else
+		{
+			UWidget* LevelUpButton = Spec.Condition == EMissionConditionType::AllocateEmployeeStatPoint
+				? EmpWin->GetStatPointTargetWidget() : EmpWin->GetLevelUpButtonWidget();
+			if (LevelUpButton && LevelUpButton->GetIsEnabled()) Step.Anchor = LevelUpButton;
+			else Step.Index = 3; // 선택 직원을 바꾸는 안내 문구. 별 목표의 3번과 데이터 행이 독립이다.
+		}
+		break;
+	}
+
+	case EMissionConditionType::UpgradeFirstWorkstation:
+	case EMissionConditionType::PromoteFirstWorkstation:
+	{
+		if (!bInTargetOffice) { bInOffice ? ExitOffice() : EnterOffice(); break; }
+		const bool bPromotion = Spec.Condition == EMissionConditionType::PromoteFirstWorkstation;
+		AWorkstationActorBase* GuideDesk = nullptr;
+		if (UOfficeManager* Office = GetWorld() ? GetWorld()->GetSubsystem<UOfficeManager>() : nullptr)
+		{
+			for (AWorkstationActorBase* Desk : Office->GetPlacedWorkstations())
+			{
+				if (CGRGoalGuideStep::CanGuideDeskGrowth(Desk, bPromotion)) { GuideDesk = Desk; break; }
+			}
+		}
+		UWorkstationInfoWidget* Panel = WorkstationPanelWeak.Get();
+		if (Panel && Panel->IsActivated())
+		{
+			if (GuideDesk && !CGRGoalGuideStep::CanGuideDeskGrowth(Panel->GetWorkstation(), bPromotion))
+			{
+				Step.Index = 3;
+				Step.Anchor = Panel->GetCloseButtonWidget();
+			}
+			else
+			{
+				Step.Index = 2;
+				Step.Anchor = Panel->GetFirstAffordableGrowthButton(bPromotion);
+			}
+		}
+		else
+		{
+			Step.Index = 1;
+			Step.Spot = GuideDesk;
+			if (!Step.Spot) Step.Anchor = OfficeDock ? OfficeDock->GetWorkstationOpenButtonWidget() : nullptr;
+		}
+		break;
+	}
+
+	case EMissionConditionType::RecruitGoalDiscipline:
+	{
+		UEmployeeManager* Employees = GetGameInstance()->GetSubsystem<UEmployeeManager>();
+		const int32 BuildingIndex = GuideBuildingIndex != INDEX_NONE
+			? GuideBuildingIndex : GI->GetCurrentManagedBuildingIndex();
+		const int32 Capacity = Employees && BuildingIndex >= 0
+			? Employees->GetBuildingEmployeeCapacity(BuildingIndex, false) : 0;
+		if (Capacity > 0 && Employees->GetEmployeeCountInBuilding(BuildingIndex) >= Capacity)
+		{
+			Step.Index = 1;
+			if (bInOffice)
+			{
+				Step.Anchor = OfficeLayerWeak.IsValid() ? OfficeLayerWeak->GetBackButtonWidget() : nullptr;
+			}
+			else if (Manage && (GuideBuildingIndex == INDEX_NONE
+				|| (Manage->GetTargetBuilding() && Manage->GetTargetBuilding()->GetBuildingIndex() == GuideBuildingIndex)))
+			{
+				Step.Index = Manage->IsEnhancementTabActive() ? 3 : 2;
+				Step.Anchor = Step.Index == 3 ? Manage->GetBuildingFloorUpgradeButtonWidget()
+					: Manage->GetEnhancementTabButtonWidget();
+			}
+			else
+			{
+				UEntityManager* Entities = GetWorld() ? GetWorld()->GetSubsystem<UEntityManager>() : nullptr;
+				Step.Spot = GuideBuildingIndex != INDEX_NONE && Entities
+					? Entities->GetBuildingByIndex(GuideBuildingIndex) : PickGuideBuilding();
+			}
+			break;
+		}
+		if (!bInTargetOffice) { bInOffice ? ExitOffice() : EnterOffice(); break; }
+		if (!HasVacantWorkstation(GetWorld()))
+		{
+			Step.Index = 4;
+			Step.Anchor = OfficeDock ? OfficeDock->GetWorkstationOpenButtonWidget() : nullptr;
+		}
+		else if (UOfficeRecruitmentModalWidget* Modal = RecruitModalWeak.Get(); Modal && Modal->IsActivated())
+		{
+			Step.Index = GoalRecruitClickedDiscipline == Spec.Discipline ? 7 : 6;
+			if (Step.Index == 7)
+			{
+				int32 Hired = 0;
+				if (Employees)
+				{
+					for (const FEmployeeInstance& Employee : Employees->GetEmployeesInBuilding(BuildingIndex))
+					{
+						if (GetPrimaryDisciplineSlot(Employee) == static_cast<int32>(Spec.Discipline)) { ++Hired; }
+					}
+				}
+				Step.Anchor = FTutorialDerivedMissionRules::ResolveTarget(Spec.ConditionAmount) - Hired <= 1 ? Modal->GetPullButtonSingleWidget()
+					: Modal->GetPullButtonMultiWidget();
+			}
+			else { Step.Anchor = Modal->GetJobSelectionWidget(Spec.Discipline); }
+		}
+		else
+		{
+			Step.Index = 5;
+			Step.Anchor = OfficeDock ? OfficeDock->GetRecruitmentButtonWidget() : nullptr;
+		}
+		break;
+	}
+
+	case EMissionConditionType::LaunchGoalProject:
+		if (!bInTargetOffice) { bInOffice ? ExitOffice() : EnterOffice(); }
+		else if (ResolveGoalProjectPreparation(Spec, Step)) { break; }
+		else if (const UOfficeStageProgressManager* Stage = GetWorld()
+			? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+			Stage && Stage->GetLifecycle() != EProjectLifecycle::Idle)
+		{
+			if (Stage->GetLifecycle() == EProjectLifecycle::LaunchPending
+				&& Stage->GetProgressData().ProjectID == Spec.TargetProjectIndex)
+			{
+				const bool bBlocked = Stage->IsLaunchBlocked();
+				Step.Index = bBlocked ? LaunchGoalGuide::Goal::DiscardFailed : LaunchGoalGuide::PressLaunch;
+				if (ULaunchConfirmWidget* Launch = LaunchConfirmWeak.Get(); Launch && Launch->IsActivated())
+				{
+					Step.Anchor = VisibleOrNull(bBlocked
+						? Launch->GetDiscardButtonWidget() : Launch->GetConfirmButtonWidget());
+				}
+			}
+			else { Step.Index = 5; }
+		}
+		else if (UPitchBoardWidget* Board = PitchBoardWeak.Get(); Board && Board->IsActivated())
+		{
+			Step.Anchor = Board->GetProjectCardCtaWidget(Spec.TargetProjectIndex);
+			Step.Index = Step.Anchor ? 3 : 2;
+			if (Step.Index == 2) Step.Anchor = Board->GetProjectTileWidget(Spec.TargetProjectIndex);
+		}
+		else { Step.Index = 1; Step.Anchor = OfficeDock ? OfficeDock->GetOpenBoardButtonWidget() : nullptr; }
 		break;
 
 	case EMissionConditionType::EquipFirstSkin:            // G8 스킨 — 뽑기 → 관리패널 [스킨] 탭
@@ -2479,6 +5391,17 @@ FGoalGuideStep UMissionManagerSubsystem::GetTrackedGoalStep() const
 	}
 
 	case EMissionConditionType::RaiseBuildingFloor:        // G1 빌드업 — 도시 → 회사 → [강화] → 빌드업
+	case EMissionConditionType::EnhanceBuildingStat:
+	{
+		const bool bFloorUpgrade = Spec.Condition == EMissionConditionType::RaiseBuildingFloor;
+		UEntityManager* Entities = GetWorld() ? GetWorld()->GetSubsystem<UEntityManager>() : nullptr;
+		ABuildingBaseActor* GuideBuilding = Entities ? Entities->GetBuildingByIndex(GuideBuildingIndex) : nullptr;
+		if (!bInOffice && Manage && Manage->GetTargetBuilding() != GuideBuilding)
+		{
+			Step.Index = 4;
+			Step.Anchor = Manage->GetCloseButtonWidget();
+			break;
+		}
 		Step.Index = CGRGoalGuideStep::ResolveRaiseFloorStep(
 			bInOffice,
 			Manage != nullptr,
@@ -2489,7 +5412,7 @@ FGoalGuideStep UMissionManagerSubsystem::GetTrackedGoalStep() const
 		}
 		else if (Step.Index == 1)
 		{
-			Step.Spot = PickGuideBuilding();
+			Step.Spot = GuideBuilding;
 		}
 		else if (Step.Index == 2)
 		{
@@ -2497,17 +5420,32 @@ FGoalGuideStep UMissionManagerSubsystem::GetTrackedGoalStep() const
 		}
 		else
 		{
-			Step.Anchor = Manage->GetBuildingFloorUpgradeButtonWidget();
+			Step.Anchor = bFloorUpgrade ? Manage->GetBuildingFloorUpgradeButtonWidget()
+				: Manage->GetFirstAffordableStatEnhanceButtonWidget();
 		}
 		break;
+	}
 
-	case EMissionConditionType::ReachHQLevel:              // G2 본사 — 도크 [본사] (패널 내부 앵커는 게터 없음, Desc 가 담당)
+	case EMissionConditionType::ReachHQLevel:
+	{
 		if (bInOffice) { ExitOffice(); }
-		else { Step.Index = 1; Step.Anchor = Dock ? Dock->GetHeadquartersButtonWidget() : nullptr; }
+		else
+		{
+			UUIManagerSubsystem* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+			UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
+			UHQManagePanelWidget* HQ = UIBase ? Cast<UHQManagePanelWidget>(UIBase->GetActivePromptWidget()) : nullptr;
+			bool bConditionsUnmet = false;
+			Step.Anchor = HQ ? HQ->GetGrowthGuideTargetWidget(&bConditionsUnmet)
+				: (Dock ? Dock->GetHeadquartersButtonWidget() : nullptr);
+			Step.Index = HQ ? (HQ->IsGrowthTabActive() ? (bConditionsUnmet ? 4 : 3) : 2) : 1;
+			Step.bObserve = bConditionsUnmet;
+		}
 		break;
+	}
 
 	case EMissionConditionType::BuildSecondBuilding:       // G3 / G6 건설 — 도크 [건설] → 모달(카드 지목 없음)
 	case EMissionConditionType::BuildOnClearedPlot:
+	case EMissionConditionType::BuildIndustry:
 		if (bInOffice)
 		{
 			ExitOffice();
@@ -2540,6 +5478,19 @@ FGoalGuideStep UMissionManagerSubsystem::GetTrackedGoalStep() const
 	return Step;
 }
 
+namespace CGRGoalGuideCopy
+{
+FText RecruitFullOfficeLine(const FText& DefaultLine, const FText& TargetCompanyName,
+	bool bInOffice, int32 TargetBuildingIndex, int32 OpenBuildingIndex)
+{
+	return bInOffice && TargetBuildingIndex != INDEX_NONE && OpenBuildingIndex != TargetBuildingIndex
+		&& !TargetCompanyName.IsEmpty()
+		? FText::Format(NSLOCTEXT("GoalTracker", "FullDifferentCompany",
+			"{0}의 정원이 찼어요. 도시에서 해당 회사를 키워요."), TargetCompanyName)
+		: DefaultLine;
+}
+}
+
 FText UMissionManagerSubsystem::GetTrackedGoalStepLine() const
 {
 	UGoalBoardSubsystem* GoalMgr = GetGameInstance()->GetSubsystem<UGoalBoardSubsystem>();
@@ -2554,7 +5505,17 @@ FText UMissionManagerSubsystem::GetTrackedGoalStepLine() const
 		return FText::GetEmpty();
 	}
 	const int32 Index = GetTrackedGoalStep().Index;
-	return Row.StepLines.IsValidIndex(Index) ? Row.StepLines[Index] : FText::GetEmpty();
+	const FText Line = Row.StepLines.IsValidIndex(Index) ? Row.StepLines[Index] : FText::GetEmpty();
+	if (Row.ConditionType == EMissionConditionType::RecruitGoalDiscipline && Index == 1)
+	{
+		const UCGGameInstance* Game = Cast<UCGGameInstance>(GetGameInstance());
+		const int32 TargetBuildingIndex = GoalMgr->GetGuideBuildingIndex(GoalMgr->GetTrackedGoalID());
+		return CGRGoalGuideCopy::RecruitFullOfficeLine(Line,
+			Game && TargetBuildingIndex != INDEX_NONE ? Game->GetCompanyDisplayName(TargetBuildingIndex) : FText::GetEmpty(),
+			Game && Game->IsInOfficeMap(), TargetBuildingIndex,
+			Game ? Game->GetCurrentManagedBuildingIndex() : INDEX_NONE);
+	}
+	return Line;
 }
 
 UWidget* UMissionManagerSubsystem::GetTrackedGoalHighlightTarget() const
@@ -2596,6 +5557,88 @@ AActor* UMissionManagerSubsystem::GetTrackedGoalSpotlightActor() const
 	return GetTrackedGoalStep().Spot;
 }
 
+FText UMissionManagerSubsystem::GetCurrentGuideLine() const
+{
+	if (!HasActiveMission() || bReadyToClaim || bGuideSuspendedForLaunchReward
+		|| bRecruitmentPresentationActive || !ActiveMissionRow.GuideLines.IsValidIndex(GuidePhase))
+	{
+		return FText::GetEmpty();
+	}
+	// 보상 띠가 화면을 가로지르는 동안엔 말풍선을 접는다 — 겹쳐 둘 다 안 읽힌다(띠가 걷히면 다시 등장)
+	if (const UUIManagerSubsystem* ToastUI = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>(); ToastUI && ToastUI->IsRewardToastShown())
+	{
+		return FText::GetEmpty();
+	}
+	// 걸음 번호가 없는 순간 = 앞 화면 정리(창 닫기)나 기다림 — 걸음 문구를 남기면 대상과 다른 말을 한다
+	if (IsDerivedGuideActive())
+	{
+		const FGoalGuideStep Targets = GetDerivedGuideTargets();
+		if (Targets.Index == INDEX_NONE)
+		{
+			if (!Targets.Anchor)
+			{
+				return FText::GetEmpty();
+			}
+			// 결산 창은 지난 게임의 성적표다 ― 「창을 닫아요」만으로는 무엇을 본 건지 모른다
+			const UUIManagerSubsystem* ReportUI = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+			const UUIBase* ReportBase = ReportUI ? ReportUI->GetUIBase() : nullptr;
+			if (ReportBase && Cast<UProjectReportWidget>(ReportBase->GetActivePromptWidget()))
+			{
+				return NSLOCTEXT("MissionGuide", "DerivedCloseReport", "지난 게임의 <key>결산</>이에요. 확인하고 닫아요.");
+			}
+			// 별 강화 카드는 결과 연출(성공·유지·하락)을 보여 주고 그대로 열려 있다
+			if (ActiveMissionRow.ConditionType == EMissionConditionType::EquipFirstEquipment
+				&& StarforceModalWeak.IsValid() && StarforceModalWeak->GetParent())
+			{
+				return NSLOCTEXT("MissionGuide", "DerivedCloseStarResult", "별 강화를 마쳤어요. 이 창을 <key>닫아요</>.");
+			}
+			return NSLOCTEXT("MissionGuide", "DerivedCloseFirst", "먼저 이 창을 <key>닫아요</>.");
+		}
+	}
+	// 재화가 모자라 누를 버튼이 없거나 꺼져 있으면 같은 문구 대신 모을 방법을 말한다
+	if (IsDerivedGuideActive() && !ActiveMissionRow.ShortfallLine.IsEmpty()
+		&& IsDerivedShortfallStep(GetDerivedGuideTargets()))
+	{
+		return ActiveMissionRow.ShortfallLine;
+	}
+	const FText& Line = ActiveMissionRow.GuideLines[GuidePhase];
+	if (ActiveMissionRow.ConditionType == EMissionConditionType::CollectBricks && GuidePhase == BrickGuide::AddLaborer)
+	{
+		const ABrickFactory* Factory = Cast<ABrickFactory>(BrickFactoryWeak.Get());
+		const int32 Capacity = Factory ? Factory->GetLaborerCapacity() : 0;
+		return Capacity > 0 ? FText::Format(Line, FText::AsNumber(Capacity)) : FText::GetEmpty();
+	}
+	if (ActiveMissionRow.ConditionType == EMissionConditionType::ExplainPlot
+		&& (GuidePhase == PlotExplainGuide::Explain || GuidePhase == PlotExplainGuide::CloseDialog))
+	{
+		const ACityPlotActor* Plot = FindTutorialClearedPlot(GetWorld());
+		const UCityAcquisitionManager* PlotAcq = GetWorld() ? GetWorld()->GetSubsystem<UCityAcquisitionManager>() : nullptr;
+		const int32 Remaining = Plot && PlotAcq ? PlotAcq->CountUnclearedPlotOccupants(Plot->GetPlotId()) : 0;
+		return Remaining > 0 ? FText::Format(Line, FText::AsNumber(Remaining)) : FText::GetEmpty();
+	}
+	if (ActiveMissionRow.ConditionType == EMissionConditionType::PlaceDesks && GuidePhase == DeskGuide::PlaceMore)
+	{
+		const int32 Target = FMath::Max(1, static_cast<int32>(ActiveMissionRow.ConditionAmount));
+		return FText::Format(Line, FText::AsNumber(FMath::Max(0, Target - DeskPlaceProgress)));
+	}
+	// 짚는 건물 카드 이름 ― 본사 성장으로 막 열린 건물을 이름으로 부른다
+	if ((ActiveMissionRow.ConditionType == EMissionConditionType::BuildIndustry
+			|| ActiveMissionRow.ConditionType == EMissionConditionType::BuildSecondBuilding)
+		&& GuidePhase == SecondBuildingGuide::PickBuilding && Line.ToString().Contains(TEXT("{0}")))
+	{
+		// 도출형 미션은 BuildModalWeak 를 쓰지 않는다(첫 회사 전용) ― 걸음 도출과 같은 맨 위 창을 본다
+		FText CardName;
+		const UUIManagerSubsystem* CardUI = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+		const UUIBase* CardBase = CardUI ? CardUI->GetUIBase() : nullptr;
+		if (const UBuildModalWidget* Modal = CardBase ? Cast<UBuildModalWidget>(CardBase->GetActivePromptWidget()) : nullptr)
+		{
+			Modal->GetBuildGuideBestCardWidget(&CardName);
+		}
+		return CardName.IsEmpty() ? FText::GetEmpty() : FText::Format(Line, CardName);
+	}
+	return Line;
+}
+
 FText UMissionManagerSubsystem::GetCurrentMentorLine() const
 {
 	if (!HasActiveMission())
@@ -2606,6 +5649,20 @@ FText UMissionManagerSubsystem::GetCurrentMentorLine() const
 	if (!ActiveMissionRow.MentorLines.IsValidIndex(GuidePhase))
 	{
 		return FText::GetEmpty();
+	}
+
+	if (IsDerivedGuideActive() && !bReadyToClaim)
+	{
+		const FGoalGuideStep Targets = GetDerivedGuideTargets();
+		if (Targets.Index == INDEX_NONE && Targets.Anchor)
+		{
+			return NSLOCTEXT("MissionGuide", "DerivedCloseFirstMentor", "열린 창을 닫고 이어서 진행하세요");
+		}
+	}
+	if (IsDerivedGuideActive() && !bReadyToClaim && !ActiveMissionRow.ShortfallLine.IsEmpty()
+		&& IsDerivedShortfallStep(GetDerivedGuideTargets()))
+	{
+		return ActiveMissionRow.ShortfallLine;
 	}
 
 	const FText& Line = ActiveMissionRow.MentorLines[GuidePhase];
@@ -2635,7 +5692,6 @@ bool UMissionManagerSubsystem::GetMissionProgress(int64& OutCurrent, int64& OutT
 		OutCurrent = ResMgr ? FMath::Min(ResMgr->GetResourceAmount(EResourceType::Brick), OutTarget) : 0;
 		return true;
 	}
-
 	if (ActiveMissionRow.ConditionType == EMissionConditionType::PlaceDesks)
 	{
 		OutTarget = FMath::Max(1, ActiveMissionRow.ConditionAmount);
@@ -2652,7 +5708,13 @@ bool UMissionManagerSubsystem::GetMissionProgress(int64& OutCurrent, int64& OutT
 		{
 			if (UEmployeeManager* EmpMgr = CGGI->GetSubsystem<UEmployeeManager>())
 			{
-				const int32 Count = EmpMgr->GetEmployeeCountInBuilding(CGGI->GetCurrentManagedBuildingIndex());
+				const EProductionDiscipline Required = GetRequiredRecruitDiscipline();
+				int32 Count = 0;
+				for (const FEmployeeInstance& Employee : EmpMgr->GetAllEmployeesRef())
+				{
+					if (Employee.AssignedBuildingIndex == CGGI->GetCurrentManagedBuildingIndex()
+						&& (Required == EProductionDiscipline::Count || DepartmentToDiscipline(Employee.Department) == Required)) ++Count;
+				}
 				OutCurrent = FMath::Min(static_cast<int64>(Count), OutTarget);
 			}
 		}
@@ -2788,7 +5850,7 @@ void UMissionManagerSubsystem::EnsureMissionWidgets()
 	// ===== 미션판 트래커 — 체인이 끝났고 미수령 미션이 남아 있을 때만 =====
 	UGoalBoardSubsystem* GoalMgr = GetGameInstance()->GetSubsystem<UGoalBoardSubsystem>();
 
-	const bool bWantGoalTracker = GoalMgr && !HasActiveMission() && GoalMgr->IsUnlocked() && GoalMgr->HasAnyUnclaimedGoal();
+	const bool bWantGoalTracker = GoalMgr && !HasActiveMission() && GoalMgr->IsUnlocked() && GoalMgr->HasAvailableGuide();
 
 	if (bWantGoalTracker && !GoalTrackerWidget)
 	{
@@ -2798,6 +5860,8 @@ void UMissionManagerSubsystem::EnsureMissionWidgets()
 			if (GoalTrackerWidget)
 			{
 				GoalTrackerWidget->InitTracker();
+				// 마지막 미션 수령과 같은 순간에 생기므로 보상 창이 닫힐 때까지 숨긴다
+				RefreshTrackerPresentationSuppression();
 
 				// 기존 체인 카드가 이미 HUD 크롬 위 / Bottom·Prompt 스택 아래의 올바른 레이어에 있다.
 				// 그 부모에 형제로 붙이면 상위 CommonUI 스택을 재배치하지 않고 같은 위치·레이어를 그대로 쓴다.
@@ -2873,6 +5937,20 @@ void UMissionManagerSubsystem::EnsureMissionWidgets()
 			UE_LOG(LogTemp, Error, TEXT("[MissionManager] MissionGuideOverlay 위젯 클래스 없음 (DT_WidgetClass 행 확인)"));
 		}
 	}
+	if (bRecruitmentPresentationActive)
+	{
+		if (TrackerWidget) { TrackerWidget->SetPresentationSuppressed(true); }
+		if (GoalTrackerWidget) { GoalTrackerWidget->SetPresentationSuppressed(true); }
+		if (GuideOverlayWidget)
+		{
+			if (!bGuideOverlayVisibilitySavedForRecruitment)
+			{
+				GuideOverlayVisibilityBeforeRecruitment = GuideOverlayWidget->GetVisibility();
+				bGuideOverlayVisibilitySavedForRecruitment = true;
+			}
+			GuideOverlayWidget->SetVisibility(ESlateVisibility::Hidden);
+		}
+	}
 
 	// 맵 전환이 밴드를 지운 뒤(DestroyMissionWidgets) 안내 중인 미션 문구를 되살린다 — 변경 이벤트는 이미 지나갔다.
 	// 체인 중엔 손대지 않는다(UpdateGuideNotification 소유). 문구가 같으면 컨테이너가 무시(멱등)
@@ -2904,6 +5982,7 @@ void UMissionManagerSubsystem::DestroyMissionWidgets()
 		GuideOverlayWidget->RemoveFromParent();
 		GuideOverlayWidget = nullptr;
 	}
+	bGuideOverlayVisibilitySavedForRecruitment = false;
 
 	// 가이드 상주 알림도 함께 정리 (레벨 전환/PIE 종료 시 잔류 방지)
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
@@ -2935,7 +6014,15 @@ void UMissionManagerSubsystem::HandleTrackedGoalChanged(FName TrackedID)
 	FGoalTable Row;
 	if (!TrackedID.IsNone() && TableMgr && TableMgr->GetGoalData(TrackedID, Row))
 	{
-		UIMgr->ShowGuideNotification(Row.Desc);
+		UIMgr->ClearGuideNotification();
+		const FGoalGuideStep Step = GetTrackedGoalStep();
+		if (IsValid(Step.Spot))
+		{
+			if (APlayerCamera* Camera = FindPlayerCamera(GetWorld()))
+			{
+				Camera->FocusOnActor(Step.Spot, 0.6f, false);
+			}
+		}
 	}
 	else
 	{

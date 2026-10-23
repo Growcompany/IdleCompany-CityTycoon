@@ -3,6 +3,12 @@
 #include "UI/Element/Cards/BuildCardInfoWidget.h"
 
 #include "Components/Image.h"
+#include "Components/Border.h"
+#include "Blueprint/WidgetTree.h"
+#include "Engine/GameInstance.h"
+#include "Engine/Texture2D.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Manager/TableManagerSubsystem.h"
 #include "Table/BuildableCardTable.h"
 #include "UI/Element/Common/StatRowWidget.h"
 #include "UI/Element/Common/ResourceWidget.h"
@@ -41,6 +47,34 @@ void UBuildCardInfoWidget::SetBuildableInfo(const FBuildableCardTable& buildable
 			TEXT("UBuildCardInfoWidget: '%s' has %d construction costs; cost chips truncated to 2."),
 			*buildableInfo.Name.ToString(), CostNum);
 	}
+
+	if (BuildCostBackgroundColor.A > 0.f)
+	{
+		auto ApplyCostColor = [this](UUserWidget* CostWidget)
+		{
+			if (!CostWidget || !CostWidget->WidgetTree) return;
+			CostWidget->WidgetTree->ForEachWidget([this](UWidget* CostChild)
+			{
+				if (UBorder* CostBorder = Cast<UBorder>(CostChild))
+				{
+					UMaterialInstanceDynamic* CostMaterial = CostBorder->GetDynamicMaterial();
+					FSlateBrush CostBrush = CostBorder->Background;
+					if (CostMaterial)
+					{
+						CostMaterial->SetVectorParameterValue(TEXT("Button Col"), BuildCostBackgroundColor);
+						CostBrush.TintColor = FSlateColor(FLinearColor::White);
+					}
+					else
+					{
+						CostBrush.TintColor = FSlateColor(BuildCostBackgroundColor);
+					}
+					CostBorder->SetBrush(CostBrush);
+				}
+			});
+		};
+		ApplyCostColor(UIE_Resource);
+		ApplyCostColor(SecondaryCostResource);
+	}
 }
 
 void UBuildCardInfoWidget::UpdateCostAffordability(EResourceType ResourceType, bool bCanAfford)
@@ -54,7 +88,7 @@ void UBuildCardInfoWidget::UpdateCostAffordability(EResourceType ResourceType, b
 	}
 }
 
-void UBuildCardInfoWidget::SetBuildingStats(int32 WidthCells, int32 DepthCells, int32 NewBuildEmployees)
+void UBuildCardInfoWidget::SetBuildingStats(int32 WidthCells, int32 DepthCells, int32 NewBuildEmployees, float IncomeBonusPercent)
 {
 	// 라벨("크기"/"인원")은 WBP DefaultStatName 으로 베이크 — 코드는 값만 주입(데이터주도).
 	if (SizeStatRow)
@@ -73,6 +107,31 @@ void UBuildCardInfoWidget::SetBuildingStats(int32 WidthCells, int32 DepthCells, 
 		// "최대"가 아니라 "기본" — 이 값은 증축 0층 기준이고 층을 올리면 늘어난다.
 		// 증축 상한(MaxModuleCount)이 전 행 동일이라 건물 간 변별점은 이 기본값 쪽이다.
 		CapacityStatRow->SetStatValue(FString::Printf(TEXT("기본 %d명"), NewBuildEmployees));
+	}
+
+	if (IncomeStatRow)
+	{
+		// 0% 도 접지 않고 그대로 보여준다 — 칸수 안에서 등급이 올라가는 사다리가 보이려면 바닥 칸이 필요하다.
+		IncomeStatRow->SetStatValue(FString::Printf(TEXT("+%d%%"), FMath::RoundToInt(FMath::Max(0.f, IncomeBonusPercent))));
+
+		UTexture2D* MoneyIcon = nullptr;
+		if (UGameInstance* CardGameInstance = GetGameInstance())
+		{
+			if (UTableManagerSubsystem* TableMgr = CardGameInstance->GetSubsystem<UTableManagerSubsystem>())
+			{
+				bool bFound = false;
+				const FResourceInfo MoneyInfo = TableMgr->GetResourceInfo(EResourceType::Money, bFound);
+				if (bFound && !MoneyInfo.Icon.IsNull())
+				{
+					MoneyIcon = MoneyInfo.Icon.LoadSynchronous();
+					if (!MoneyIcon)
+					{
+						UE_LOG(LogTemp, Warning, TEXT("UBuildCardInfoWidget: Money icon could not be loaded from DT_Resource."));
+					}
+				}
+			}
+		}
+		IncomeStatRow->SetStatIcon(MoneyIcon);
 	}
 }
 

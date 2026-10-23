@@ -11,6 +11,11 @@
 
 class UBoxComponent;
 class UStaticMeshComponent;
+class UOfficeDistantBackdrop;
+class UMaterialInterface;
+class UChildActorComponent;
+class AInteractiveDoorActor;
+class AOfficeTelevision;
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnOfficeFootprintChanged, FIntPoint);
 
@@ -30,10 +35,33 @@ class COMPANYGROWTHRENEWAL_API AOfficeInterior : public AActor
 public:
 	AOfficeInterior();
 
+	static constexpr float PresentationScale = 1.2f;
+	void ApplyPresentationScale();
+
+	// 도시에서 이미 촬영한 사진을 실내 바닥 좌표에 맞춰 표시한다.
+	UFUNCTION(BlueprintCallable, Category = "Office|Backdrop")
+	bool SynchronizeCityBackdrop();
+
+	// 저장 좌표는 배율을 포함하지 않는 실내 로컬 좌표다.
+	FTransform OfficeLocalToWorldTransform(const FTransform& LocalTransform) const;
+	FTransform WorldToOfficeLocalTransform(const FTransform& WorldTransform) const;
+
 	FOnOfficeFootprintChanged OnFootprintChanged;
+
+	UFUNCTION(BlueprintPure, Category = "Office|Entrance")
+	AInteractiveDoorActor* GetRecruitmentDoor() const;
+
+	// 고정 문틀과 바로 앞 진입 공간. 문짝의 애니메이션과 무관한 실내 로컬 좌표다.
+	UFUNCTION(BlueprintPure, Category = "Office|Entrance")
+	FBox GetRecruitmentEntranceExclusionBoundsLocal() const;
+
+	bool IsRecruitmentEntranceBlocked(const FBox& OfficeLocalBounds) const;
+	bool IsRecruitmentEntranceFloorBlocked(const FBox2D& OfficeLocalFootprint) const;
+	bool IsTelevisionPlacementBlocked(const FBox& OfficeLocalBounds) const;
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void OnConstruction(const FTransform& Transform) override;
 
 	// ========== 컴포넌트 ==========
@@ -52,6 +80,39 @@ protected:
 	// 오른쪽 벽 컴포넌트 (메시는 블루프린트에서 설정)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Office|Walls")
 	UStaticMeshComponent* WallRight;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Office|Entrance")
+	TObjectPtr<UChildActorComponent> RecruitmentDoor;
+
+	// 문 크기는 오피스 확장 스케일과 독립적인 실내 로컬 cm다.
+	UPROPERTY(EditDefaultsOnly, Category = "Office|Entrance", meta = (ClampMin = "1.0"))
+	FVector2D DoorOpeningSize = FVector2D(111.6f, 238.3f);
+
+	UPROPERTY(EditDefaultsOnly, Category = "Office|Entrance", meta = (ClampMin = "62.0"))
+	float DoorWallCornerInset = 155.f;
+
+	// 문 액터 원점부터 문턱 윗면까지의 저작 높이.
+	UPROPERTY(EditDefaultsOnly, Category = "Office|Entrance", meta = (ClampMin = "0.0"))
+	float DoorThresholdHeight = 0.8f;
+
+	// 문틀 옆/위의 장식 여백과 실내 바닥 쪽 진입 깊이 (실내 로컬 cm).
+	UPROPERTY(EditDefaultsOnly, Category = "Office|Entrance", meta = (ClampMin = "0.0"))
+	float DoorPlacementMargin = 30.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Office|Entrance", meta = (ClampMin = "0.0"))
+	float DoorApproachDepth = 150.f;
+
+	UPROPERTY(VisibleAnywhere, Category = "Office|Entrance")
+	TObjectPtr<UStaticMeshComponent> DoorWallLeft;
+
+	UPROPERTY(VisibleAnywhere, Category = "Office|Entrance")
+	TObjectPtr<UStaticMeshComponent> DoorWallRight;
+
+	UPROPERTY(VisibleAnywhere, Category = "Office|Entrance")
+	TObjectPtr<UStaticMeshComponent> DoorWallHeader;
+
+	UPROPERTY(VisibleAnywhere, Category = "Office|Entrance")
+	TObjectPtr<UStaticMeshComponent> DoorWallSill;
 
 	// NavMesh가 생성될 영역을 정의하는 박스
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Office|Navigation")
@@ -115,6 +176,10 @@ protected:
 	// 방향별 확장 회차(현재-스타터 타일수)로 인덱싱하는 다이아 비용. 범위 밖은 마지막 값. BP_OfficeInterior 는 이 값을 덮지 않는다 — 여기가 정본.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Office|Expansion")
 	TArray<int32> ExpansionDiamondCosts = {30, 45, 68, 101};
+
+	// 실제 바닥 경계 바깥의 정지 점선 밝기.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Office|Expansion", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ExpansionGuideLineStrength = 0.45f;
 
 public:
 	// ========== NavMesh/스폰 관련 ==========
@@ -230,7 +295,24 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Office|Expansion")
 	FIntPoint GetMaxTileCount() const;
 
+	/** 그 축으로 더 넓힐 칸이 남아 있는가. 최대면 false. */
+	UFUNCTION(BlueprintCallable, Category = "Office|Expansion")
+	bool HasExpansionCell(EOfficeExpandDirection Direction) const;
+
+	/** 실제 바닥 경계에서 다음 칸 쪽으로 조금 떨어진 월드 좌표. 칸이 없으면 ZeroVector. */
+	FVector GetExpansionAnchorWorld(EOfficeExpandDirection Direction) const;
+
+	/** actor 로컬 +X(Left) 또는 -Y(Right)의 정규화된 월드 성장 방향. */
+	FVector GetExpansionDirectionWorld(EOfficeExpandDirection Direction) const;
+
+	float GetTileSize() const { return TileSize; }
+
+	/** 다음 확장 칸 고스트의 표시 토글. 끄면 즉시 숨긴다. */
+	void SetExpansionPreviewVisible(bool bVisible);
+
 	FBox2D GetCurrentFloorBoundsLocal() const;
+	/** 바닥과 실제 벽 메시를 포함한 로컬 XY 외곽 경계. */
+	FBox2D GetExteriorBoundsLocal() const;
 	FBox2D GetMaxFloorBoundsLocal() const;
 	float GetStructuralFloorZLocal() const;
 
@@ -268,6 +350,11 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Office|Walls")
 	void GetWallPlacementBounds(EWallSide WallSide, FVector& OutMinBounds, FVector& OutMaxBounds) const;
+	void GetWallPlacementBoundsLocal(EWallSide WallSide, FVector& OutMinBounds, FVector& OutMaxBounds) const;
+
+	// 로컬 격자/높이 제한을 적용한 뒤 월드 좌표로 반환한다. 길이 방향은 grounded 검사에서 판정한다.
+	FVector ConstrainWallDecorationLocation(EWallSide WallSide, const FVector& WorldLocation, bool bSnapToGrid = true) const;
+
 
 	/**
 	 * 벽 높이 반환
@@ -285,6 +372,33 @@ public:
 	void ApplyOfficeSaveData(const FOfficeSaveData& OfficeData);
 
 private:
+	void UpdateRecruitmentEntrance();
+	UPROPERTY(Transient)
+	TObjectPtr<AOfficeTelevision> Television;
+
+	// ========== 다음 확장 칸 고스트 ==========
+	// 인덱스 0 = Left(가로), 1 = Right(세로). 방향이 2개뿐이라 동적 생성이 필요 없다.
+	void UpdateExpansionPreview();
+
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMeshComponent> ExpansionFloorPreview[2];
+
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMeshComponent> ExpansionWallPreview[2];
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> ExpansionPreviewMID[2];
+
+	bool bExpansionPreviewVisible = true;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UOfficeDistantBackdrop> CityBackdrop;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> CityBackdropMaterial;
+
+	void HandleCityBackdropFootprintChanged(FIntPoint TileCount);
+
 	bool TryApplyValidatedFootprint(
 		FIntPoint RequestedTileCount,
 		FIntPoint RequestedStarterTileCount,

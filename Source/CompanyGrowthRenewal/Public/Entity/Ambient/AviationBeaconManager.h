@@ -68,9 +68,7 @@ protected:
 
 	// day/night 전환 시 비콘 ISM 가시성만 토글(낮=숨김=렌더0, 밤=표시) — 인스턴스는 보존.
 	UFUNCTION()
-	void HandleSunRise();
-	UFUNCTION()
-	void HandleSunSet();
+	void HandleVisualTimeChanged();
 	void ApplyNightVisibility(bool bNight);
 
 	TWeakObjectPtr<ATimeCycleManager> CachedTimeCycle;

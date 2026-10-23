@@ -1,6 +1,12 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Panel/WorkstationInfoWidget.h"
+#include "UI/Element/Common/PanelHeaderWidget.h"
+#include "Manager/PanelIntroSubsystem.h"
+#include "TimerManager.h"
+#include "UI/Panel/OfficeMainWidget.h"
+#include "UI/Panel/EmployeeWindowWidget.h"
+#include "UI/Panel/OfficeEmployeePanelWidget.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "Office/WorkstationActorBase.h"
 #include "Office/WorkstationTypes.h"
@@ -10,21 +16,27 @@
 #include "Manager/UIManagerSubsystem.h"
 #include "Table/WorkstationCardTable.h"
 #include "Table/WorkstationTable.h"
+#include "Table/VFXTable.h"
 #include "Data/EmployeeTypes.h"
 #include "Data/EmployeeStatsData.h"
 #include "Data/EntityCardData.h"
-#include "Enum/LootBoxRarity.h"
 #include "Enum/ProductionDiscipline.h"
-#include "UI/Element/Employee/DisciplineRadarWidget.h"
 #include "Components/Border.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "UI/UIBase.h"
-#include "UI/Panel/OfficeRecruitmentPanelWidget.h"
+#include "UI/Panel/OfficeRecruitmentModalWidget.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
 #include "UI/Element/Building/UpgradeSlot.h"
+#include "UI/Element/Common/BulkModeSelectorWidget.h"
 #include "UI/Element/Buttons/CostActionButtonWidget.h"
+#include "UI/Panel/WorkstationPromotionWidget.h"
+#include "Manager/ResourceItemManager.h"
+#include "Manager/SoundManagerSubsystem.h"
+#include "UI/UISoundTags.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "UI/Element/Employee/EmployeeRosterCardWidget.h"
 #include "Player/OfficeCameraPawn.h"
 #include "Player/MainMapPlayerController.h"
@@ -36,12 +48,42 @@
 #include "Components/Image.h"
 #include "Components/Button.h"
 #include "Components/ListView.h"
-#include "Materials/MaterialInstanceDynamic.h"
 #include "Kismet/GameplayStatics.h"
+
+namespace
+{
+	void SetGradeCompositionImage(UImage* Image, const TSoftObjectPtr<UTexture2D>& ImageAsset)
+	{
+		if (!Image) return;
+		UTexture2D* Texture = ImageAsset.LoadSynchronous();
+		Image->SetBrushFromTexture(Texture, false);
+		Image->SetVisibility(Texture ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+		if (!Texture && !ImageAsset.IsNull())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[WorkstationInfo] Missing grade composition image: %s"),
+				*ImageAsset.ToSoftObjectPath().ToString());
+		}
+	}
+
+	FText BuildPromotionResultLine(const FComputerSetupLevelData& OldRow, const FComputerSetupLevelData& NewRow)
+	{
+		const FWorkstationEquipDelta Delta = BuildWorkstationEquipDelta(OldRow, &NewRow);
+		if (Delta.ItemName.IsEmpty()) return Delta.Detail;
+		if (Delta.Kind == EWorkstationEquipDeltaKind::Replaced)
+		{
+			return FText::Format(NSLOCTEXT("WorkstationInfo", "PromotionReplace", "{0}|hpp(으로,로) 교체"), Delta.ItemName);
+		}
+		const FText Added = FText::Format(NSLOCTEXT("WorkstationInfo", "PromotionAdded", "{0} 추가"), Delta.ItemName);
+		return Delta.RemovedItemNames.IsEmpty()
+			? Added
+			: FText::Format(NSLOCTEXT("WorkstationInfo", "PromotionAddedRemoved", "{0} · {1} 제거"), Added, Delta.RemovedItemNames);
+	}
+}
 
 void UWorkstationInfoWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	if (RelocateButton) RelocateButton->OnClicked().AddUObject(this, &ThisClass::OnRelocateClicked);
 
 	// 미션 패널 등록 유지 — 구 도크 대상 가이드 타겟(채용/좌석/성장, 체인에서 이관됨)은 nullptr 스텁이라 링만 생략됨
 	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
@@ -54,14 +96,17 @@ void UWorkstationInfoWidget::NativeConstruct()
 		EmployeeManager = GI->GetSubsystem<UEmployeeManager>();
 	}
 
-	// 책상 강화 버튼 (UUpgradeSlot 내부 UCostActionButtonWidget — DECLARE_EVENT 이라 AddUObject)
-	if (DeskUpgradeSlot)
+	if (PromoteButton) PromoteButton->OnClicked().AddUObject(this, &ThisClass::OnDeskUpgradeClicked);
+	if (ProcessingUpgradeSlot && ProcessingUpgradeSlot->GetUpgradeButton())
+		ProcessingUpgradeSlot->GetUpgradeButton()->OnClicked().AddUObject(this, &ThisClass::OnProcessingUpgradeClicked);
+	if (ToolsUpgradeSlot && ToolsUpgradeSlot->GetUpgradeButton())
+		ToolsUpgradeSlot->GetUpgradeButton()->OnClicked().AddUObject(this, &ThisClass::OnToolsUpgradeClicked);
+	if (EnvironmentUpgradeSlot && EnvironmentUpgradeSlot->GetUpgradeButton())
+		EnvironmentUpgradeSlot->GetUpgradeButton()->OnClicked().AddUObject(this, &ThisClass::OnEnvironmentUpgradeClicked);
+	if (BulkModeSelector)
 	{
-		if (UCostActionButtonWidget* UpgradeBtn = DeskUpgradeSlot->GetUpgradeButton())
-		{
-			DefaultUpgradeButtonText = UpgradeBtn->ButtonText;
-			UpgradeBtn->OnClicked().AddUObject(this, &UWorkstationInfoWidget::OnDeskUpgradeClicked);
-		}
+		BulkModeSelector->SetMaxModeEnabled(true);
+		BulkModeSelector->OnModeChanged.AddUObject(this, &UWorkstationInfoWidget::HandleBulkModeChanged);
 	}
 
 	if (EmployeeWindowButton)
@@ -85,9 +130,9 @@ void UWorkstationInfoWidget::NativeConstruct()
 		RecruitButton->OnClicked().AddUObject(this, &UWorkstationInfoWidget::OnRecruitClicked);
 	}
 
-	if (CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		CloseButton->OnCloseClicked.AddDynamic(this, &UWorkstationInfoWidget::OnCloseDelegate);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UWorkstationInfoWidget::OnCloseDelegate);
 	}
 
 	if (BackgroundBtn)
@@ -102,21 +147,20 @@ void UWorkstationInfoWidget::NativeConstruct()
 	}
 }
 
-void UWorkstationInfoWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
-{
-	Super::NativeTick(MyGeometry, InDeltaTime);
-
-	UpdateEquipPlateMaterialSize();
-}
-
 void UWorkstationInfoWidget::NativeDestruct()
 {
-	if (DeskUpgradeSlot)
+	if (RelocateButton) RelocateButton->OnClicked().RemoveAll(this);
+	if (PromoteButton) PromoteButton->OnClicked().RemoveAll(this);
+	for (UUpgradeSlot* UpgradeSlot : {ProcessingUpgradeSlot, ToolsUpgradeSlot, EnvironmentUpgradeSlot})
 	{
-		if (UCostActionButtonWidget* UpgradeBtn = DeskUpgradeSlot->GetUpgradeButton())
+		if (UpgradeSlot && UpgradeSlot->GetUpgradeButton())
 		{
-			UpgradeBtn->OnClicked().RemoveAll(this);
+			UpgradeSlot->GetUpgradeButton()->OnClicked().RemoveAll(this);
 		}
+	}
+	if (BulkModeSelector)
+	{
+		BulkModeSelector->OnModeChanged.RemoveAll(this);
 	}
 
 	if (EmployeeWindowButton)
@@ -139,9 +183,9 @@ void UWorkstationInfoWidget::NativeDestruct()
 		RecruitButton->OnClicked().RemoveAll(this);
 	}
 
-	if (CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		CloseButton->OnCloseClicked.RemoveDynamic(this, &UWorkstationInfoWidget::OnCloseDelegate);
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UWorkstationInfoWidget::OnCloseDelegate);
 	}
 
 	if (BackgroundBtn)
@@ -161,14 +205,67 @@ void UWorkstationInfoWidget::NativeDestruct()
 void UWorkstationInfoWidget::NativeOnActivated()
 {
 	Super::NativeOnActivated();
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UResourceItemManager* ResourceMgr = GI->GetSubsystem<UResourceItemManager>())
+		{
+			ResourceMgr->OnResourceChanged.AddUObject(this, &UWorkstationInfoWidget::HandleResourceChanged);
+		}
+	}
+
+	// 최초 진입 코치마크 — SetWorkstationData 가 활성화 뒤에 오므로 여유를 두고 시작한다
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().SetTimer(
+			PanelIntroTimer, this, &UWorkstationInfoWidget::TryPlayPanelIntro, 0.5f, false);
+	}
 
 	// 위에 쌓인 패널이 닫혀 재활성될 때 점유/책상 상태 갱신.
 	// 첫 오픈 땐 CurrentWorkstation 이 아직 null(SetWorkstationData 가 뒤) 이라 UpdateUI 는 early-return.
 	UpdateUI();
 }
 
+void UWorkstationInfoWidget::TryPlayPanelIntro()
+{
+	// 타이머 대기 중 창이 닫혔을 수 있다
+	if (!IsActivated())
+	{
+		return;
+	}
+	UPanelIntroSubsystem* IntroMgr = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UPanelIntroSubsystem>() : nullptr;
+	if (!IntroMgr)
+	{
+		return;
+	}
+	// 함수 지역 static 이라 유니티 빌드 셰도잉이 없다
+	static const FName IntroKey(TEXT("WorkstationInfo"));
+	PanelIntroOverlay = IntroMgr->PlayIntro(this, IntroKey, /*bIgnoreSeen=*/false);
+	if (UPanelIntroOverlayWidget* Overlay = PanelIntroOverlay.Get())
+	{
+		Overlay->OnIntroFinished.AddUObject(this, &UWorkstationInfoWidget::HandlePanelIntroFinished);
+	}
+}
+
+void UWorkstationInfoWidget::HandlePanelIntroFinished()
+{
+	PanelIntroOverlay.Reset();
+}
+
 void UWorkstationInfoWidget::NativeOnDeactivated()
 {
+	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr)
+	{
+		MissionMgr->NotifyWorkstationPanelClosed(this);
+	}
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UResourceItemManager* ResourceMgr = GI->GetSubsystem<UResourceItemManager>())
+		{
+			ResourceMgr->OnResourceChanged.RemoveAll(this);
+		}
+	}
 	// 패널 닫힐 때 점유 직원 오버레이도 해제
 	SetOccupantHighlight(false);
 
@@ -187,6 +284,31 @@ void UWorkstationInfoWidget::NativeOnDeactivated()
 	}
 
 	Super::NativeOnDeactivated();
+
+	// 인트로는 뷰포트 오버레이라 스택이 안 거둬간다 — RemoveFromParent → NativeDestruct 가 복구 신호를 쏜다
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(PanelIntroTimer);
+	}
+	if (UPanelIntroOverlayWidget* Intro = PanelIntroOverlay.Get())
+	{
+		Intro->RemoveFromParent();
+	}
+	PanelIntroOverlay.Reset();
+	if (bPendingPlacementEdit)
+	{
+		bPendingPlacementEdit = false;
+		if (IsValid(CurrentWorkstation))
+			if (UUIManagerSubsystem* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+				if (UOfficeMainWidget* Main = UIManager->GetOfficeMain()) Main->RequestPlacementEdit(CurrentWorkstation);
+	}
+}
+
+void UWorkstationInfoWidget::OnRelocateClicked()
+{
+	if (IsCloseRequested() || !IsValid(CurrentWorkstation)) return;
+	bPendingPlacementEdit = true;
+	CloseWithAnimation();
 }
 
 void UWorkstationInfoWidget::SetWorkstationData(AWorkstationActorBase* Workstation)
@@ -289,7 +411,7 @@ void UWorkstationInfoWidget::UpdateUI()
 
 	SyncOccupancyFromWorkstation();
 	UpdateDeskSection();
-	UpdateEquipBlock();
+	UpdateComponentSection();
 	UpdateWorkerCard();
 	UpdateBenchSection();
 }
@@ -301,198 +423,165 @@ void UWorkstationInfoWidget::UpdateDeskSection()
 		return;
 	}
 
-	// DT_WorkstationCard.UIIcon(WorkstationTypeID 행) → 강화 슬롯 아이콘, DisplayName → 헤더 서브
-	FString DeskName;
+	// DT_WorkstationCard.DisplayName은 선택한 책상 이름이다. 비교 그림은 등급 장비 구성이다.
+	FText DeskTitle;
 	if (UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr)
 	{
 		bool bCardOK = false;
 		const FWorkstationCardTable Card = TableMgr->GetWorkstationCardInfo(CurrentWorkstation->WorkstationTypeID, bCardOK);
-		if (bCardOK)
-		{
-			DeskName = Card.DisplayName.ToString();
-			if (!Card.UIIcon.IsNull())
-			{
-				if (UTexture2D* DeskTex = Card.UIIcon.LoadSynchronous())
-				{
-					if (DeskUpgradeSlot)
-					{
-						DeskUpgradeSlot->SetIconTexture(DeskTex);
-					}
-				}
-			}
-		}
+		if (bCardOK) DeskTitle = Card.DisplayName;
 	}
 
 	const int32 SetupLevelAsInt = GetComputerSetupLevelNumber(CurrentWorkstation->GetCurrentSetupLevel());
 
-	// 레벨은 DeskUpgradeSlot 의 LevelText 가 표시 — 여기선 책상 이름만(중복 방지)
-	if (HeaderSubText)
+	// 스택이 패널 인스턴스를 재사용하므로 이름이 없을 때도 덮는다 — 안 그러면 직전 책상 이름이 남는다
+	if (PanelHeader)
 	{
-		HeaderSubText->SetText(FText::FromString(DeskName));
-		HeaderSubText->SetVisibility(DeskName.IsEmpty()
-			? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+		PanelHeader->SetTitle(DeskTitle.IsEmpty()
+			? NSLOCTEXT("WorkstationInfo", "DeskTitleFallback", "책상")
+			: DeskTitle);
 	}
 
-	if (DeskUpgradeSlot)
+	FComputerSetupLevelData CurrentLevelData;
+	const bool bHasCurrent = CurrentWorkstation->GetCurrentSetupLevelData(CurrentLevelData);
+	const bool bMax = CurrentWorkstation->IsMaxLevel();
+	FComputerSetupLevelData TargetLevelData;
+	const bool bHasTarget = bMax
+		? CurrentWorkstation->GetMaxVariantData(TargetLevelData)
+		: CurrentWorkstation->GetNextSetupLevelData(TargetLevelData);
+	if (!bHasCurrent || (!bMax && !bHasTarget))
 	{
-		FComputerSetupLevelData CurrentLevelData;
-		if (!CurrentWorkstation->GetCurrentSetupLevelData(CurrentLevelData))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[WorkstationInfo] 현재 책상 세팅 행을 찾을 수 없습니다."));
-			DeskUpgradeSlot->SetVisibility(ESlateVisibility::Collapsed);
-			return;
-		}
-
-		const bool bMax = CurrentWorkstation->IsMaxLevel();
-		FComputerSetupLevelData NextLevelData;
-		if (!bMax && !CurrentWorkstation->GetNextSetupLevelData(NextLevelData))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[WorkstationInfo] 다음 책상 세팅 행을 찾을 수 없습니다."));
-			DeskUpgradeSlot->SetVisibility(ESlateVisibility::Collapsed);
-			return;
-		}
-
-		DeskUpgradeSlot->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-		// 부제는 비운다 — 장비 목록은 아래 장비 블록이 구조 컬럼에서 생성한다
-		DeskUpgradeSlot->SetRuntimePresentation(
-			CurrentLevelData.DisplayName,
-			FText::GetEmpty(),
-			EResourceType::Diamond);
-
-		// 최대 레벨은 잠기는 대신 동일 성능 외형 「변경」이 된다
-		FComputerSetupLevelData VariantData;
-		const bool bSwapMode = bMax && CurrentWorkstation->GetMaxVariantData(VariantData);
-
-		const float CurrentSpeedPercent = CurrentLevelData.WorkSpeedBonusRate * 100.f;
-		const float NextSpeedPercent = bMax
-			? CurrentSpeedPercent
-			: NextLevelData.WorkSpeedBonusRate * 100.f;
-
-		// 상한은 항상 넘긴다 — 배지가 "Lv.N / 6" 로 남은 단계를 보여주고, MAX 판정(Level >= MaxLevel)은 그대로다
-		const int32 MaxSetupLevelAsInt = GetComputerSetupLevelNumber(EComputerSetupLevel::Level6);
-
-		// UpdateInfo 의 MaxLevel 인자는 배지 표기와 MAX 잠금을 겸한다. 변경 모드는 잠기면 안 되므로
-		// 인자로는 0 을 주고(=잠금 해제), 배지는 override 로 따로 채운다.
-		DeskUpgradeSlot->SetLevelBadgeOverride(bSwapMode
-			? FText::Format(FText::FromString(TEXT("Lv.{0} / {1}")), SetupLevelAsInt, MaxSetupLevelAsInt)
-			: FText::GetEmpty());
-
-		DeskUpgradeSlot->UpdateInfo(
-			SetupLevelAsInt,
-			CurrentSpeedPercent,
-			NextSpeedPercent,
-			bSwapMode ? VariantData.VariantSwapCost : (bMax ? 0 : NextLevelData.UpgradeCost),
-			/*bIsLocked*/ false,
-			bSwapMode ? 0 : MaxSetupLevelAsInt);
-
-		if (UCostActionButtonWidget* UpgradeBtn = DeskUpgradeSlot->GetUpgradeButton())
-		{
-			UpgradeBtn->SetButtonText(bSwapMode
-				? NSLOCTEXT("WorkstationInfo", "SwapAppearance", "변경")
-				: DefaultUpgradeButtonText);
-		}
-	}
-}
-
-void UWorkstationInfoWidget::UpdateEquipBlock()
-{
-	if (!CurrentWorkstation) { return; }
-
-	FComputerSetupLevelData CurrentData;
-	if (!CurrentWorkstation->GetCurrentSetupLevelData(CurrentData)) { return; }
-
-	if (EquipSummaryText)
-	{
-		// "지금 책상 위" 라벨은 트리 정적 위젯이 소유한다 — 여기서 접두로 붙이면 라벨이 두 번 뜨고,
-		// 인라인으로 이으면 도크 폭에서 마지막 한 글자가 홀로 넘어간다 (WORKSTATION_INFO_PANEL §4.1)
-		EquipSummaryText->SetText(BuildWorkstationEquipSummary(CurrentData));
-	}
-
-	// 최대 레벨에서는 "다음 단계"가 없는 대신 "바꿀 외형"이 있다 — 「변경」이 무엇으로 바뀌는지 같은 자리에서 보여준다
-	FComputerSetupLevelData NextData;
-	const bool bHasNext = CurrentWorkstation->IsMaxLevel()
-		? CurrentWorkstation->GetMaxVariantData(NextData)
-		: CurrentWorkstation->GetNextSetupLevelData(NextData);
-	const FWorkstationEquipDelta Delta = BuildWorkstationEquipDelta(CurrentData, bHasNext ? &NextData : nullptr);
-
-	const bool bShowItem = (Delta.Kind != EWorkstationEquipDeltaKind::None) && !Delta.ItemName.IsEmpty();
-	if (EquipNextRow)
-	{
-		EquipNextRow->SetVisibility(bShowItem ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
-	}
-	if (EquipNextLead)
-	{
-		// 품목명만 있으면 "이게 지금 있는 건가 생길 건가"가 안 읽힌다 — 언제(레벨)와 성격(추가/교체)을 먼저 말한다
-		const FText ChangeWord = (Delta.Kind == EWorkstationEquipDeltaKind::Replaced)
-			? NSLOCTEXT("WorkstationInfo", "EquipChangeReplace", "교체")
-			: NSLOCTEXT("WorkstationInfo", "EquipChangeAdd", "추가");
-		const int32 NextLevelNumber =
-			GetComputerSetupLevelNumber(CurrentWorkstation->GetCurrentSetupLevel()) + 1;
-
-		EquipNextLead->SetText(CurrentWorkstation->IsMaxLevel()
-			? FText::Format(NSLOCTEXT("WorkstationInfo", "EquipLeadVariant", "외형 변경 시 {0}"), ChangeWord)
-			: FText::Format(NSLOCTEXT("WorkstationInfo", "EquipLeadNext", "Lv.{0} 강화 시 {1}"),
-				FText::AsNumber(NextLevelNumber), ChangeWord));
-	}
-	if (EquipNextName)   { EquipNextName->SetText(Delta.ItemName); }
-	if (EquipNextDetail) { EquipNextDetail->SetText(Delta.Detail); }
-
-	if (EquipNextIcon)
-	{
-		UTexture2D* IconTexture = nullptr;
-		if (const TSoftObjectPtr<UTexture2D>* Found = EquipIcons.Find(Delta.Item))
-		{
-			if (!Found->IsNull()) { IconTexture = Found->LoadSynchronous(); }
-		}
-		if (IconTexture)
-		{
-			EquipNextIcon->SetBrushFromTexture(IconTexture);
-			EquipNextIcon->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-		}
-		else
-		{
-			// 아이콘 미지정은 조용히 넘기지 않는다 — 빈 흰 사각형이 남는 것보다 접는 편이 낫다
-			EquipNextIcon->SetVisibility(ESlateVisibility::Collapsed);
-			if (bShowItem)
-			{
-				UE_LOG(LogTemp, Warning, TEXT("[WorkstationInfo] EquipIcons 에 품목 %d 아이콘이 없습니다"),
-					static_cast<int32>(Delta.Item));
-			}
-		}
-	}
-}
-
-void UWorkstationInfoWidget::UpdateEquipPlateMaterialSize()
-{
-	if (!EquipBlockBG && !EquipBlockLine)
-	{
+		UE_LOG(LogTemp, Warning, TEXT("[WorkstationInfo] Missing setup row for current or next grade"));
+		if (DeskCompareCard) DeskCompareCard->SetVisibility(ESlateVisibility::Collapsed);
+		if (DeskPromotionCard) DeskPromotionCard->SetVisibility(ESlateVisibility::Collapsed);
+		SetGradeCompositionImage(CurrentEquipImage, {});
+		SetGradeCompositionImage(NextEquipImage, {});
+		if (CurrentEquipText) CurrentEquipText->SetText(FText::GetEmpty());
+		if (NextEquipText) NextEquipText->SetText(FText::GetEmpty());
 		return;
 	}
 
-	// 도크 전체가 아니라 플레이트 자신의 크기여야 한다 — 다음 단계 행이 접히면 높이만 바뀐다
-	const UWidget* SizeSource = EquipBlockBG
-		? static_cast<const UWidget*>(EquipBlockBG)
-		: static_cast<const UWidget*>(EquipBlockLine);
-	const FVector2D PlateSize = SizeSource->GetCachedGeometry().GetLocalSize();
-	if (PlateSize.X < 1.f || PlateSize.Y < 1.f || PlateSize.Equals(LastEquipPlateSize, 0.5f))
+	if (DeskCompareCard) DeskCompareCard->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	if (DeskPromotionCard) DeskPromotionCard->SetVisibility(bHasTarget
+		? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	if (NextCompareColumn) NextCompareColumn->SetVisibility(bHasTarget
+		? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	if (CurrentGradeText) CurrentGradeText->SetText(FText::Format(
+		NSLOCTEXT("WorkstationInfo", "CurrentComposition", "현재 등급 {0}"), SetupLevelAsInt));
+	if (CurrentEquipText) CurrentEquipText->SetText(BuildWorkstationEquipSummary(CurrentLevelData));
+	SetGradeCompositionImage(CurrentEquipImage, CurrentLevelData.PromotionImage);
+
+	if (!bHasTarget)
 	{
+		if (NextGradeText) NextGradeText->SetText(FText::GetEmpty());
+		if (NextEquipText) NextEquipText->SetText(FText::GetEmpty());
+		SetGradeCompositionImage(NextEquipImage, {});
+		if (RetainedEffectText) RetainedEffectText->SetText(NSLOCTEXT(
+			"WorkstationInfo", "FinalGrade", "최대 등급입니다. 누적 효과는 유지됩니다."));
 		return;
 	}
-	LastEquipPlateSize = PlateSize;
 
-	static const FName WpxParam(TEXT("Wpx"));
-	static const FName HpxParam(TEXT("Hpx"));
-	for (UImage* PlateLayer : { EquipBlockBG, EquipBlockLine })
+	const int32 TargetGradeNumber = GetComputerSetupLevelNumber(TargetLevelData.Level);
+	if (NextGradeText) NextGradeText->SetText(bMax
+		? NSLOCTEXT("WorkstationInfo", "VariantComposition", "동급 장비 구성")
+		: FText::Format(NSLOCTEXT("WorkstationInfo", "NextComposition", "다음 등급 {0}"), TargetGradeNumber));
+	if (NextEquipText) NextEquipText->SetText(BuildWorkstationEquipSummary(TargetLevelData));
+	SetGradeCompositionImage(NextEquipImage, TargetLevelData.PromotionImage);
+	if (RetainedEffectText) RetainedEffectText->SetText(bMax
+		? NSLOCTEXT("WorkstationInfo", "VariantRetained", "외형만 변경되며 성능과 누적 효과는 그대로입니다.")
+		: NSLOCTEXT("WorkstationInfo", "PromotionRetained", "세 항목의 누적 효과는 다음 등급에도 유지됩니다."));
+
+	const FText EquipmentChange = BuildPromotionResultLine(CurrentLevelData, TargetLevelData);
+	const float SpeedDeltaPercentPoints = FMath::Max(0.f,
+		(TargetLevelData.WorkSpeedBonusRate - CurrentLevelData.WorkSpeedBonusRate) * 100.f);
+	if (PromotionTitleText) PromotionTitleText->SetText(bMax
+		? NSLOCTEXT("WorkstationInfo", "VariantTitle", "동급 외형 변경")
+		: FText::Format(NSLOCTEXT("WorkstationInfo", "PromotionTitle", "등급 {0}로 강화"), TargetGradeNumber));
+	if (PromotionRewardText) PromotionRewardText->SetText(bMax
+		? NSLOCTEXT("WorkstationInfo", "VariantReward", "외형만 변경 · 성능 동일")
+		: FText::Format(NSLOCTEXT("WorkstationInfo", "PromotionReward", "{0} · 작업 속도 +{1}%p"),
+			EquipmentChange, FText::AsNumber(SpeedDeltaPercentPoints)));
+	const bool bReady = bMax || CurrentWorkstation->CanPromoteSetup();
+	if (PromotionConditionText) PromotionConditionText->SetText(bMax
+		? NSLOCTEXT("WorkstationInfo", "VariantCondition", "최대 등급 외형을 무료로 변경할 수 있습니다.")
+		: bReady
+			? NSLOCTEXT("WorkstationInfo", "PromotionReady", "강화 조건 완료")
+			: NSLOCTEXT("WorkstationInfo", "PromotionCondition", "세 항목을 모두 최대 레벨로 강화하면 열립니다."));
+	if (PromoteButton)
 	{
-		if (!PlateLayer)
-		{
-			continue;
-		}
-		if (UMaterialInstanceDynamic* MID = PlateLayer->GetDynamicMaterial())
-		{
-			MID->SetScalarParameterValue(WpxParam, PlateSize.X);
-			MID->SetScalarParameterValue(HpxParam, PlateSize.Y);
-		}
+		PromoteButton->SetMaxLevelState(false);
+		PromoteButton->SetCost(0, EResourceType::Money, false);
+		PromoteButton->SetCostVisible(true);
+		PromoteButton->SetCostLabel(NSLOCTEXT("WorkstationInfo", "FreeCostLabel", "무료"));
+		PromoteButton->SetButtonText(bMax
+			? NSLOCTEXT("WorkstationInfo", "SwapAppearance", "변경")
+			: NSLOCTEXT("WorkstationInfo", "PromoteDesk", "강화"));
+		PromoteButton->SetLockedState(!bReady);
+	}
+}
+
+void UWorkstationInfoWidget::UpdateComponentSection()
+{
+	UpdateComponentSlot(ProcessingUpgradeSlot, EWorkstationUpgradeType::Processing);
+	UpdateComponentSlot(ToolsUpgradeSlot, EWorkstationUpgradeType::Tools);
+	UpdateComponentSlot(EnvironmentUpgradeSlot, EWorkstationUpgradeType::Environment);
+}
+
+void UWorkstationInfoWidget::UpdateComponentSlot(UUpgradeSlot* UpgradeSlot, EWorkstationUpgradeType Type)
+{
+	if (!CurrentWorkstation || !UpgradeSlot) return;
+	UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const FWorkstationUpgradeDefinition* Definition = TableMgr ? TableMgr->FindWorkstationUpgradeDefinition(Type) : nullptr;
+	if (!Definition)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[WorkstationInfo] Missing upgrade definition for type %d"), static_cast<int32>(Type));
+		UpgradeSlot->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+	UpgradeSlot->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	UpgradeSlot->SetRuntimePresentation(Definition->DisplayName, Definition->Description, EResourceType::Money);
+	UpgradeSlot->SetIconTexture(Definition->Icon.LoadSynchronous());
+	UpgradeSlot->ValueUnit = TEXT("%");
+	UpgradeSlot->ValuePrefix = Type == EWorkstationUpgradeType::Environment ? TEXT("") : TEXT("+");
+	UpgradeSlot->bAbbreviateValue = Definition->EffectCurve == EWorkstationEffectCurve::Compound;
+
+	const int32 RequestedCount = BulkModeSelector ? BulkModeSelector->GetRequestedCount() : 1;
+	const bool bMaxAffordable = BulkModeSelector && BulkModeSelector->GetMode() == EEnhanceBulkMode::Max;
+	FWorkstationUpgradeQuote Quote;
+	if (!CurrentWorkstation->GetUpgradeQuote(Type, RequestedCount, bMaxAffordable, Quote) || !Quote.bValid)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[WorkstationInfo] Invalid upgrade quote for type %d"), static_cast<int32>(Type));
+		UpgradeSlot->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+	const auto ToPercent = [Type](float RawBonus)
+	{
+		return Type == EWorkstationUpgradeType::Environment
+			? 100.f * RawBonus / (1.f + RawBonus) : 100.f * RawBonus;
+	};
+	const int32 CurrentLevel = CurrentWorkstation->GetUpgradeLevel(Type);
+	const bool bBulkMode = RequestedCount != 1 || bMaxAffordable;
+	UpgradeSlot->SetLevelBadgeOverride(bBulkMode && Quote.Count > 0 && !Quote.bMaxed
+		? FText::Format(NSLOCTEXT("WorkstationInfo", "BulkLevelPreview", "Lv.{0} → {1}"),
+			CurrentLevel, CurrentLevel + Quote.Count)
+		: FText::GetEmpty());
+	UpgradeSlot->UpdateInfo(CurrentLevel,
+		ToPercent(Quote.CurrentBonus), ToPercent(Quote.NextBonus), Quote.TotalCost,
+		false, CurrentWorkstation->GetUpgradeMaxLevel(Type),
+		bBulkMode, Quote.Count, Quote.TotalCost, Quote.Available);
+	UpgradeSlot->SetSecondaryAnnotation(FText::GetEmpty());
+}
+
+void UWorkstationInfoWidget::HandleBulkModeChanged(EEnhanceBulkMode)
+{
+	UpdateComponentSection();
+}
+
+void UWorkstationInfoWidget::HandleResourceChanged(EResourceType Type, int64)
+{
+	if (Type == EResourceType::Money)
+	{
+		UpdateComponentSection();
 	}
 }
 
@@ -523,14 +612,13 @@ void UWorkstationInfoWidget::UpdateWorkerCard()
 		OccupantCard->SetEmployeeInfo(*Employee);
 	}
 
-	// ── 직능 레이더 + 특화/주력/보조 (직원창 DisciplineCard 와 동일 규칙: enum DisplayName, 상한 max(15,최고)) ──
+	// ── 특화/주력/보조 (직원창 DisciplineCard 와 같은 직능 표시명 규칙) ──
 	const int32 DiscCount = static_cast<int32>(EProductionDiscipline::Count);
 	TArray<int32> Disc = Employee->DisciplinePoints;
 	if (Disc.Num() != DiscCount) { Disc.SetNumZeroed(DiscCount); }
 
 	int32 MaxVal = 0;
 	for (int32 v : Disc) { MaxVal = FMath::Max(MaxVal, v); }
-	const int32 DisplayMax = FMath::Max(15, MaxVal);
 
 	// 표시명 SOT = DT_DisciplineDisplay (슬롯 의미는 enum 고정, 표시만 산업별 재해석)
 	UGameInstance* GI = GetGameInstance();
@@ -541,14 +629,6 @@ void UWorkstationInfoWidget::UpdateWorkerCard()
 	{
 		return DiscTableMgr ? DiscTableMgr->GetDisciplineDisplayName(Industry, Idx) : FText::GetEmpty();
 	};
-
-	if (OccupantRadar)
-	{
-		TArray<FText> Labels;
-		for (int32 i = 0; i < DiscCount; ++i) { Labels.Add(DiscName(i)); }
-		OccupantRadar->SetAxisLabels(Labels);
-		OccupantRadar->SetRadarData(Disc, DisplayMax, FLootBoxRarityUtility::GetRarityColor(Employee->SpawnRarity));
-	}
 
 	// 상위 2 직능 (동점 = 낮은 인덱스 우선)
 	int32 Best0 = -1, Best1 = -1;
@@ -571,10 +651,6 @@ void UWorkstationInfoWidget::UpdateWorkerCard()
 	{
 		OccupantNoText->SetText(FText::FromString(FString::Printf(TEXT("#%04d"), Employee->EmployeeID)));
 	}
-	if (OccupantHiredText)
-	{
-		OccupantHiredText->SetText(FText::FromString(Employee->HiredDate.ToString(TEXT("%Y.%m.%d"))));
-	}
 	if (OccupantTenureText)
 	{
 		const FTimespan Span = FDateTime::Now() - Employee->HiredDate;
@@ -595,13 +671,6 @@ void UWorkstationInfoWidget::UpdateBenchSection()
 
 	const bool bHasEmptySeat = CurrentWorkstation->FindEmptyAssignmentSlot() >= 0;
 	BenchSection->SetVisibility(bHasEmptySeat ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
-
-	if (NoteText)
-	{
-		NoteText->SetText(bHasEmptySeat
-			? NSLOCTEXT("Office", "DockNoteEmpty", "탭하면 이 책상에 앉습니다. 육성은 직원창에서 합니다.")
-			: NSLOCTEXT("Office", "DockNoteOccupied", "육성은 직원창에서 합니다."));
-	}
 
 	if (!bHasEmptySeat) { return; }
 
@@ -629,6 +698,11 @@ void UWorkstationInfoWidget::UpdateBenchSection()
 
 	const bool bEmpty = (Bench.Num() == 0);
 	BenchListView->SetVisibility(bEmpty ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
+	// "누르면 이 책상에 앉습니다" 는 누를 직원이 있을 때만 맞는 말이다
+	if (NoteText)
+	{
+		NoteText->SetVisibility(bEmpty ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+	}
 	if (BenchEmptyBox)
 	{
 		BenchEmptyBox->SetVisibility(bEmpty ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
@@ -678,40 +752,166 @@ void UWorkstationInfoWidget::OnRecruitClicked()
 	UUIManagerSubsystem* UIManager = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr;
 	if (!CGI || !TableMgr || !UIManager || !UIManager->GetUIBase()) { return; }
 
-	TSubclassOf<UUserWidget> RecruitmentPanel = TableMgr->GetWidgetClass(EWidgetType::OfficeRecruitmentPanel);
+	TSubclassOf<UUserWidget> RecruitmentPanel = TableMgr->GetWidgetClass(EWidgetType::OfficeRecruitmentModal);
 	if (!RecruitmentPanel) { return; }
 
+	DeactivateWidget();
 	UCommonActivatableWidget* Pushed = UIManager->GetUIBase()->PushPromptClass(RecruitmentPanel.Get());
-	if (UOfficeRecruitmentPanelWidget* RecruitmentWidget = Cast<UOfficeRecruitmentPanelWidget>(Pushed))
+	if (UOfficeRecruitmentModalWidget* RecruitmentWidget = Cast<UOfficeRecruitmentModalWidget>(Pushed))
 	{
 		RecruitmentWidget->SetBuildingIndex(CGI->GetCurrentManagedBuildingIndex());
+		RecruitmentWidget->SetPreferredWorkstation(CurrentWorkstation);
 	}
 }
 
 void UWorkstationInfoWidget::OnDeskUpgradeClicked()
 {
-	if (!CurrentWorkstation)
+	if (!IsValid(CurrentWorkstation))
 	{
 		return;
 	}
 
-	// 최대 레벨에서는 승급이 아니라 동일 성능 외형 변경이다
-	const bool bSucceeded = CurrentWorkstation->IsMaxLevel()
-		? CurrentWorkstation->TrySwapMaxVariant()
-		: CurrentWorkstation->TryUpgradeSetupLevel();
+	const bool bVariantChange = CurrentWorkstation->IsMaxLevel();
+	FComputerSetupLevelData OldGrade;
+	FComputerSetupLevelData NewGrade;
+	if (!bVariantChange && (!CurrentWorkstation->GetCurrentSetupLevelData(OldGrade)
+		|| !CurrentWorkstation->GetNextSetupLevelData(NewGrade)))
+	{
+		return;
+	}
+	const int32 OldGradeNumber = GetComputerSetupLevelNumber(CurrentWorkstation->GetCurrentSetupLevel());
+	const bool bSucceeded = bVariantChange
+		? CurrentWorkstation->TrySwapMaxVariant() : CurrentWorkstation->TryUpgradeSetupLevel();
 
 	if (bSucceeded)
 	{
-		if (DeskUpgradeSlot)
+		UpdateUI();
+		if (bVariantChange)
 		{
-			DeskUpgradeSlot->PlayUpgradeEffect();
+			return;
 		}
+
+		UTableManagerSubsystem* TableMgr = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+		if (TableMgr)
+		{
+			bool bHasVFXRow = false;
+			const FVFXTableRow VFXRow = TableMgr->GetVFXData(EVFXType::LevelUp, bHasVFXRow);
+			if (bHasVFXRow)
+			{
+				if (UNiagaraSystem* System = TableMgr->GetVFXAsset(EVFXType::LevelUp))
+				{
+					UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), System,
+						CurrentWorkstation->GetActorLocation() + VFXRow.LocationOffset,
+						FRotator::ZeroRotator, FVector(VFXRow.DefaultScale), true);
+				}
+			}
+		}
+		if (USoundManagerSubsystem* SoundMgr = GetGameInstance()->GetSubsystem<USoundManagerSubsystem>())
+		{
+			SoundMgr->PlayUISound(CGUISoundTags::RewardCompanyLevelUp);
+		}
+		UUIManagerSubsystem* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+		TSubclassOf<UUserWidget> PromotionClass = TableMgr
+			? TableMgr->GetWidgetClass(EWidgetType::WorkstationPromotion) : nullptr;
+		if (!PromotionClass || !UIManager || !UIManager->GetUIBase())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[WorkstationInfo] WorkstationPromotion is not registered"));
+			return;
+		}
+		const int32 NewGradeNumber = GetComputerSetupLevelNumber(CurrentWorkstation->GetCurrentSetupLevel());
+		const FText ResultCaption = BuildPromotionResultLine(OldGrade, NewGrade);
+		UCommonActivatableWidget* PromotionWidget = UIManager->GetUIBase()->PushPromptClass(PromotionClass.Get(),
+			[&](UCommonActivatableWidget& Widget)
+			{
+				if (UWorkstationPromotionWidget* Promotion = Cast<UWorkstationPromotionWidget>(&Widget))
+				{
+					Promotion->SetPromotionInfo(OldGradeNumber, NewGradeNumber,
+						ResultCaption,
+						(NewGrade.WorkSpeedBonusRate - OldGrade.WorkSpeedBonusRate) * 100.f,
+						NewGrade.PromotionImage);
+				}
+			});
+		if (PromotionWidget)
+		{
+			if (UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance()))
+			{
+				if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GameInstance->GetCurrentPlayerController()))
+				{
+					PC->GoToUIMode();
+				}
+			}
+		}
+	}
+}
+
+void UWorkstationInfoWidget::TryComponentUpgrade(EWorkstationUpgradeType Type, UUpgradeSlot* UpgradeSlot)
+{
+	if (!IsValid(CurrentWorkstation) || !UpgradeSlot) return;
+	const int32 RequestedCount = BulkModeSelector ? BulkModeSelector->GetRequestedCount() : 1;
+	const bool bMaxAffordable = BulkModeSelector && BulkModeSelector->GetMode() == EEnhanceBulkMode::Max;
+	if (CurrentWorkstation->TryUpgradeComponent(Type, RequestedCount, bMaxAffordable))
+	{
+		UpgradeSlot->PlayUpgradeEffect();
 		UpdateUI();
 	}
 }
 
+UWidget* UWorkstationInfoWidget::GetFirstAffordableGrowthButton(bool bPromotionOnly) const
+{
+	if (!IsActivated() || !IsValid(CurrentWorkstation)) return nullptr;
+	if (CurrentWorkstation->CanPromoteSetup())
+	{
+		return PromoteButton;
+	}
+	if (bPromotionOnly) return nullptr;
+	const int32 RequestedCount = BulkModeSelector ? BulkModeSelector->GetRequestedCount() : 1;
+	const bool bMaxAffordable = BulkModeSelector && BulkModeSelector->GetMode() == EEnhanceBulkMode::Max;
+	for (const TPair<EWorkstationUpgradeType, UUpgradeSlot*> Candidate : {
+		TPair<EWorkstationUpgradeType, UUpgradeSlot*>(EWorkstationUpgradeType::Processing, ProcessingUpgradeSlot),
+		TPair<EWorkstationUpgradeType, UUpgradeSlot*>(EWorkstationUpgradeType::Tools, ToolsUpgradeSlot),
+		TPair<EWorkstationUpgradeType, UUpgradeSlot*>(EWorkstationUpgradeType::Environment, EnvironmentUpgradeSlot) })
+	{
+		FWorkstationUpgradeQuote Quote;
+		if (Candidate.Value && CurrentWorkstation->GetUpgradeQuote(Candidate.Key, RequestedCount, bMaxAffordable, Quote)
+			&& Quote.bValid && Quote.Count > 0 && Quote.TotalCost <= Quote.Available)
+		{
+			return Candidate.Value->GetUpgradeButton();
+		}
+	}
+	return nullptr;
+}
+
+UWidget* UWorkstationInfoWidget::GetCloseButtonWidget() const
+{
+	return PanelHeader ? PanelHeader->GetCloseButton() : nullptr;
+}
+
+void UWorkstationInfoWidget::OnProcessingUpgradeClicked()
+{
+	TryComponentUpgrade(EWorkstationUpgradeType::Processing, ProcessingUpgradeSlot);
+}
+
+void UWorkstationInfoWidget::OnToolsUpgradeClicked()
+{
+	TryComponentUpgrade(EWorkstationUpgradeType::Tools, ToolsUpgradeSlot);
+}
+
+void UWorkstationInfoWidget::OnEnvironmentUpgradeClicked()
+{
+	TryComponentUpgrade(EWorkstationUpgradeType::Environment, EnvironmentUpgradeSlot);
+}
+
 void UWorkstationInfoWidget::OnEmployeeWindowClicked()
 {
+	// 사무실 직원 패널 — 같은 BottomStack 이라 닫기 먼저, push 나중. 미등록이면 아래 직원창 경로로 폴백
+	if (UOfficeEmployeePanelWidget::IsPanelClassRegistered(this))
+	{
+		const int32 PanelEmployeeID = CurrentEmployeeID;
+		DeactivateWidget();
+		UOfficeEmployeePanelWidget::PushForEmployee(this, PanelEmployeeID);
+		return;
+	}
+
 	UTableManagerSubsystem* TableMgr = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
 	UUIManagerSubsystem* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
 	if (!TableMgr || !UIManager || !UIManager->GetUIBase())
@@ -726,14 +926,17 @@ void UWorkstationInfoWidget::OnEmployeeWindowClicked()
 		return;
 	}
 
-	UIManager->GetUIBase()->PushPromptClass(EmployeeWindow.Get());
-
-	// 입력모드 쌍 — 닫힐 때 EmployeeWindow::NativeOnDeactivated 가 GoToNormalMode 복원 (도크는 아래 유지)
-	if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance()))
+	if (auto* Window = Cast<UEmployeeWindowWidget>(UIManager->GetUIBase()->PushPromptClass(EmployeeWindow.Get())))
 	{
-		if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GI->GetCurrentPlayerController()))
+		Window->OpenWithContext(CurrentEmployeeID, false);
+
+		// 입력모드 쌍 — 닫힐 때 EmployeeWindow::NativeOnDeactivated 가 GoToNormalMode 복원 (도크는 아래 유지)
+		if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance()))
 		{
-			PC->GoToUIMode();
+			if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GI->GetCurrentPlayerController()))
+			{
+				PC->GoToUIMode();
+			}
 		}
 	}
 }

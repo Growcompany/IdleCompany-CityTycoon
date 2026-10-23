@@ -11,13 +11,13 @@
 class UStaticMesh;
 
 /**
- * 스틱맨 직원(AStickOfficeworker) 외형 = 색 + 액세서리.
+ * 스틱맨 직원(AFunnyOfficeworker) 외형 = 색 + 액세서리.
  * 3 축 → 3 시각 채널 (docs/01_Systems/Employee/WORKER_VISUAL_REDESIGN.md §3):
  *  · 희귀도(EGachaTier)        → 골드 손(HandMetalGold) + 림 색(RimColor)
  *  · 부서(EEmployeeDepartment) → 넥타이 색(TieColor)
  *  · 직급(EEmployeeRank)       → 안경 표시(bWearGlasses) + 신발 단계색(ShoeColor)
  *
- * RowName = 결정적 합성 키 "D{dept}_R{rank}_T{tier}" (AStickOfficeworker::MakeCosmeticRowName).
+ * RowName = 결정적 합성 키 "D{dept}_R{rank}_T{tier}" (AFunnyOfficeworker::MakeCosmeticRowName).
  * 단일 진실 원천 — 색/임계값은 코드 하드코딩 금지, 본 DT만 수정.
  */
 USTRUCT(BlueprintType)
@@ -63,7 +63,7 @@ struct FWorkerCosmeticTable : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	bool bWearGlasses = false;                          // 직급 임계값 (예: 과장 이상)
 
-	// 빈칸이면 AStickOfficeworker::DefaultGlassesMesh 폴백
+	// 빈칸이면 AFunnyOfficeworker::DefaultGlassesMesh 폴백
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TSoftObjectPtr<UStaticMesh> GlassesMesh;
 };

@@ -3,6 +3,20 @@
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "Components/Button.h"
 #include "Components/SizeBox.h"
+#include "UI/Element/Common/TouchTargetUtils.h"
+
+void UCloseButtonWidget::SynchronizeProperties()
+{
+	Super::SynchronizeProperties();
+
+	// GlyphSize 가 없는 WBP 는 아직 2층 구조로 이관되지 않은 것 — 구운 값을 그대로 둔다
+	if (!GlyphSize || !RootSizeBox)
+	{
+		return;
+	}
+
+	UITouchTarget::ApplyGlyphAndTouchExtent(RootSizeBox, GlyphSize, CloseBtn, GlyphExtent, TouchExtent);
+}
 
 void UCloseButtonWidget::NativeConstruct()
 {

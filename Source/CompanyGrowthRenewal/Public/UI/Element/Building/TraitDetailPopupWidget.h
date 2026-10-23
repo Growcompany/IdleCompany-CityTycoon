@@ -6,6 +6,7 @@
 #include "CommonUserWidget.h"
 #include "Enum/LootBoxRarity.h"
 #include "Enum/BuildingTraitRequirement.h"
+#include "Enum/BuildingTraitCategory.h"
 #include "TraitDetailPopupWidget.generated.h"
 
 class UButtonWidget;
@@ -23,11 +24,11 @@ DECLARE_DELEGATE_OneParam(FOnTraitDetailUnequip, int32 /*SlotIndex*/);
 
 /**
  * UIE_TraitDetailPopup
- * 특성 카드/슬롯 클릭 시 그리드 위로 뜨는 플로팅 상세 카드.
- * 정보(아이콘/이름/등급/분야/설명/효과/세트보너스/장착불가사유) + 장착/해제 버튼.
- * 모달 딤/바깥클릭 닫기는 패널의 오버레이가 담당. 팝업은 내용 표시 + 델리게이트 발화만.
+ * 특성 카드/슬롯 클릭 시 패널 왼쪽 가장자리에 붙어 뜨는 상세 카드.
+ * 정보(아이콘/이름/등급/분야/효과/설명/세트보너스/장착불가사유) + 장착/해제 버튼.
+ * 배치·열고 닫기는 패널이 담당. 팝업은 내용 표시 + 델리게이트 발화만.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UTraitDetailPopupWidget : public UCommonUserWidget
 {
 	GENERATED_BODY()
@@ -43,9 +44,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "TraitDetail")
 	void ConfigureForTrait(FName InTraitID, int32 InBuildingIndex, int32 InEquippedSlotIndex = -1);
 
-	// [장착] 버튼 위 타겟 슬롯 안내. 빈 FText = Collapsed. (인벤 모드에서 패널이 주입, 슬롯 모드는 빈 값)
+	// [장착] 이 향할 슬롯을 버튼 글자로 알린다. INDEX_NONE = 빈 해금 슬롯 없음 → 버튼 비활성 + 안내 문구.
+	// 인벤 모드에서 ConfigureForTrait 직후 패널이 호출한다(업종 제한 특성이면 무시)
 	UFUNCTION(BlueprintCallable, Category = "TraitDetail")
-	void SetTargetSlotHint(const FText& InHint);
+	void SetEquipTarget(int32 TargetSlotIndex, bool bSwap, bool bNoUnlockedSlot);
 
 	FOnTraitDetailEquip OnEquipClicked;
 	FOnTraitDetailUnequip OnUnequipClicked;
@@ -69,40 +71,31 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UCommonTextBlock> NameText;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	// 등급 이름 — 등급색 잉크 (칩 없이 글자만)
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UCommonTextBlock> RarityText;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UCommonTextBlock> CategoryText;
+	// 등급 옆 제약 분류 (공통/제조 전용/프로젝트 전용). 분야는 세트 이름이 말하므로 싣지 않는다
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UCommonTextBlock> RequirementText;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UCommonTextBlock> DescText;
+	// 효과 줄 양끝 — 대상 이름 / 수치
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UCommonTextBlock> EffectTargetText;
 
-	// 효과 상세 설명 한 줄 (GetTraitTargetDetailText 로 생성. 조건/상한을 문장이 싣는다)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UCommonTextBlock> EffectValueText;
+
+	// 효과 상세 설명 문장 (GetTraitTargetDetailText 로 생성. 조건/상한을 문장이 싣는다)
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UCommonTextBlock> EffectDetailText;
 
 	// 세트 보너스 미리보기 (분야/현재 장착 수/2·3세트 효과)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UCommonTextBlock> SetBonusText;
 
-	// 설명 문장 섹션 배경 플레이트 (문장이 비면 통째로 숨김)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UWidget> EffectDetailSection;
-
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UWidget> SetBonusSection;
-
-	// 등급 칩 — 필/링 색은 ConfigureForTrait 가 GetRarityColor 로 런타임 주입 (통브러시 교체)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UBorder> RarityChipBorder;
-
-	// 제약 분류 칩 — 3상태 상시 표시(공통 / 제조 전용 / 프로젝트 전용)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UBorder> RequirementChipBorder;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UCommonTextBlock> RequirementText;
 
 	// 헤더 카드 뒤 등급색 글로우 (Glow_Oval 틴트)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -138,7 +131,7 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UCommonTextBlock> RestrictionText;
 
-	// 타겟 슬롯 안내 텍스트 (블루, CTA 행 바로 위)
+	// 빈 슬롯이 없을 때만 뜨는 안내 (CTA 바로 위, 왼쪽 정렬 줄바꿈)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UCommonTextBlock> TargetSlotHintText;
 
@@ -162,9 +155,10 @@ private:
 
 	void BuildSetBonusPreview(const FBuildingTraitTableRow& Row, int32 BuildingIndex);
 
-	void ApplyRequirementChip(EBuildingTraitRequirement InRequirement);
+	void ApplyMetaLine(EBuildingTraitRequirement InRequirement);
 
 	FName CurrentTraitID = NAME_None;
 	int32 CurrentBuildingIndex = INDEX_NONE;
 	int32 CurrentEquippedSlotIndex = INDEX_NONE;
+	bool bCurrentCanEquip = true;
 };

@@ -10,7 +10,7 @@ class UButtonWidget;
 /**
  * 
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UEmploymentButtonWidget : public UCommonButtonBase
 {
 	GENERATED_BODY()

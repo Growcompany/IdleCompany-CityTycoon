@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Panel/ChatPanelWidget.h"
+#include "Player/MainMapPlayerController.h"
 #include "UI/Element/Chat/ChatMessageWidget.h"
 #include "Manager/ChatManagerSubsystem.h"
 #include "Manager/TableManagerSubsystem.h"
@@ -55,6 +56,12 @@ void UChatPanelWidget::NativeConstruct()
 		MessageInputField->OnTextCommitted.AddDynamic(this, &UChatPanelWidget::OnMessageInputCommitted);
 	}
 
+	// 손으로 바닥까지 내려오는 것도 "읽었다"로 본다 - 안내 해제 경로가 수신 콜백뿐이면 카운트가 남는다
+	if (MessageScrollBox)
+	{
+		MessageScrollBox->OnUserScrolled.AddDynamic(this, &UChatPanelWidget::OnMessageScrollUserScrolled);
+	}
+
 	// 채널 이름 표시
 	if (ChannelNameText)
 	{
@@ -98,6 +105,11 @@ void UChatPanelWidget::NativeDestruct()
 	if (MessageInputField)
 	{
 		MessageInputField->OnTextCommitted.RemoveDynamic(this, &UChatPanelWidget::OnMessageInputCommitted);
+	}
+
+	if (MessageScrollBox)
+	{
+		MessageScrollBox->OnUserScrolled.RemoveDynamic(this, &UChatPanelWidget::OnMessageScrollUserScrolled);
 	}
 
 	if (TabButtonGroup)
@@ -148,6 +160,10 @@ void UChatPanelWidget::NativeOnActivated()
 	}
 
 	ScrollToBottom();
+
+	// CommonUI 풀 재사용이라 닫고 다시 열어도 묵은 카운트가 따라온다
+	PendingNewMessageCount = 0;
+	RefreshNewMessageNotice();
 }
 
 void UChatPanelWidget::NativeOnDeactivated()
@@ -164,6 +180,14 @@ void UChatPanelWidget::NativeOnDeactivated()
 		MessageScrollBox->ClearChildren();
 	}
 
+	// 메뉴/HUD 체인은 닫히는 창이 UI 모드를 해제한다 ― 단독 모달이므로 여기서 해제
+	if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr))
+	{
+		if (PC->GetCurrentInputMode() == EInputMode::UI)
+		{
+			PC->GoToNormalMode();
+		}
+	}
 	Super::NativeOnDeactivated();
 }
 
@@ -210,7 +234,17 @@ void UChatPanelWidget::HandleMessagesReceived(const TArray<FChatMessage>& Messag
 		AddMessageToUI(Msg);
 	}
 
-	ScrollToBottom();
+	// 3초 폴링이라 위로 올려 읽는 중 새 글 하나에도 읽던 자리를 잃는다 - 바닥 근처일 때만 따라간다
+	if (IsNearBottom())
+	{
+		PendingNewMessageCount = 0;
+		ScrollToBottom();
+	}
+	else
+	{
+		PendingNewMessageCount += Messages.Num();
+	}
+	RefreshNewMessageNotice();
 }
 
 void UChatPanelWidget::AddMessageToUI(const FChatMessage& Message)
@@ -220,11 +254,10 @@ void UChatPanelWidget::AddMessageToUI(const FChatMessage& Message)
 		return;
 	}
 
-	// 최대 표시 메시지 수 초과 시 오래된 것 제거 (Spacer + Message 세트로 2개씩)
-	while (MessageScrollBox->GetChildrenCount() >= MaxVisibleMessages * 2)
+	// 맨 위를 자르면 그만큼 내용이 위로 밀려 읽던 줄이 어긋난다 - 바닥으로 돌아올 때 따라잡는다
+	if (IsNearBottom())
 	{
-		MessageScrollBox->RemoveChildAt(0); // Spacer
-		MessageScrollBox->RemoveChildAt(0); // Message
+		TrimOldMessages();
 	}
 
 	// ChatMessageWidget 생성
@@ -247,6 +280,60 @@ void UChatPanelWidget::AddMessageToUI(const FChatMessage& Message)
 		MsgWidget->SetMessageData(Message);
 		MessageScrollBox->AddChild(MsgWidget);
 	}
+}
+
+bool UChatPanelWidget::IsNearBottom() const
+{
+	if (!MessageScrollBox)
+	{
+		return true;
+	}
+	return (MessageScrollBox->GetScrollOffsetOfEnd() - MessageScrollBox->GetScrollOffset()) <= NearBottomThreshold;
+}
+
+void UChatPanelWidget::RefreshNewMessageNotice()
+{
+	if (!NewMessageNotice)
+	{
+		return;
+	}
+	if (PendingNewMessageCount > 0)
+	{
+		NewMessageNotice->SetText(FText::Format(
+			NSLOCTEXT("Chat", "NewMessageCount", "새 메시지 {0}개"), FText::AsNumber(PendingNewMessageCount)));
+		NewMessageNotice->SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
+	else
+	{
+		NewMessageNotice->SetVisibility(ESlateVisibility::Collapsed);
+	}
+}
+
+void UChatPanelWidget::TrimOldMessages()
+{
+	if (!MessageScrollBox)
+	{
+		return;
+	}
+
+	// Spacer + Message 세트로 2개씩
+	while (MessageScrollBox->GetChildrenCount() >= MaxVisibleMessages * 2)
+	{
+		MessageScrollBox->RemoveChildAt(0);
+		MessageScrollBox->RemoveChildAt(0);
+	}
+}
+
+void UChatPanelWidget::OnMessageScrollUserScrolled(float CurrentOffset)
+{
+	if (!IsNearBottom())
+	{
+		return;
+	}
+
+	PendingNewMessageCount = 0;
+	RefreshNewMessageNotice();
+	TrimOldMessages();
 }
 
 void UChatPanelWidget::ScrollToBottom()

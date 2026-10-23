@@ -1,9 +1,12 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Panel/OfficeUpgradePanelWidget.h"
+#include "UI/Element/Common/PanelHeaderWidget.h"
+#include "Manager/CloudEconomySubsystem.h"
 #include "Manager/ResourceItemManager.h"
 #include "Manager/UIManagerSubsystem.h"
 #include "Office/OfficeInterior.h"
+#include "Office/OfficeManager.h"
 #include "UI/Element/Building/UpgradeSlot.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Element/Buttons/CostActionButtonWidget.h"
@@ -16,9 +19,9 @@ void UOfficeUpgradePanelWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UOfficeUpgradePanelWidget::OnCloseClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UOfficeUpgradePanelWidget::OnCloseClicked);
 	}
 	if (BackgroundBtn)
 	{
@@ -31,6 +34,15 @@ void UOfficeUpgradePanelWidget::NativeConstruct()
 	if (RightExpansionSlot && RightExpansionSlot->GetUpgradeButton())
 	{
 		RightExpansionSlot->GetUpgradeButton()->OnClicked().AddUObject(this, &UOfficeUpgradePanelWidget::OnExpandRightClicked);
+	}
+
+	// 잠금이 풀리는 순간 서버값으로 정정된 잔액으로 비용 행을 다시 계산한다
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UCloudEconomySubsystem* Cloud = GI->GetSubsystem<UCloudEconomySubsystem>())
+		{
+			Cloud->OnEconomyReady.AddUObject(this, &UOfficeUpgradePanelWidget::HandleEconomyReady);
+		}
 	}
 }
 
@@ -62,9 +74,9 @@ void UOfficeUpgradePanelWidget::NativeOnDeactivated()
 
 void UOfficeUpgradePanelWidget::NativeDestruct()
 {
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.RemoveDynamic(this, &UOfficeUpgradePanelWidget::OnCloseClicked);
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UOfficeUpgradePanelWidget::OnCloseClicked);
 	}
 	if (BackgroundBtn)
 	{
@@ -78,7 +90,21 @@ void UOfficeUpgradePanelWidget::NativeDestruct()
 	{
 		RightExpansionSlot->GetUpgradeButton()->OnClicked().RemoveAll(this);
 	}
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UCloudEconomySubsystem* Cloud = GI->GetSubsystem<UCloudEconomySubsystem>())
+		{
+			Cloud->OnEconomyReady.RemoveAll(this);
+		}
+	}
 	Super::NativeDestruct();
+}
+
+void UOfficeUpgradePanelWidget::HandleEconomyReady(bool bReady)
+{
+	// 잠긴 동안에도 버튼은 살려 둔다 — 조용히 죽은 버튼은 "다이아가 사라졌다" 로 읽힌다.
+	// 탭하면 NotifyCloudOpFailure 가 3상태 중 하나를 말해준다(§7.2)
+	RefreshExpansionUI();
 }
 
 void UOfficeUpgradePanelWidget::RefreshExpansionUI()
@@ -124,40 +150,37 @@ void UOfficeUpgradePanelWidget::RefreshExpansionUI()
 
 void UOfficeUpgradePanelWidget::TryExpand(EOfficeExpandDirection Direction)
 {
-	AOfficeGameMode* GameMode = Cast<AOfficeGameMode>(UGameplayStatics::GetGameMode(GetWorld()));
-	AOfficeInterior* OfficeInterior = GameMode ? GameMode->GetOfficeInterior() : nullptr;
-	UGameInstance* GI = GetGameInstance();
-	UResourceItemManager* ResourceMgr = GI ? GI->GetSubsystem<UResourceItemManager>() : nullptr;
-	if (!OfficeInterior || !ResourceMgr)
+	// 차감·확장·저장은 전부 매니저가 서버 응답 뒤에 한다 — 위젯이 직접 지출하지 않는다(설계서 §6.3).
+	// 로컬 잔액 판정도 매니저가 하고, 부족은 응답 코드(INSUFFICIENT_FUNDS)로 돌아온다.
+	UOfficeManager* OfficeMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeManager>() : nullptr;
+	if (!OfficeMgr)
 	{
+		UE_LOG(LogTemp, Error, TEXT("[OfficeUpgradePanel] 확장 실패 - OfficeManager 없음"));
 		return;
 	}
 
-	const int64 Cost = OfficeInterior->GetExpandCost(Direction);
-	if (ResourceMgr->GetResourceAmount(EResourceType::Diamond) < Cost)
+	// 실패 안내에 부족액이 필요하다 — 응답이 오기 전 값으로 고정한다(응답 뒤엔 서버 지갑이 덮인다)
+	const int64 Cost = OfficeMgr->GetExpandCost(Direction);
+
+	OfficeMgr->RequestExpand(Direction, FOnCloudEconomyOpDone::CreateWeakLambda(this,
+		[this, Direction, Cost](bool bOk, FName Code)
 	{
-		if (UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>())
+		if (!bOk)
 		{
-			UIMgr->ShowNotification(NSLOCTEXT("Notification", "NotEnoughDiamond", "다이아가 부족합니다"), 3.0f, ENotificationType::Failed);
+			if (UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+			{
+				UIMgr->NotifyCloudOpFailure(Code, EResourceType::Diamond, Cost);
+			}
+			return;
 		}
-		return;
-	}
 
-	const bool bExpanded = (Direction == EOfficeExpandDirection::Left)
-		? OfficeInterior->ExpandLeft()
-		: OfficeInterior->ExpandRight();
-	if (!bExpanded)
-	{
-		return;
-	}
+		RefreshExpansionUI();
 
-	ResourceMgr->SpendResource(EResourceType::Diamond, Cost, true);
-	RefreshExpansionUI();
-
-	if (UUpgradeSlot* EffectSlot = (Direction == EOfficeExpandDirection::Left) ? LeftExpansionSlot : RightExpansionSlot)
-	{
-		EffectSlot->PlayUpgradeEffect();
-	}
+		if (UUpgradeSlot* EffectSlot = (Direction == EOfficeExpandDirection::Left) ? LeftExpansionSlot : RightExpansionSlot)
+		{
+			EffectSlot->PlayUpgradeEffect();
+		}
+	}));
 }
 
 void UOfficeUpgradePanelWidget::OnExpandLeftClicked()

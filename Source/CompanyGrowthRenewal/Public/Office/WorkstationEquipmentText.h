@@ -42,6 +42,9 @@ struct FWorkstationEquipDelta
 	FText ItemName;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Workstation|Equipment")
+	FText RemovedItemNames;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Workstation|Equipment")
 	FText Detail;
 };
 
@@ -50,7 +53,7 @@ COMPANYGROWTHRENEWAL_API FText GetWorkstationEquipItemName(EWorkstationEquipItem
 /** 행이 켜 둔 품목 목록. 순서 = 노트북 → 모니터 → 세로 모니터 → 본체 → 키보드 → 마우스 (책상 위 배치 순) */
 COMPANYGROWTHRENEWAL_API TArray<EWorkstationEquipItem> GetWorkstationEquipItems(const FComputerSetupLevelData& Row);
 
-/** "노트북, 평면 모니터, 본체, 키보드, 마우스" */
+/** DT 행의 장비 구성 표시. 품목 순서와 같은 품목 2대 묶기는 변화 문구와 공유한다. */
 COMPANYGROWTHRENEWAL_API FText BuildWorkstationEquipSummary(const FComputerSetupLevelData& Row);
 
 /** 현재 행 → 다음 행 비교. NextRow 가 nullptr 이면 최대 레벨(Kind=None). */

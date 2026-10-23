@@ -1,27 +1,38 @@
 #include "UI/Panel/OfficeMainWidget.h"
+#include "Manager/LaunchReactionSubsystem.h"
 #include "UI/Panel/OfficeLayerWidget.h"
 #include "Manager/MissionManagerSubsystem.h"
+#include "Manager/PanelIntroSubsystem.h"
 #include "UI/HUD/MissionTrackerWidget.h"
 #include "Blueprint/WidgetTree.h"
 #include "Core/CGGameInstance.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/UIManagerSubsystem.h"
 #include "UI/Element/Common/ConfirmCancelWidget.h"
+#include "Manager/CloudEconomySubsystem.h"
 #include "Manager/OfficeStageProgressManager.h"
+#include "Manager/ManufacturingDevelopmentManager.h"
 #include "Manager/ProjectOperationManager.h"
 #include "Manager/SaveLoadManager.h"
+#include "Manager/SideContentSubsystem.h"
 #include "Manager/SoundManagerSubsystem.h"
+#include "Manager/SettingsManagerSubsystem.h"
 #include "UI/UISoundTags.h"
 #include "Office/OfficeManager.h"
+#include "UI/Panel/BusinessTripPanelWidget.h"
+#include "UI/Panel/TrainingCenterPanelWidget.h"
 #include "UI/UIBase.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
 #include "Components/Button.h"
 #include "Kismet/GameplayStatics.h"
 #include "UI/Element/Buttons/IconWithButtonWidget.h"
+#include "UI/Element/Buttons/OfficeFeatureButtonWidget.h"
 #include "UI/Element/Cards/IconCardWidget.h"
 #include "UI/Element/Trade/ProjectInfoBarWidget.h"
 #include "UI/Element/Office/OfficeProjectCardWidget.h"
-#include "UI/Panel/OfficeRecruitmentPanelWidget.h"
+#include "UI/Panel/OfficeRecruitmentModalWidget.h"
+#include "UI/Panel/OfficeEmployeePanelWidget.h"
+#include "UI/Panel/EquipmentGachaPanelWidget.h"
 #include "Player/OfficePlayerController.h"
 #include "Player/MainMapPlayerController.h"
 #include "Table/ProjectDataTable.h"
@@ -45,15 +56,15 @@
 #include "CommonTextBlock.h"
 #include "Components/Image.h"
 #include "Components/Border.h"
+#include "Components/SizeBox.h"
 #include "Components/VerticalBox.h"
 #include "Components/ProgressBar.h"
 #include "Manager/PlayFabManagerSubsystem.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UI/Element/Effects/NiagaraTextEffectWidget.h"
-#include "UI/Element/Effects/TextGlitchEffectWidget.h"
+#include "UI/Element/Effects/DevelopmentBannerWidget.h"
 #include "UI/Panel/LaunchConfirmWidget.h"
-#include "UI/Panel/LaunchRewardRevealWidget.h"
-#include "UI/Element/Office/ReviewReactionToastWidget.h"
+#include "UI/Panel/PitchBoardWidget.h"
 #include "Manager/LaunchLootManagerSubsystem.h"
 #include "UI/Panel/ProjectReportWidget.h"
 #include "Data/ProjectReportData.h"
@@ -61,25 +72,106 @@
 #include "Blueprint/WidgetLayoutLibrary.h"
 #include "Enum/VFXType.h"
 #include "Table/VFXTable.h"
-#include "Player/BuildingLandCameraShake.h"
-#include "Manager/SettingsManagerSubsystem.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
 #include "NiagaraComponent.h"
 #include "TimerManager.h"
 #include "EngineUtils.h"
 #include "Entity/Officeworker/Officeworker.h"
+#include "Entity/Officeworker/EmployeeReactionComponent.h"
+#include "Office/WorkstationDevFxComponent.h"
+#include "Player/OfficeCameraPawn.h"
 #include "Manager/EmployeeManager.h"
 #include "Global/GlobalUtilFunctions.h"
 #include "Data/StageProgressData.h"
+#include "UI/Element/Common/QualityGradeMedalUtils.h"
+#include "Manager/EmployeeEquipmentManagerSubsystem.h"
+#include "Utils/FWidgetAnimationUtils.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Fonts/FontMeasure.h"
+#include "Rendering/SlateRenderer.h"
 
 namespace
 {
-	// 타이머 링 상태색 (linear) — 평시 골드 / 임박 레드.
+	// 개발 완료 강조색 (linear).
 	// 스트립 점수 바가 그린을 "목표 달성" 으로 쓰므로 시간에는 재사용하지 않는다(의미 충돌).
 	const FLinearColor TimerRingGold(0.887923f, 0.533276f, 0.076185f, 1.0f);
-	const FLinearColor TimerRingRed(0.701102f, 0.048172f, 0.048172f, 1.0f);   // #EF4444
-	constexpr float TimerWarnSeconds = 5.0f;
+
+	FText CompanyFeatureLockReason(int32 RequiredLevel)
+	{
+		return FText::Format(NSLOCTEXT("Office", "CompanyFeatureLevelRequired", "회사 레벨 {0}부터 이용할 수 있어요."), FText::AsNumber(RequiredLevel));
+	}
+
+	FString FormatStripScore(int64 Score)
+	{
+		return UGlobalUtilFunctions::AbbreviateNumber(Score, ENumberAbbrevStyle::WesternSuffix, ENumberRoundMode::Floor).ToString();
+	}
+
+	// 자릿수가 늘 때마다 게이지가 넓어져 표시줄 전체가 들썩이지 않도록, 목표 2배까지의 가장 넓은 "점수/목표" 폭을 미리 잰다.
+	float MeasureStripScoreWidth(const UTextBlock* ValT, int64 GoalScore)
+	{
+		if (!ValT || GoalScore <= 0 || !FSlateApplication::IsInitialized()) return 0.0f;
+		const TSharedRef<FSlateFontMeasure> FontMeasure = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
+		const FSlateFontInfo& Font = ValT->GetFont();
+
+		TCHAR WideDigit = TEXT('0');
+		float WideDigitWidth = 0.0f;
+		for (TCHAR Digit = TEXT('0'); Digit <= TEXT('9'); ++Digit)
+		{
+			const float DigitWidth = FontMeasure->Measure(FString::Chr(Digit), Font).X;
+			if (DigitWidth > WideDigitWidth) { WideDigitWidth = DigitWidth; WideDigit = Digit; }
+		}
+		auto Widen = [WideDigit](FString Text)
+		{
+			for (TCHAR& Ch : Text) { if (FChar::IsDigit(Ch)) Ch = WideDigit; }
+			return Text;
+		};
+
+		// 목표 쪽 글자는 개발 내내 그대로라 실제 글자로 잰다. 넓은 숫자로 바꾸는 건 변하는 획득 쪽뿐이다.
+		const FString GoalText = FormatStripScore(GoalScore);
+		float Width = 0.0f;
+		for (const int64 Shown : { GoalScore, GoalScore * 2 })
+		{
+			Width = FMath::Max(Width, (float)FontMeasure->Measure(Widen(FormatStripScore(Shown)) + TEXT("/") + GoalText, Font).X);
+		}
+		return Width + Font.OutlineSettings.OutlineSize * 2.0f;
+	}
+
+	// 운영 카드 제목 칸은 표지 옆 좁은 칸이라 자동 줄바꿈에 맡기면 한글이 음절 사이에서 끊긴다.
+	// 띄어쓰기에서만 줄을 나누고, 칸에 안 들어가면 한 단계씩 작게 다시 맞춘다(기준 27pt = 27 · 22.5 · 19.5).
+	FText FitOpCardTitle(const FText& Name, FSlateFontInfo& InOutFont, float BaseSize, float WrapWidth)
+	{
+		InOutFont.Size = BaseSize;
+		if (!FSlateApplication::IsInitialized() || WrapWidth <= 0.0f || Name.IsEmpty()) return Name;
+		const TSharedRef<FSlateFontMeasure> FontMeasure = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
+		TArray<FString> Words;
+		Name.ToString().ParseIntoArrayWS(Words);
+
+		struct FTitleTier { float Scale; int32 MaxLines; };
+		static const FTitleTier Tiers[] = { { 1.0f, 2 }, { 22.5f / 27.0f, 2 }, { 19.5f / 27.0f, 3 } };
+		FString Fitted;
+		for (const FTitleTier& Tier : Tiers)
+		{
+			InOutFont.Size = BaseSize * Tier.Scale;
+			TArray<FString> Lines;
+			bool bEveryWordFits = true;
+			for (const FString& Word : Words)
+			{
+				bEveryWordFits &= FontMeasure->Measure(Word, InOutFont).X <= WrapWidth;
+				if (Lines.Num() > 0 && FontMeasure->Measure(Lines.Last() + TEXT(" ") + Word, InOutFont).X <= WrapWidth)
+				{
+					Lines.Last() += TEXT(" ") + Word;
+				}
+				else
+				{
+					Lines.Add(Word);
+				}
+			}
+			Fitted = FString::Join(Lines, TEXT("\n"));
+			if (bEveryWordFits && Lines.Num() <= Tier.MaxLines) break;
+		}
+		return FText::FromString(Fitted);
+	}
 }
 
 void UOfficeMainWidget::PlayShowButtonsAnim()
@@ -109,32 +201,65 @@ void UOfficeMainWidget::OnLifecycleChangedHandler(EProjectLifecycle OldState, EP
 {
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Lifecycle %s → %s"),
 		*LexToString(OldState), *LexToString(NewState));
+	if (ScoreOrbContainer && NewState != EProjectLifecycle::Developing && NewState != EProjectLifecycle::LaunchPending)
+	{
+		ScoreOrbContainer->ResetDevelopmentEffects();
+	}
+	// 책상 연출 — 개발 밖으로 나가면(결과 창 닫힘 등) 조각·메모지·빛을 거두고 완료 당김을 되돌린다
+	if (NewState == EProjectLifecycle::Developing)
+	{
+		UWorkstationDevFxComponent::EnsureDevelopmentActive(GetWorld());
+	}
+	else if (NewState != EProjectLifecycle::LaunchPending)
+	{
+		UWorkstationDevFxComponent::NotifyDevelopmentReset(GetWorld());
+		if (AOfficeCameraPawn* Camera = Cast<AOfficeCameraPawn>(UGameplayStatics::GetPlayerPawn(this, 0)))
+		{
+			Camera->ReleasePresentationPullIn(0.3f);
+		}
+	}
 	RefreshOfficeUI(NewState);
 }
 
 void UOfficeMainWidget::RefreshOfficeUI(EProjectLifecycle State)
 {
-	// 1. 스위처 3페이지: Idle=0 / {Developing,LaunchPending}=1 / {Operating,ReportPending}=2
-	int32 PageIdx = 0;
-	switch (State)
+	const UCGGameInstance* OfficeGI = Cast<UCGGameInstance>(GetGameInstance());
+	const bool bManufacturing = OfficeGI && IsManufacturingType(OfficeGI->GetCurrentBuildingCompanyType());
+	const UManufacturingDevelopmentManager* ResearchMgr = bManufacturing ? OfficeGI->GetSubsystem<UManufacturingDevelopmentManager>() : nullptr;
+	const bool bManufacturingResearch = ResearchMgr && ResearchMgr->GetActiveResearchStatus(OfficeGI->GetCurrentManagedBuildingIndex()).bInProgress;
+	if (OpenBoardButton)
 	{
-	case EProjectLifecycle::Developing:
-	case EProjectLifecycle::LaunchPending:
-		PageIdx = 1; break;
-	case EProjectLifecycle::Operating:
-	case EProjectLifecycle::ReportPending:
-		PageIdx = 2; break;
-	default:
-		PageIdx = 0; break;
+		const UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+		OpenBoardButton->SetButtonText(GI && IsManufacturingType(GI->GetCurrentBuildingCompanyType())
+			? NSLOCTEXT("Office", "SelectManufacturingProduct", "제품 선택")
+			: NSLOCTEXT("Office", "OpenPitchBoard", "기획안 보기"));
+		if (IdleHintText)
+		{
+			IdleHintText->SetText(GI && IsManufacturingType(GI->GetCurrentBuildingCompanyType())
+				? NSLOCTEXT("Office", "ManufacturingIdleHint", "제품을 선택해 생산 수량을 확보하세요")
+				: NSLOCTEXT("Office", "ProjectIdleHint", "기획안으로 새 프로젝트를 시작해주세요"));
+		}
 	}
+	UpdateExpansionHotspots();
+	RefreshCompanyFeatureButtons();
+	RefreshEquipmentManualButton();
+	// 1. 진행 줄 2페이지: {Developing,LaunchPending}=1 / 그 밖=0. 운영 중 내용은 오른쪽 열 운영 카드(OpCard)가 보여 준다
+	const int32 PageIdx = (State == EProjectLifecycle::Developing || State == EProjectLifecycle::LaunchPending) ? 1 : 0;
 	if (ProjectWidgetSwitcher)
 	{
-		ProjectWidgetSwitcher->SetActiveWidgetIndex(PageIdx);
+		ProjectWidgetSwitcher->SetActiveWidgetIndex(bManufacturing ? 1 : PageIdx);
 	}
 
 	// 1-b. 스트립 식별(이름/배지) + 스테이지 셀 갱신 (신규 — 은퇴한 카드/네임바 대체)
 	PopulateStripIdentity();
 	UpdateStripStageCells();
+	if (State == EProjectLifecycle::Developing || State == EProjectLifecycle::LaunchPending)
+	{
+		if (const UOfficeStageProgressManager* TimerMgr = GetWorld()->GetSubsystem<UOfficeStageProgressManager>())
+		{
+			OnTimerUpdated(TimerMgr->GetProgressData().RemainingTime);
+		}
+	}
 
 	// 2. 카드 모드 (Stage / Operation)
 	if (UI_OfficeProjectCardCurrent)
@@ -167,8 +292,8 @@ void UOfficeMainWidget::RefreshOfficeUI(EProjectLifecycle State)
 	UpdateProjectCardProgress();
 	UpdateIdleTierText();
 
-	// 5. 하단 버튼 (개발중에만 숨김)
-	const bool bFocusMode = (State == EProjectLifecycle::Developing || State == EProjectLifecycle::LaunchPending);
+	// 5. 개발 집중 구간에는 하단 도크를 숨긴다. 오른쪽 레일은 배치 상태와 함께 갱신한다.
+	const bool bFocusMode = IsFocusLockedPhase(State) || bManufacturingResearch;
 	if (bFocusMode)
 	{
 		PlayHideButtonsAnim();
@@ -176,6 +301,14 @@ void UOfficeMainWidget::RefreshOfficeUI(EProjectLifecycle State)
 	else
 	{
 		PlayShowButtonsAnim();
+	}
+
+	// 5-a. 개발 배속 원복 — 배속은 개발 구간에서만 성립한다(운영 수익은 실시간 티커라 안 빨라진다).
+	// 토글이 개발 스트립과 함께 사라지므로, 출시/폐기 때 여기서 안 풀면 사무실을 떠날 때까지 월드가 2배속으로 남는다.
+	if (!bFocusMode && DevSpeedMultiplier > 1.5f)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] 개발 구간 종료(%s) — 배속 x1 복원"), *LexToString(State));
+		ApplyDevSpeed(1.0f);
 	}
 
 	// 5-b. 미션 트래커 — 집중 모드면 좌측 슬라이드아웃, 아니면 복귀. 트래커는 어느 레이어에 임베드됐든 해석.
@@ -197,14 +330,19 @@ void UOfficeMainWidget::RefreshOfficeUI(EProjectLifecycle State)
 	// 6. bIsInOperationMode 동기화
 	bIsInOperationMode = (State == EProjectLifecycle::Operating || State == EProjectLifecycle::ReportPending);
 
-	// 7. 상단 밴드(회사배너/트렌드칩/티어칩) = OfficeLayer 소유 — 라이프사이클 전환마다 트리거
+	// 7. 상단 밴드(회사배너/트렌드칩/티어칩) = OfficeLayer 소유 — 라이프사이클 전환마다 트리거.
+	// 개발 구간에는 진행 줄을 회사 블록 자리로 올리고 블록을 숨긴다. 판정은 나가기를 숨기는 OfficeLayer 잠금과 같아야 한다 ―
+	// 제조 연구 중에는 나가기가 남아 있어 맨 위 전폭 진행 줄이 나가기와 겹치므로 블록 아래에 둔다
+	const bool bStripOnTop = IsFocusLockedPhase(State);
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
 		if (UOfficeLayerWidget* Layer = UIMgr->GetOfficeLayer())
 		{
 			Layer->RefreshTopBar();
+			Layer->SetTopBlockHidden(bStripOnTop);
 		}
 	}
+	ApplyStripRailPlacement(bStripOnTop);
 
 	// 8. 판매 곡선 — 운영 중에만 표시 (idle/개발 중 빈 박스 방지)
 	if (SalesCurve)
@@ -214,7 +352,29 @@ void UOfficeMainWidget::RefreshOfficeUI(EProjectLifecycle State)
 	}
 
 	// 9. 우레일 대기존 — 힌트박스+착수 CTA 묶음은 대기에만 (스위처 밖으로 나가 자체 토글 필요)
-	const bool bIdle = (State == EProjectLifecycle::Idle);
+	const bool bIdle = bManufacturing ? !bManufacturingResearch : State == EProjectLifecycle::Idle;
+	if (UWidget* ProjectStrip = GetWidgetFromName(TEXT("StripRoot")))
+	{
+		ProjectStrip->SetVisibility(bManufacturing || (!bIdle && !bIsInOperationMode)
+			? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	RefreshOpCardVisibility(State);
+	if (OpCardStatusRow)
+	{
+		// 보고 대기에는 「운영 중」만 지우고 자리는 남긴다 ― 접으면 제목이 올라가 카드 높이가 바뀐다
+		OpCardStatusRow->SetVisibility(State == EProjectLifecycle::Operating ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Hidden);
+	}
+	for (const TCHAR* Name : {TEXT("TimerCluster"), TEXT("DevDiv2")})
+	{
+		if (UWidget* TimerPart = GetWidgetFromName(Name))
+		{
+			TimerPart->SetVisibility(bManufacturing && !bManufacturingResearch ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+		}
+	}
+	if (StripSpeedButton)
+	{
+		StripSpeedButton->SetVisibility(bManufacturing ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
+	}
 	bIdlePulse = bIdle;   // 대기에만 CTA 펄스 (NativeTick)
 	if (RightIdleZone)
 	{
@@ -234,17 +394,319 @@ void UOfficeMainWidget::RefreshOfficeUI(EProjectLifecycle State)
 	const ESlateVisibility TimerVis = bIdle ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible;
 	if (TimerRing)
 	{
-		TimerRing->SetVisibility(TimerVis);
+		TimerRing->SetVisibility(ESlateVisibility::Collapsed);
 	}
 	if (ProcessTimeText)
 	{
 		ProcessTimeText->SetVisibility(TimerVis);
+	}
+	RefreshManufacturingPointsStatus();
+	RefreshPlacementEditControls();
+}
+
+void UOfficeMainWidget::RefreshManufacturingPointsStatus()
+{
+	UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	const bool bManufacturing = GI && IsManufacturingType(GI->GetCurrentBuildingCompanyType());
+	const UManufacturingDevelopmentManager* ResearchMgr = bManufacturing ? GI->GetSubsystem<UManufacturingDevelopmentManager>() : nullptr;
+	const int32 BuildingID = bManufacturing ? GI->GetCurrentManagedBuildingIndex() : INDEX_NONE;
+	const FManufacturingResearchStatus Research = ResearchMgr ? ResearchMgr->GetActiveResearchStatus(BuildingID) : FManufacturingResearchStatus();
+	const bool bResearchActive = Research.bInProgress;
+	if (UWidget* PointsHeading = GetWidgetFromName(TEXT("ManufacturingPointsHeading")))
+	{
+		PointsHeading->SetVisibility(bManufacturing && !bResearchActive ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (UWidget* ProjectNameBox = GetWidgetFromName(TEXT("DevProjectNameBox")))
+	{
+		ProjectNameBox->SetVisibility(bManufacturing && !bResearchActive ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+	}
+	if (ManufacturingExperienceSummary)
+	{
+		ManufacturingExperienceSummary->SetVisibility(bManufacturing ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (UWidget* ExperienceBox = GetWidgetFromName(TEXT("ManufacturingExperienceSummaryBox")))
+	{
+		ExperienceBox->SetVisibility(bManufacturing ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (!bManufacturing) return;
+	const UManufacturingDevelopmentManager* PointsMgr = ResearchMgr;
+	const UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
+	const TArray<double> Balances = PointsMgr ? PointsMgr->GetDisciplinePoints(BuildingID) : TArray<double>();
+	const int32 RestingCount = PointsMgr ? PointsMgr->GetRestingEmployeeCount(BuildingID) : 0;
+	if (bResearchActive && TableMgr)
+	{
+		bool bFoundProduct = false;
+		const FProjectData Product = TableMgr->GetProjectData(GI->GetCurrentBuildingCompanyType(), Research.ActiveProjectIndex, bFoundProduct);
+		if (DevProjectName) DevProjectName->SetText(bFoundProduct ? Product.ProjectName : FText::GetEmpty());
+		if (!bFoundProduct) UE_LOG(LogTemp, Warning, TEXT("[Office] 제조 연구 제품 %d DT 행 없음"), Research.ActiveProjectIndex);
+		const float Remaining = FMath::Max(0.f, Research.RequiredWorkSeconds - Research.CompletedWorkSeconds);
+		if (ProcessTimeLabel) ProcessTimeLabel->SetText(NSLOCTEXT("Office", "ManufacturingResearchWorkRemaining", "남은 근무"));
+		if (ProcessTimeText) ProcessTimeText->SetText(FText::Format(NSLOCTEXT("Office", "ManufacturingResearchSeconds", "{0}초"), FText::AsNumber(FMath::CeilToInt(Remaining))));
+	}
+	if (DevGenreBadgeBox) DevGenreBadgeBox->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	if (DevGenreBadge)
+	{
+		const int32 ProgressPercent = Research.RequiredWorkSeconds > 0.f
+			? FMath::Clamp(FMath::RoundToInt(100.f * Research.CompletedWorkSeconds / Research.RequiredWorkSeconds), 0, 100) : 0;
+		DevGenreBadge->SetText(bResearchActive
+			? FText::Format(NSLOCTEXT("Office", "ManufacturingResearchProgressBadge", "개발 {0}% / 휴식 {1}명"),
+				FText::AsNumber(ProgressPercent), FText::AsNumber(RestingCount))
+			: FText::Format(NSLOCTEXT("Office", "ManufacturingWorkStatus", "휴식 {0}명"), FText::AsNumber(RestingCount)));
+	}
+	if (ManufacturingExperienceSummary)
+	{
+		const UEmployeeManager* Employees = GI->GetSubsystem<UEmployeeManager>();
+		int32 ReadyCount = 0;
+		if (Employees)
+		{
+			for (const FEmployeeInstance& Employee : Employees->GetAllEmployeesRef())
+			{
+				if (!GI->IsVisitMode() && Employee.AssignedBuildingIndex == BuildingID
+					&& EmployeeTrainingRules::CanLevelUp(Employee)) ++ReadyCount;
+			}
+		}
+		ManufacturingExperienceSummary->SetText(FText::Format(
+			NSLOCTEXT("Office", "ManufacturingExperienceSummary", "근무 중 경험치 누적\n레벨업 가능 {0}명"),
+			FText::AsNumber(ReadyCount)));
+	}
+	for (int32 FieldIndex = 0; FieldIndex < 6; ++FieldIndex)
+	{
+		const FText Name = FieldIndex < 3 && TableMgr
+			? TableMgr->GetDisciplineDisplayName(GI->GetCurrentBuildingCompanyType(), FieldIndex) : FText::GetEmpty();
+		if (UWidget* Cell = StripStageCells.IsValidIndex(FieldIndex) ? StripStageCells[FieldIndex] : nullptr)
+		{
+			Cell->SetVisibility(Name.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+		}
+		if (Name.IsEmpty())
+		{
+			if (FieldIndex < 3)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[Office] 제조업 분야 %d 표시명 없음 — DT_DisciplineDisplay 확인"), FieldIndex);
+			}
+			continue;
+		}
+		if (UCommonTextBlock* NameText = StripStageNames.IsValidIndex(FieldIndex) ? StripStageNames[FieldIndex] : nullptr)
+		{
+			NameText->SetText(Name);
+		}
+		if (UImage* Icon = StripStageDisciplineIcons.IsValidIndex(FieldIndex) ? StripStageDisciplineIcons[FieldIndex] : nullptr)
+		{
+			const int32 IconIndex = FieldIndex == 0 ? 1 : FieldIndex == 1 ? 4 : 5;
+			UTexture2D* Texture = UGlobalUtilFunctions::GetDisciplineIcon(IconIndex);
+			Icon->SetBrushFromTexture(Texture, false);
+			Icon->SetColorAndOpacity(UGlobalUtilFunctions::GetStepColor(FieldIndex + 1));
+			Icon->SetVisibility(Texture ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		}
+		const int32 CurrentCapability = Research.TeamCapability.IsValidIndex(FieldIndex) ? Research.TeamCapability[FieldIndex] : 0;
+		const int32 RequiredCapability = Research.RequiredCapability.IsValidIndex(FieldIndex) ? Research.RequiredCapability[FieldIndex] : 0;
+		const float ResearchPct = bResearchActive && RequiredCapability > 0
+			? static_cast<float>(CurrentCapability) / RequiredCapability : 0.f;
+		StripStageTargetScore[FieldIndex] = bResearchActive ? RequiredCapability : 0.f;
+		StripStageShownPct[FieldIndex] = ResearchPct;
+		StripStageTargetPct[FieldIndex] = ResearchPct;
+		bStripStagePendingDirty[FieldIndex] = false;
+		ApplyStripStageVisual(FieldIndex, ResearchPct);
+		if (UCommonTextBlock* ValueText = StripStageVals.IsValidIndex(FieldIndex) ? StripStageVals[FieldIndex] : nullptr)
+		{
+			const double Balance = Balances.IsValidIndex(FieldIndex) && FMath::IsFinite(Balances[FieldIndex])
+				? FMath::Max(0.0, Balances[FieldIndex]) : 0.0;
+			ValueText->SetMinDesiredWidth(0.0f);
+			ValueText->SetText(bResearchActive
+				? FText::Format(NSLOCTEXT("Office", "ManufacturingResearchCapability", "{0} / {1}"), FText::AsNumber(CurrentCapability), FText::AsNumber(RequiredCapability))
+				: FText::Format(NSLOCTEXT("Office", "ManufacturingFieldBalance", "{0} P"),
+					UGlobalUtilFunctions::AbbreviateNumberFloat(Balance, ENumberAbbrevStyle::WesternSuffix, ENumberRoundMode::Floor)));
+		}
+	}
+}
+
+void UOfficeMainWidget::OnManufacturingPointsChanged(int32 BuildingID)
+{
+	const UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	if (!GI || !IsManufacturingType(GI->GetCurrentBuildingCompanyType())
+		|| GI->GetCurrentManagedBuildingIndex() != BuildingID) return;
+	const UManufacturingDevelopmentManager* ResearchMgr = GI->GetSubsystem<UManufacturingDevelopmentManager>();
+	if (!ResearchMgr) return;
+	const bool bResearchActive = ResearchMgr->GetActiveResearchStatus(BuildingID).bInProgress;
+	const int32 PendingProduct = ResearchMgr->GetPendingResearchResult(BuildingID);
+	if (bManufacturingResearchObserved && bResearchActive != bManufacturingResearchWasActive)
+	{
+		if (bResearchActive)
+		{
+			OnStepStartEffectReceived();
+		}
+		else if (PendingProduct != INDEX_NONE && IsActivated())
+		{
+			PlayLaunchClimax(true);
+			if (GetWorld()) GetWorld()->GetTimerManager().SetTimer(ManufacturingResultTimer, this,
+				&UOfficeMainWidget::TryShowManufacturingResearchResult, 0.9f, false);
+		}
+		if (const UOfficeStageProgressManager* StageMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr)
+		{
+			RefreshOfficeUI(StageMgr->GetLifecycle());
+		}
+		if (bResearchActive) UWorkstationDevFxComponent::EnsureDevelopmentActive(GetWorld());
+	}
+	else
+	{
+		RefreshManufacturingPointsStatus();
+		if (PendingProduct != INDEX_NONE && IsActivated() && !GetWorld()->GetTimerManager().IsTimerActive(ManufacturingResultTimer))
+		{
+			TryShowManufacturingResearchResult();
+		}
+	}
+	bManufacturingResearchObserved = true;
+	bManufacturingResearchWasActive = bResearchActive;
+}
+
+void UOfficeMainWidget::TryShowManufacturingResearchResult()
+{
+	if (bHandlingManufacturingResult || !IsActivated() || !GetWorld()) return;
+	UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	if (!GI || GI->IsVisitMode() || !IsManufacturingType(GI->GetCurrentBuildingCompanyType())) return;
+	UManufacturingDevelopmentManager* ResearchMgr = GI->GetSubsystem<UManufacturingDevelopmentManager>();
+	UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
+	UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>();
+	UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr;
+	const int32 BuildingID = GI->GetCurrentManagedBuildingIndex();
+	const int32 ProjectIndex = ResearchMgr ? ResearchMgr->GetPendingResearchResult(BuildingID) : INDEX_NONE;
+	if (ManufacturingResultProjectIndex != INDEX_NONE
+		&& (!ActiveManufacturingResult.IsValid() || !ActiveManufacturingResult->IsActivated()
+			|| ManufacturingResultBuildingID != BuildingID
+			|| ManufacturingResultProjectIndex != ProjectIndex))
+	{
+		ManufacturingResultProjectIndex = INDEX_NONE;
+		ManufacturingResultBuildingID = INDEX_NONE;
+		ActiveManufacturingResult.Reset();
+	}
+	if (ProjectIndex == INDEX_NONE || !TableMgr || !UIBase) return;
+	if (ManufacturingResultProjectIndex != INDEX_NONE || ManufacturingQuantityProjectIndex != INDEX_NONE
+		|| UIBase->GetPromptStackCount() > 0
+		|| UIBase->GetBottomStackCount() > 1 || (ManufacturingIntroOverlay.IsValid() && ManufacturingIntroOverlay->IsInViewport()))
+	{
+		GetWorld()->GetTimerManager().SetTimer(ManufacturingResultTimer, this,
+			&UOfficeMainWidget::TryShowManufacturingResearchResult, 0.5f, false);
+		return;
+	}
+	TSubclassOf<UUserWidget> ResultClass = TableMgr->GetWidgetClass(EWidgetType::LaunchConfirm);
+	if (!ResultClass) return;
+	ManufacturingResultBuildingID = BuildingID;
+	ManufacturingResultProjectIndex = ProjectIndex;
+	UCommonActivatableWidget* Result = UIBase->PushPromptClass(ResultClass.Get(), [this, GI, ProjectIndex](UCommonActivatableWidget& Widget)
+	{
+		if (ULaunchConfirmWidget* LaunchWidget = Cast<ULaunchConfirmWidget>(&Widget))
+		{
+			LaunchWidget->OnLaunchConfirmed.RemoveAll(this);
+			LaunchWidget->OnLaunchCancelled.RemoveAll(this);
+			LaunchWidget->OnLaunchRetryRequested.RemoveAll(this);
+			LaunchWidget->OnManufacturingResearchResultClosed.RemoveAll(this);
+			LaunchWidget->SetManufacturingResearchResult(GI->GetCurrentBuildingCompanyType(), ProjectIndex);
+			LaunchWidget->OnManufacturingResearchResultClosed.AddUniqueDynamic(this, &UOfficeMainWidget::OnManufacturingResearchResultClosed);
+		}
+	});
+	ActiveManufacturingResult = Cast<ULaunchConfirmWidget>(Result);
+	if (!ActiveManufacturingResult.IsValid())
+	{
+		ManufacturingResultBuildingID = INDEX_NONE;
+		ManufacturingResultProjectIndex = INDEX_NONE;
+		ActiveManufacturingResult.Reset();
+		UE_LOG(LogTemp, Error, TEXT("[Office] LaunchConfirm 등록 클래스가 제조 연구 결과 위젯이 아닙니다."));
+		return;
+	}
+	if (ScoreOrbContainer) ScoreOrbContainer->FadeDevelopmentDim();
+}
+
+void UOfficeMainWidget::OnManufacturingResearchResultClosed(bool bOpenQuantity)
+{
+	if (bHandlingManufacturingResult) return;
+	TGuardValue<bool> HandlingResultGuard(bHandlingManufacturingResult, true);
+	UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	UManufacturingDevelopmentManager* ResearchMgr = GI ? GI->GetSubsystem<UManufacturingDevelopmentManager>() : nullptr;
+	const int32 ProductIndex = ManufacturingResultProjectIndex;
+	const int32 BuildingID = ManufacturingResultBuildingID;
+	const bool bSaved = ResearchMgr && ProductIndex != INDEX_NONE
+		&& ResearchMgr->AcknowledgeResearchResult(BuildingID, ProductIndex);
+	ManufacturingResultProjectIndex = INDEX_NONE;
+	ManufacturingResultBuildingID = INDEX_NONE;
+	ActiveManufacturingResult.Reset();
+	UWorkstationDevFxComponent::NotifyDevelopmentReset(GetWorld());
+	if (AOfficeCameraPawn* Camera = Cast<AOfficeCameraPawn>(UGameplayStatics::GetPlayerPawn(this, 0)))
+	{
+		Camera->ReleasePresentationPullIn(0.3f);
+	}
+	if (ScoreOrbContainer) ScoreOrbContainer->ResetDevelopmentEffects();
+	if (!bSaved)
+	{
+		if (UUIManagerSubsystem* UIMgr = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+		{
+			UIMgr->ShowNotification(NSLOCTEXT("Office", "ResearchResultSaveFailed", "연구 결과 저장에 실패했습니다. 다시 확인해주세요."), 3.f, ENotificationType::Failed);
+		}
+		if (GetWorld()) GetWorld()->GetTimerManager().SetTimer(ManufacturingResultTimer, this,
+			&UOfficeMainWidget::TryShowManufacturingResearchResult, 0.5f, false);
+		return;
+	}
+	if (bOpenQuantity && GI && GI->GetCurrentManagedBuildingIndex() == BuildingID)
+	{
+		ManufacturingQuantityProjectIndex = ProductIndex;
+		ManufacturingQuantityBuildingID = BuildingID;
+		if (GetWorld()) GetWorld()->GetTimerManager().SetTimerForNextTick(this, &UOfficeMainWidget::TryOpenManufacturingQuantity);
+	}
+	else if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().SetTimer(ManufacturingResultTimer, this,
+			&UOfficeMainWidget::TryShowManufacturingResearchResult, 0.5f, false);
+	}
+}
+
+void UOfficeMainWidget::TryOpenManufacturingQuantity()
+{
+	if (ManufacturingQuantityProjectIndex == INDEX_NONE || !GetWorld()) return;
+	UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	UUIManagerSubsystem* UIMgr = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+	UUIBase* UIBase = UIMgr ? UIMgr->GetUIBase() : nullptr;
+	if (!GI || GI->IsVisitMode() || GI->GetCurrentManagedBuildingIndex() != ManufacturingQuantityBuildingID
+		|| !IsManufacturingType(GI->GetCurrentBuildingCompanyType()) || !TableMgr || !UIBase)
+	{
+		ManufacturingQuantityProjectIndex = INDEX_NONE;
+		ManufacturingQuantityBuildingID = INDEX_NONE;
+		return;
+	}
+	if (UIBase->GetPromptStackCount() > 0)
+	{
+		GetWorld()->GetTimerManager().SetTimer(ManufacturingQuantityTimer, this,
+			&UOfficeMainWidget::TryOpenManufacturingQuantity, 0.1f, false);
+		return;
+	}
+	const TSubclassOf<UUserWidget> BoardClass = TableMgr->GetWidgetClass(EWidgetType::PitchBoard);
+	if (!BoardClass) return;
+	const int32 ProductIndex = ManufacturingQuantityProjectIndex;
+	ManufacturingQuantityProjectIndex = INDEX_NONE;
+	ManufacturingQuantityBuildingID = INDEX_NONE;
+	if (UPitchBoardWidget* Board = Cast<UPitchBoardWidget>(UIBase->PushPromptClass(BoardClass.Get()))) Board->OpenProject(ProductIndex);
+}
+
+void UOfficeMainWidget::HandleEmployeeExperienceChanged(int32 EmployeeID)
+{
+	const UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	UEmployeeManager* Employees = GI ? GI->GetSubsystem<UEmployeeManager>() : nullptr;
+	if (!GI || !Employees || !IsManufacturingType(GI->GetCurrentBuildingCompanyType())) return;
+	const FEmployeeInstance* Employee = Employees->FindEmployee(EmployeeID);
+	if (Employee && Employee->AssignedBuildingIndex == GI->GetCurrentManagedBuildingIndex())
+	{
+		RefreshManufacturingPointsStatus();
 	}
 }
 
 void UOfficeMainWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+	UpdateExpansionHotspots(true);
+	UpdatePlacementWorkstationMarker(InDeltaTime);
+	UpdateDevelopmentEffectArea();
+	if (StepStartBannerWidget && GetWorld() && InDeltaTime > KINDA_SMALL_NUMBER)
+	{
+		StepStartBannerWidget->SetPresentationSpeed(GetWorld()->GetDeltaSeconds() / InDeltaTime);
+	}
 
 	// 하단 도크 슬라이드 — 개발중이면 아래로 밀어내고, 아니면 제자리로 보간(+페이드). 오프스크린이라 버튼 클릭 불가.
 	if (OfficeDockTray)
@@ -269,7 +731,10 @@ void UOfficeMainWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 		{
 			IdlePulseElapsed += InDeltaTime;
 			// opacity 0.45~0.90, 주기 ~2.2s(2π/2.2≈2.856). 빛만 호흡 → 프리미엄 어텐션(튜토리얼보다 살짝 약).
-			const float Breathe = 0.45f + 0.45f * (0.5f + 0.5f * FMath::Sin(IdlePulseElapsed * 2.856f));
+			// 연출 감소: 호흡 대신 최대치 고정 — 어텐션은 정보라 끄지 않고 움직임만 끈다
+			const float Breathe = FMotionGate::IsReduced()
+				? 0.90f
+				: 0.45f + 0.45f * (0.5f + 0.5f * FMath::Sin(IdlePulseElapsed * 2.856f));
 			CTAGlow->SetRenderOpacity(Breathe);
 		}
 		else if (IdlePulseElapsed != 0.0f)
@@ -280,11 +745,44 @@ void UOfficeMainWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 		}
 	}
 
+	// 대기 CTA 샤인 스윕 — 버튼은 고정하고 광택 띠만 면을 가로지른다.
+	// 버튼 자체를 상시 이동시키면 소수픽셀=지글거림 / 정수스냅=계단 중 하나를 피할 수 없다(2026-09-24 실측).
+	// VFX 소스북 §2.5 "상시 반복되는 UI 흔들림 금지", 레퍼런스 24장 "강조는 링·글로우·선버스트·색 대비로만".
+	if (CtaShineImage)
+	{
+		if (bIdlePulse)
+		{
+			const float Phase = FMath::Fmod(IdlePulseElapsed, CtaShinePeriod);
+			if (Phase < CtaShineTravel && !FMotionGate::IsReduced())   // 샤인 스윕은 순수 장식 — 감소면 소등
+			{
+				const float T = Phase / CtaShineTravel;
+				CtaShineImage->SetRenderTranslation(
+					FVector2D(FMath::Lerp(-CtaShineSweepHalf, CtaShineSweepHalf, T), 0.0f));
+				CtaShineImage->SetRenderOpacity(0.55f * FMath::Sin(T * PI));   // 진입/이탈 페이드
+			}
+			else
+			{
+				CtaShineImage->SetRenderOpacity(0.0f);
+			}
+		}
+		else
+		{
+			CtaShineImage->SetRenderOpacity(0.0f);
+		}
+	}
+
 	// 스테이지 바 — 폴백 플러시 / 부드러운 채움(≈3.3/s) / 착지 연출(펀치+플래시)
 	const double NowSec = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
-	for (int32 i = 0; i < 6; ++i)
+	const UOfficeStageProgressManager* PresentationMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	const bool bPresentationPaused = PresentationMgr && (PresentationMgr->IsEventPaused() || PresentationMgr->IsBoostGamblePending());
+	const float PendingDelta = GetWorld() ? GetWorld()->GetDeltaSeconds() : InDeltaTime;
+	const UCGGameInstance* OfficeGI = Cast<UCGGameInstance>(GetGameInstance());
+	const bool bManufacturing = OfficeGI && IsManufacturingType(OfficeGI->GetCurrentBuildingCompanyType());
+	for (int32 i = 0; !bManufacturing && i < 6; ++i)
 	{
-		if (bStripStagePendingDirty[i] && NowSec - StripStagePendingSince[i] > PendingFlushTimeout)
+		// 오브와 같은 월드 시간만 제외해야 배속/이벤트 대기 중 폴백이 착지를 앞지르지 않는다.
+		if (bPresentationPaused && bStripStagePendingDirty[i]) StripStagePendingSince[i] += PendingDelta;
+		if (!bPresentationPaused && bStripStagePendingDirty[i] && NowSec - StripStagePendingSince[i] > PendingFlushTimeout)
 		{
 			FlushStripStagePending(i);   // orb 유실/스킵 — 연출 없이 값만
 		}
@@ -299,14 +797,38 @@ void UOfficeMainWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 		// 초반 획득이 통째로 삼켜진다(숫자가 0에 눌러앉고 바도 안 움직임). 목표가 작을 땐 기존 0.001 을 상한으로.
 		const float PctEps = (StripStageTargetScore[i] > 0.0f)
 			? FMath::Min(0.001f, 0.5f / StripStageTargetScore[i]) : 0.001f;
-		if (!FMath::IsNearlyEqual(StripStageShownPct[i], StripStageTargetPct[i], PctEps))
+		if (StripStageShownPct[i] != StripStageTargetPct[i])
 		{
-			StripStageShownPct[i] = FMath::FInterpConstantTo(StripStageShownPct[i], StripStageTargetPct[i], InDeltaTime, 3.3f);
+			StripStageShownPct[i] = FMath::IsNearlyEqual(StripStageShownPct[i], StripStageTargetPct[i], PctEps)
+				? StripStageTargetPct[i]
+				: FMath::FInterpConstantTo(StripStageShownPct[i], StripStageTargetPct[i], InDeltaTime, 3.3f);
 			bVisualDirty = true;
 		}
 		if (bVisualDirty)
 		{
-			ApplyStripStageVisual(i, StripStageShownPct[i]);
+			ApplyStripStageVisual(i, StripStageShownPct[i], true);
+		}
+
+		if (StripStageGoalElapsed[i] < StripGoalDuration)
+		{
+			StripStageGoalElapsed[i] = FMotionGate::IsReduced() ? StripGoalDuration
+				: FMath::Min(StripGoalDuration, StripStageGoalElapsed[i] + InDeltaTime);
+			const float GoalTime = StripStageGoalElapsed[i];
+			// 원 크기를 넘지 않게 작았다가 돌아온다 — 1.0 초과 확대는 트레이 경계에서 잘리고 글자가 뭉개진다.
+			const float PunchT = FMath::Clamp(GoalTime / 0.33f, 0.0f, 1.0f);
+			const float PunchScale = FMath::Lerp(0.96f, 1.0f, 1.0f - FMath::Square(1.0f - PunchT));
+			if (UWidget* Cell = StripStageCells.IsValidIndex(i) ? StripStageCells[i] : nullptr)
+			{
+				Cell->SetRenderScale(FVector2D(PunchScale, PunchScale));
+			}
+			// 초과로 넘어갈 때만 게이지 테두리가 금색으로 번쩍 — 점수 글자가 덮지 않는 신호라 광택보다 잘 보인다.
+			if (UImage* Ring = StripStageGoalRings.IsValidIndex(i) ? StripStageGoalRings[i] : nullptr)
+			{
+				const float RingT = GoalTime / StripGoalDuration;
+				const float RingAlpha = RingT < 0.35f ? 1.0f : 1.0f - (RingT - 0.35f) / 0.65f;
+				Ring->SetRenderOpacity(GoalTime < StripGoalDuration && StripStageVisualState[i] == 3
+					? FMath::Clamp(RingAlpha, 0.0f, 1.0f) : 0.0f);
+			}
 		}
 
 		if (StripStagePunchElapsed[i] < StripPunchDuration)
@@ -333,12 +855,14 @@ void UOfficeMainWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 
 	// 스트립 셸 SDF — Wpx/Hpx가 실제 위젯 크기와 일치해야 코너 정합 (크기 변화 시에만 재주입)
 	UpdateStripShellMaterialSize();
+	UpdateMissionAnchorBelowStrip(InDeltaTime);
 
-	// 라스트 스퍼트 — 소리/셰이크뿐이던 잔여 40% 구간에 화면 긴장감 (골드 펄스 ~1.6Hz)
+	// 마지막 3초도 숫자와 단위는 고정하고 색만 부드럽게 강조한다.
+	if (bPresentationPaused || FMotionGate::IsReduced()) ResetLastSpurtVisual();
 	if (bLastSpurtVisual)
 	{
 		LastSpurtElapsed += InDeltaTime;
-		const float Pulse = 0.5f + 0.5f * FMath::Sin(LastSpurtElapsed * 10.0f);
+		const float Pulse = 0.5f + 0.5f * FMath::Sin(LastSpurtElapsed * 5.2f);
 		if (ProcessTimeText)
 		{
 			static const FLinearColor BaseCol(0.838799f, 0.854993f, 0.871367f, 1.0f);
@@ -353,8 +877,11 @@ void UOfficeMainWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 void UOfficeMainWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	BindExpansionHotspots();
+	if (EquipmentManualButton) EquipmentManualButton->OnClicked().AddUObject(this, &ThisClass::ShowEquipmentManualEmployees);
+	if (auto* Equipment = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>()) Equipment->OnEquipmentChanged.AddUObject(this, &ThisClass::RefreshEquipmentManualButton);
 
-	// 상단 스트립 스테이지 셀 캐시 (BindWidget 대신 트리 이름으로 ― Stage{1..6}Cell/Name/Val/Bar/Done)
+	// 상단 스트립 스테이지 셀과 직능 아이콘/목표 광택을 트리 이름으로 캐시한다.
 	CacheStripStageCells();
 
 	// 폭 예약 없음 — 숫자가 링 중앙에 겹쳐 자리를 링이 소유하므로 자릿수가 변해도 레이아웃이 안 흔들린다.
@@ -364,6 +891,14 @@ void UOfficeMainWidget::NativeConstruct()
 	BindStageProgressDelegates();
 	BindBoardEventDelegates();
 	BindOperationDelegates();
+	if (UManufacturingDevelopmentManager* PointsMgr = GetGameInstance()->GetSubsystem<UManufacturingDevelopmentManager>())
+	{
+		PointsMgr->OnPointsChanged.AddUObject(this, &UOfficeMainWidget::OnManufacturingPointsChanged);
+	}
+	if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
+	{
+		SaveMgr->OnGameDataLoaded.AddUObject(this, &ThisClass::RefreshCompanyFeatureButtons);
+	}
 
 	// OfficeManager는 WorldSubsystem이라 위젯과 동일 수명
 	if (UOfficeManager* OfficeMgr = GetWorld()->GetSubsystem<UOfficeManager>())
@@ -376,13 +911,40 @@ void UOfficeMainWidget::NativeConstruct()
 	if (UEmployeeManager* EmpMgr = GetGameInstance()->GetSubsystem<UEmployeeManager>())
 	{
 		EmpMgr->OnEmployeeRosterChanged.AddUObject(this, &UOfficeMainWidget::UpdateWorkstationBadge);
+		// 근무 획득은 OnPointsChanged의 사무실별 정산 알림에서 한 번만 갱신한다.
+		EmpMgr->OnEmployeeLevelUp.AddWeakLambda(this, [this](int32 EmployeeID, int32)
+		{
+			HandleEmployeeExperienceChanged(EmployeeID);
+		});
+	}
+
+	// 잠금이 풀리는 순간 서버값으로 정정된 다이아 잔액으로 컨티뉴 슬롯 상태를 다시 계산한다
+	if (UCloudEconomySubsystem* Cloud = GetGameInstance()->GetSubsystem<UCloudEconomySubsystem>())
+	{
+		Cloud->OnEconomyReady.AddUObject(this, &UOfficeMainWidget::HandleEconomyReady);
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] NativeConstruct - persistent delegates bound"));
 }
 
+void UOfficeMainWidget::HandleEconomyReady(bool bReady)
+{
+	// 잠긴 동안에도 컨티뉴는 살려 둔다 — 조용히 죽은 버튼은 "다이아가 사라졌다" 로 읽힌다.
+	// 탭하면 NotifyCloudOpFailure 가 3상태 중 하나를 말해준다(§7.2)
+	RefreshLeftSlotState();
+}
+
 void UOfficeMainWidget::NativeDestruct()
 {
+	if (GetWorld()) { GetWorld()->GetTimerManager().ClearTimer(ManufacturingIntroTimer); }
+	if (UPanelIntroOverlayWidget* Intro = ManufacturingIntroOverlay.Get()) { Intro->RemoveFromParent(); }
+	ManufacturingIntroOverlay.Reset();
+	UnbindExpansionHotspots();
+	UnbindPlacementEditControls();
+	SetPlacementWorkstationMarker(nullptr, nullptr);
+	CloseEquipmentManualDialog();
+	if (EquipmentManualButton) EquipmentManualButton->OnClicked().RemoveAll(this);
+	if (auto* Equipment = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>()) Equipment->OnEquipmentChanged.RemoveAll(this);
 	// 배속을 켠 채 사무실을 떠나면 세계가 2배속으로 남는다 — 복원의 유일한 지점.
 	// 활성/비활성 쌍이 아니라 파괴 시점인 이유: 모달이 뜰 때마다 Deactivate 되므로 거기서 리셋하면 배속이 조용히 풀린다.
 	ApplyDevSpeed(1.0f);
@@ -390,6 +952,14 @@ void UOfficeMainWidget::NativeDestruct()
 	UnbindStageProgressDelegates();
 	UnbindBoardEventDelegates();
 	UnbindOperationDelegates();
+	if (UManufacturingDevelopmentManager* PointsMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UManufacturingDevelopmentManager>() : nullptr)
+	{
+		PointsMgr->OnPointsChanged.RemoveAll(this);
+	}
+	if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
+	{
+		SaveMgr->OnGameDataLoaded.RemoveAll(this);
+	}
 
 	if (UOfficeManager* OfficeMgr = GetWorld()->GetSubsystem<UOfficeManager>())
 	{
@@ -399,13 +969,18 @@ void UOfficeMainWidget::NativeDestruct()
 	if (UEmployeeManager* EmpMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UEmployeeManager>() : nullptr)
 	{
 		EmpMgr->OnEmployeeRosterChanged.RemoveAll(this);
+		EmpMgr->OnEmployeeLevelUp.RemoveAll(this);
+	}
+
+	if (UCloudEconomySubsystem* Cloud = GetGameInstance() ? GetGameInstance()->GetSubsystem<UCloudEconomySubsystem>() : nullptr)
+	{
+		Cloud->OnEconomyReady.RemoveAll(this);
 	}
 
 	// 진행 중인 이펙트 위젯 정리
 	RemoveStepStartEffect();
 	if (UWorld* World = GetWorld())
 	{
-		World->GetTimerManager().ClearTimer(StepEffectTimerHandle);
 		World->GetTimerManager().ClearTimer(FeverOverlayTimerHandle);  // 페이드 중 파괴 시 반복 타이머 잔류 방지 (Construct↔Destruct 쌍)
 	}
 
@@ -445,16 +1020,31 @@ UWidget* UOfficeMainWidget::GetEmployeeButtonWidget() const
 	return EmployeeButton;
 }
 
+UWidget* UOfficeMainWidget::GetEquipmentGachaButtonWidget() const
+{
+	return EquipmentGachaButton;
+}
+
 void UOfficeMainWidget::NativeOnActivated()
 {
 	Super::NativeOnActivated();
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().SetTimer(ManufacturingIntroTimer, this,
+			&UOfficeMainWidget::TryPlayManufacturingIntro, 0.5f, false);
+	}
+	RefreshCompanyFeatureButtons();
+	BuildPlacementEditControls();
+	BindPlacementEditControls();
 
 	// 버튼 이벤트 바인딩
 	if (WorkstationOpenButton) WorkstationOpenButton->OnClicked().AddUObject(this, &UOfficeMainWidget::OnWorkstationButtonClicked);
 	if (DecorationOpenButton) DecorationOpenButton->OnClicked().AddUObject(this, &UOfficeMainWidget::OnDecorationButtonClicked);
+	if (TrainingCenterOpenButton) TrainingCenterOpenButton->OnClicked().AddUObject(this, &UOfficeMainWidget::OnTrainingCenterButtonClicked);
+	if (BusinessTripOpenButton) BusinessTripOpenButton->OnClicked().AddUObject(this, &UOfficeMainWidget::OnBusinessTripButtonClicked);
 	if (EmployeeButton) EmployeeButton->OnClicked().AddUObject(this, &UOfficeMainWidget::OnEmployeeButtonClicked);
-	if (OfficeUpgradeButton) OfficeUpgradeButton->OnClicked().AddUObject(this, &UOfficeMainWidget::OnOfficeUpgradeButtonClicked);
 	if (RecruitmentButton) RecruitmentButton->OnClicked().AddUObject(this, &UOfficeMainWidget::OnRecruitmentButtonClicked);
+	if (EquipmentGachaButton) EquipmentGachaButton->OnClicked().AddUObject(this, &UOfficeMainWidget::OnEquipmentGachaButtonClicked);
 	if (CollectionBtn) CollectionBtn->OnClicked().AddUObject(this, &UOfficeMainWidget::OnCollectionBtnClicked);
 	// 포트폴리오/상단 밴드는 OfficeLayer 소관 — 여기서 배선/갱신 안 함 (RefreshOfficeUI 가 Layer 트리거).
 
@@ -498,6 +1088,20 @@ void UOfficeMainWidget::NativeOnActivated()
 	{
 		RefreshOfficeUI(SM->GetLifecycle());
 	}
+	if (const UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance()))
+	{
+		if (IsManufacturingType(GI->GetCurrentBuildingCompanyType()))
+		{
+			if (const UManufacturingDevelopmentManager* ResearchMgr = GI->GetSubsystem<UManufacturingDevelopmentManager>())
+			{
+				bManufacturingResearchWasActive = ResearchMgr->GetActiveResearchStatus(GI->GetCurrentManagedBuildingIndex()).bInProgress;
+				bManufacturingResearchObserved = true;
+				if (bManufacturingResearchWasActive) UWorkstationDevFxComponent::EnsureDevelopmentActive(GetWorld());
+			}
+		}
+	}
+	if (GetWorld()) GetWorld()->GetTimerManager().SetTimer(ManufacturingResultTimer, this,
+		&UOfficeMainWidget::TryShowManufacturingResearchResult, 0.9f, false);
 
 	// 재활성 시점의 도크는 연출 대상이 아니라 결과 상태 — 알파를 믿지 말고 실제 트랜스폼을 단언
 	DockSlideAlpha = bDockHidden ? 1.f : 0.f;
@@ -523,6 +1127,7 @@ void UOfficeMainWidget::NativeOnActivated()
 					// 뷰포트 직접 부착은 UIBase(프롬프트 스택=이벤트 팝업) 위에 그려짐 →
 					// OfficeMain 루트(Overlay) 마지막 자식으로 부착해 HUD 위·팝업 아래 유지
 					ScoreOrbContainer->SetVisibility(ESlateVisibility::HitTestInvisible);
+					ScoreOrbContainer->SetDevelopmentPresentationEnabled(true);
 					ScoreOrbContainer->OnScoreOrbArrived.AddUObject(this, &UOfficeMainWidget::OnScoreOrbArrivedReceived);
 					bool bAttached = false;
 					if (UOverlay* RootOverlay = Cast<UOverlay>(WidgetTree->RootWidget))
@@ -604,9 +1209,37 @@ void UOfficeMainWidget::NativeOnActivated()
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] NativeOnActivated - Buttons bound"));
 }
 
+void UOfficeMainWidget::TryPlayManufacturingIntro()
+{
+	const UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	UPanelIntroSubsystem* IntroMgr = GI ? GI->GetSubsystem<UPanelIntroSubsystem>() : nullptr;
+	static const FName IntroKey(TEXT("ManufacturingOffice"));
+	if (!IsActivated() || !GI || !IsManufacturingType(GI->GetCurrentBuildingCompanyType())
+		|| !IntroMgr || !IntroMgr->ShouldPlay(IntroKey)) { return; }
+	if (ManufacturingIntroOverlay.IsValid() && ManufacturingIntroOverlay->IsInViewport()) { return; }
+	ManufacturingIntroOverlay = IntroMgr->PlayIntro(this, IntroKey, false);
+	if (!ManufacturingIntroOverlay.IsValid() && GetWorld())
+	{
+		GetWorld()->GetTimerManager().SetTimer(ManufacturingIntroTimer, this,
+			&UOfficeMainWidget::TryPlayManufacturingIntro, 0.5f, false);
+	}
+}
+
 void UOfficeMainWidget::NativeOnDeactivated()
 {
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(ManufacturingIntroTimer);
+		GetWorld()->GetTimerManager().ClearTimer(ManufacturingResultTimer);
+	}
+	if (UPanelIntroOverlayWidget* Intro = ManufacturingIntroOverlay.Get()) { Intro->RemoveFromParent(); }
+	ManufacturingIntroOverlay.Reset();
+	if (ScoreOrbContainer) ScoreOrbContainer->ResetDevelopmentEffects();
+	ResetLastSpurtVisual();
+	UnbindPlacementEditControls();
+	CloseEquipmentManualDialog();
 	Super::NativeOnDeactivated();
+	UpdateExpansionHotspots();
 
 	// 스택이 이 위젯을 Collapsed 시키면 Slate 가 틱을 안 돌려 보간이 중간값에서 얼어붙는다 → 떠나기 전에 목표로 스냅
 	DockSlideAlpha = bDockHidden ? 1.f : 0.f;
@@ -614,9 +1247,11 @@ void UOfficeMainWidget::NativeOnDeactivated()
 
 	if (WorkstationOpenButton) WorkstationOpenButton->OnClicked().Clear();
 	if (DecorationOpenButton) DecorationOpenButton->OnClicked().Clear();
+	if (TrainingCenterOpenButton) TrainingCenterOpenButton->OnClicked().Clear();
+	if (BusinessTripOpenButton) BusinessTripOpenButton->OnClicked().Clear();
 	if (EmployeeButton) EmployeeButton->OnClicked().Clear();
-	if (OfficeUpgradeButton) OfficeUpgradeButton->OnClicked().Clear();
 	if (RecruitmentButton) RecruitmentButton->OnClicked().Clear();
+	if (EquipmentGachaButton) EquipmentGachaButton->OnClicked().Clear();
 	if (CollectionBtn) CollectionBtn->OnClicked().Clear();
 
 	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
@@ -654,6 +1289,97 @@ void UOfficeMainWidget::NativeOnDeactivated()
 
 // ========== 버튼 핸들러 ==========
 
+void UOfficeMainWidget::RefreshCompanyFeatureButtons()
+{
+	USideContentSubsystem* Side = GetGameInstance() ? GetGameInstance()->GetSubsystem<USideContentSubsystem>() : nullptr;
+	const int32 BuildingIndex = GetCurrentBuildingIDAsInt();
+	const auto RefreshButton = [Side, BuildingIndex](UOfficeFeatureButtonWidget* FeatureButton, FName FeatureKey)
+	{
+		if (!FeatureButton) return;
+		int32 RequiredLevel = 0;
+		FText DisplayName;
+		const bool bUnlocked = Side && Side->GetCompanyFeatureUnlock(BuildingIndex, FeatureKey, RequiredLevel, DisplayName);
+		FeatureButton->SetVisibility(DisplayName.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::Visible);
+		FeatureButton->SetButtonText(DisplayName);
+		if (RequiredLevel > 0)
+		{
+			FeatureButton->SetFeatureLocked(!bUnlocked,
+				FText::Format(NSLOCTEXT("Office", "CompanyFeatureLevel", "Lv.{0}"), FText::AsNumber(RequiredLevel)),
+				CompanyFeatureLockReason(RequiredLevel));
+		}
+	};
+	RefreshButton(TrainingCenterOpenButton, TEXT("TrainingCenter"));
+	RefreshButton(BusinessTripOpenButton, TEXT("BusinessTrip"));
+}
+
+void UOfficeMainWidget::OnCompanyTierUnlocked(int32 NewTier)
+{
+	RefreshCompanyFeatureButtons();
+}
+
+bool UOfficeMainWidget::CanOpenCompanyFeature(FName FeatureKey)
+{
+	USideContentSubsystem* Side = GetGameInstance() ? GetGameInstance()->GetSubsystem<USideContentSubsystem>() : nullptr;
+	int32 RequiredLevel = 0;
+	FText DisplayName;
+	if (Side && Side->GetCompanyFeatureUnlock(GetCurrentBuildingIDAsInt(), FeatureKey, RequiredLevel, DisplayName)) return true;
+	RefreshCompanyFeatureButtons();
+	if (RequiredLevel > 0)
+	{
+		if (UUIManagerSubsystem* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+		{
+			UIManager->ShowRejectNotification(CompanyFeatureLockReason(RequiredLevel));
+		}
+	}
+	return false;
+}
+
+void UOfficeMainWidget::OnBusinessTripButtonClicked()
+{
+	if (!CanOpenCompanyFeature(TEXT("BusinessTrip"))) return;
+	const int32 BuildingIndex = GetCurrentBuildingIDAsInt();
+	if (BuildingIndex == INDEX_NONE) return;
+
+	UTableManagerSubsystem* TableMgr = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+	UUIManagerSubsystem* UIManager = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+	USaveLoadManager* SaveMgr = GetWorld()->GetGameInstance()->GetSubsystem<USaveLoadManager>();
+	if (!TableMgr || !UIManager || !UIManager->GetUIBase() || !SaveMgr) return;
+
+	TSubclassOf<UUserWidget> WidgetClass = TableMgr->GetWidgetClass(EWidgetType::BusinessTripPanel);
+	if (!WidgetClass) return;
+
+	// 오피스는 이미 한 건물 안이라 허브를 거치지 않는다 — 그 건물의 출장으로 바로 간다
+	UCommonActivatableWidget* Pushed = UIManager->GetUIBase()->PushPromptClass(
+		TSubclassOf<UCommonActivatableWidget>(WidgetClass));
+	if (UBusinessTripPanelWidget* Panel = Cast<UBusinessTripPanelWidget>(Pushed))
+	{
+		Panel->Configure(BuildingIndex, SaveMgr->GetBuildingCompanyType(BuildingIndex));
+	}
+}
+
+void UOfficeMainWidget::OnTrainingCenterButtonClicked()
+{
+	if (!CanOpenCompanyFeature(TEXT("TrainingCenter"))) return;
+	const int32 BuildingIndex = GetCurrentBuildingIDAsInt();
+	if (BuildingIndex == INDEX_NONE) return;
+
+	UTableManagerSubsystem* TableMgr = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+	UUIManagerSubsystem* UIManager = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+	USaveLoadManager* SaveMgr = GetWorld()->GetGameInstance()->GetSubsystem<USaveLoadManager>();
+	if (!TableMgr || !UIManager || !UIManager->GetUIBase() || !SaveMgr) return;
+
+	TSubclassOf<UUserWidget> WidgetClass = TableMgr->GetWidgetClass(EWidgetType::TrainingCenterPanel);
+	if (!WidgetClass) return;
+
+	// 오피스는 이미 한 건물 안이라 허브를 거치지 않는다 — 그 건물의 기술 연구소로 바로 간다
+	UCommonActivatableWidget* Pushed = UIManager->GetUIBase()->PushPromptClass(
+		TSubclassOf<UCommonActivatableWidget>(WidgetClass));
+	if (UTrainingCenterPanelWidget* Panel = Cast<UTrainingCenterPanelWidget>(Pushed))
+	{
+		Panel->Configure(BuildingIndex, SaveMgr->GetBuildingCompanyType(BuildingIndex));
+	}
+}
+
 void UOfficeMainWidget::OnWorkstationButtonClicked()
 {
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Workstation button clicked"));
@@ -666,13 +1392,13 @@ void UOfficeMainWidget::OnWorkstationButtonClicked()
 	TSubclassOf<UUserWidget> WorkstationPanel = TableMgr->GetWidgetClass(EWidgetType::OfficeWorkstationPanel);
 	if (WorkstationPanel)
 	{
-		UIManager->GetUIBase()->PushBottomClass(WorkstationPanel.Get());
-	}
-
-	// M7 미션 가이드 — [책상 배치]→배치 모드 전이
-	if (UMissionManagerSubsystem* M = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
-	{
-		M->NotifyPlacementModeOpened(EOfficePlacementKind::Desk);
+		if (UIManager->GetUIBase()->PushBottomClass(WorkstationPanel.Get()))
+		{
+			if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
+			{
+				MissionMgr->NotifyPlacementModeOpened(EOfficePlacementKind::Desk);
+			}
+		}
 	}
 }
 
@@ -724,6 +1450,12 @@ void UOfficeMainWidget::OnEmployeeButtonClicked()
 
 	if (!TableMgr || !UIManager || !UIManager->GetUIBase()) return;
 
+	// 사무실 직원 패널(할 일 순 첫 직원) — 위젯 클래스 미등록이면 아래 풀스크린 직원창으로 폴백
+	if (UOfficeEmployeePanelWidget::PushForEmployee(this, UOfficeEmployeePanelWidget::FindFirstTodoEmployeeId(this)))
+	{
+		return;
+	}
+
 	// 직원창 = 풀스크린 UI_EmployeeWindow
 	TSubclassOf<UUserWidget> EmployeeWindow = TableMgr->GetWidgetClass(EWidgetType::EmployeeWindow);
 	if (!EmployeeWindow)
@@ -732,7 +1464,7 @@ void UOfficeMainWidget::OnEmployeeButtonClicked()
 		return;
 	}
 
-	UIManager->GetUIBase()->PushPromptClass(EmployeeWindow.Get());
+	if (!UIManager->GetUIBase()->PushPromptClass(EmployeeWindow.Get())) return;
 
 	// 입력모드 쌍 — 닫힐 때 EmployeeWindow::NativeOnDeactivated 가 GoToNormalMode 복원
 	if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance()))
@@ -741,22 +1473,6 @@ void UOfficeMainWidget::OnEmployeeButtonClicked()
 		{
 			PC->GoToUIMode();
 		}
-	}
-}
-
-void UOfficeMainWidget::OnOfficeUpgradeButtonClicked()
-{
-	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] OfficeUpgrade button clicked"));
-
-	UTableManagerSubsystem* TableMgr = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
-	UUIManagerSubsystem* UIManager = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
-
-	if (!TableMgr || !UIManager || !UIManager->GetUIBase()) return;
-
-	TSubclassOf<UUserWidget> UpgradePanel = TableMgr->GetWidgetClass(EWidgetType::OfficeUpgradePanel);
-	if (UpgradePanel)
-	{
-		UIManager->GetUIBase()->PushBottomClass(UpgradePanel.Get());
 	}
 }
 
@@ -770,17 +1486,31 @@ void UOfficeMainWidget::OnRecruitmentButtonClicked()
 
 	if (!GI || !TableMgr || !UIManager || !UIManager->GetUIBase()) return;
 
-	TSubclassOf<UUserWidget> RecruitmentPanel = TableMgr->GetWidgetClass(EWidgetType::OfficeRecruitmentPanel);
+	TSubclassOf<UUserWidget> RecruitmentPanel = TableMgr->GetWidgetClass(EWidgetType::OfficeRecruitmentModal);
 	if (RecruitmentPanel)
 	{
 		UCommonActivatableWidget* Widget = UIManager->GetUIBase()->PushPromptClass(RecruitmentPanel.Get());
 
-		if (UOfficeRecruitmentPanelWidget* RecruitmentWidget = Cast<UOfficeRecruitmentPanelWidget>(Widget))
+		if (UOfficeRecruitmentModalWidget* RecruitmentWidget = Cast<UOfficeRecruitmentModalWidget>(Widget))
 		{
 			int32 BuildingIndex = GI->GetCurrentManagedBuildingIndex();
 			RecruitmentWidget->SetBuildingIndex(BuildingIndex);
 		}
 	}
+}
+
+void UOfficeMainWidget::OnEquipmentGachaButtonClicked()
+{
+	UTableManagerSubsystem* TableMgr = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+	UUIManagerSubsystem* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+	if (!TableMgr || !UIManager || !UIManager->GetUIBase()) return;
+
+	const TSubclassOf<UUserWidget> PanelClass = TableMgr->GetWidgetClass(EWidgetType::EquipmentGachaPanel);
+	if (!PanelClass) return;
+	UIManager->GetUIBase()->PushPromptClass(PanelClass.Get(), [](UCommonActivatableWidget& Widget)
+	{
+		if (auto* Panel = Cast<UEquipmentGachaPanelWidget>(&Widget)) Panel->Open();
+	});
 }
 
 void UOfficeMainWidget::OnCollectionBtnClicked()
@@ -863,6 +1593,7 @@ void UOfficeMainWidget::BindStageProgressDelegates()
 	StageMgr->OnScoreOrbRequested.AddDynamic(this, &UOfficeMainWidget::OnScoreOrbRequestedReceived);
 	StageMgr->OnLifecycleChanged.AddDynamic(this, &UOfficeMainWidget::OnLifecycleChangedHandler);
 	StageMgr->OnFeverChanged.AddDynamic(this, &UOfficeMainWidget::OnFeverChangedReceived);
+	StageMgr->OnTierUnlocked.AddDynamic(this, &UOfficeMainWidget::OnCompanyTierUnlocked);
 
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] StageProgressManager delegates bound"));
 }
@@ -882,65 +1613,41 @@ void UOfficeMainWidget::UnbindStageProgressDelegates()
 	StageMgr->OnScoreOrbRequested.RemoveAll(this);
 	StageMgr->OnLifecycleChanged.RemoveAll(this);
 	StageMgr->OnFeverChanged.RemoveAll(this);
+	StageMgr->OnTierUnlocked.RemoveAll(this);
 
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] StageProgressManager delegates unbound"));
 }
 
 void UOfficeMainWidget::OnTimerUpdated(float RemainingTime)
 {
-	UOfficeStageProgressManager* StageMgr = GetWorld()->GetSubsystem<UOfficeStageProgressManager>();
-	const float TotalTime = (StageMgr && StageMgr->GetTotalDuration() > 0.0f)
-		? StageMgr->GetTotalDuration()
-		: 15.0f;
-
-	if (TimerRing)
+	const UOfficeStageProgressManager* StageMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	const bool bComplete = RemainingTime <= 0.f;
+	if (TimerRing) TimerRing->SetVisibility(ESlateVisibility::Collapsed);
+	if (ProcessTimeLabel)
 	{
-		TimerRing->SetPercent(TotalTime > 0.0f ? RemainingTime / TotalTime : 0.0f);
+		ProcessTimeLabel->SetText(NSLOCTEXT("Office", "TimeUntilComplete", "완료까지"));
+		ProcessTimeLabel->SetVisibility(bComplete ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
 	}
-
 	if (ProcessTimeText)
 	{
-		// 단위 "s" 생략 — 링이 "이건 시간"을 이미 말하고, 84px 링 안쪽(70px)에 44px 글자가 안 들어간다.
-		FString TimeString;
-		if (RemainingTime <= 0.0f)
-		{
-			TimeString = TEXT("");
-		}
-		else if (RemainingTime <= 5.0f)
-		{
-			TimeString = FString::Printf(TEXT("%.1f"), RemainingTime);
-		}
-		else
-		{
-			TimeString = FString::Printf(TEXT("%d"), FMath::CeilToInt(RemainingTime));
-		}
-		ProcessTimeText->SetText(FText::FromString(TimeString));
+		ProcessTimeText->SetText(bComplete ? NSLOCTEXT("Office", "DevelopmentComplete", "개발 완료")
+			: FText::Format(NSLOCTEXT("Office", "DevelopmentSeconds", "{0}초"), FText::AsNumber(FMath::CeilToInt(RemainingTime))));
 	}
+	const bool bPaused = StageMgr && (StageMgr->IsEventPaused() || StageMgr->IsBoostGamblePending());
+	const bool bEmphasize = !bComplete && RemainingTime <= 3.f && !bPaused && !FMotionGate::IsReduced();
+	if (!bEmphasize) ResetLastSpurtVisual();
+	else bLastSpurtVisual = true;
+}
 
-	UpdateTimerRingColor(RemainingTime);
-
-	// 후반 라스트 스퍼트 — 잔여 40% 진입 시 1회 큐 (사운드 + 가벼운 셰이크). 깊은 템포 가속은 추후.
-	if (!bLateStageEscalated && TotalTime > 0.0f && RemainingTime > 0.0f
-		&& (RemainingTime / TotalTime) <= 0.4f)
-	{
-		bLateStageEscalated = true;
-		bLastSpurtVisual = true;
-		if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance()))
-		{
-			if (USoundManagerSubsystem* SoundMgr = GI->GetSubsystem<USoundManagerSubsystem>())
-			{
-				SoundMgr->PlaySound(FName("Dev_LastSpurt"));
-			}
-		}
-		if (!USettingsManagerSubsystem::IsReduceMotion(this))
-		{
-			if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
-			{
-				// 막판 스퍼트 = 가벼운 타격 파형 (착지 thud 와 구분). 새 파형이 이미 가벼워 스케일 1.0
-				PC->ClientStartCameraShake(ULightImpactCameraShake::StaticClass(), 1.0f);
-			}
-		}
-	}
+void UOfficeMainWidget::UpdateDevelopmentEffectArea()
+{
+	// 막은 화면 전체에 칠하고 상단 바 쪽만 옅게 둔다 — 바 판 영역만 넘긴다
+	if (!ScoreOrbContainer || !StripBG) return;
+	const FGeometry CanvasGeo = ScoreOrbContainer->GetCanvasGeometry();
+	const FGeometry StripGeo = StripBG->GetCachedGeometry();
+	ScoreOrbContainer->SetDevelopmentStripRect(
+		CanvasGeo.AbsoluteToLocal(StripGeo.LocalToAbsolute(FVector2D::ZeroVector)),
+		CanvasGeo.AbsoluteToLocal(StripGeo.LocalToAbsolute(StripGeo.GetLocalSize())));
 }
 
 void UOfficeMainWidget::OnDisciplineScoresUpdatedReceived(
@@ -962,6 +1669,10 @@ void UOfficeMainWidget::OnDisciplineScoresUpdatedReceived(
 void UOfficeMainWidget::OnStageResultEffectReceived()
 {
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Stage result effect received"));
+
+	// 팝업 지연 타이머가 설치되기 전에 월드 배속을 복원해야 0.9초가 실시간과 일치한다.
+	ApplyDevSpeed(1.0f);
+	OnTimerUpdated(0.f);
 
 	// 라운드 종료 — 라스트 스퍼트 펄스 원복. 실패든 성공이든 반드시 돈다
 	ResetLastSpurtVisual();
@@ -992,10 +1703,16 @@ void UOfficeMainWidget::OnProgressDataRestoredReceived()
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Progress data restored from save, updating UI"));
 	UpdateProjectCardProgress();
 	RefreshLeftSlotState();
+	const UOfficeStageProgressManager* StageMgr = GetWorld()->GetSubsystem<UOfficeStageProgressManager>();
+	if (StageMgr && StageMgr->GetLifecycle() == EProjectLifecycle::LaunchPending)
+	{
+		ShowLaunchConfirmModal();
+	}
 }
 
 void UOfficeMainWidget::OnProjectSelectedReceived()
 {
+	if (ScoreOrbContainer) ScoreOrbContainer->ResetDevelopmentEffects();
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Project selected, updating card UI"));
 
 	// 새 프로젝트 선택 → 다음 개발 대비 1회성 플래그 리셋 (StepStart 이펙트 없이 시작되는 경로 대비)
@@ -1008,7 +1725,7 @@ void UOfficeMainWidget::OnProjectSelectedReceived()
 }
 
 void UOfficeMainWidget::OnScoreOrbRequestedReceived(
-	FVector WorldPos, int32 StepNumber, float Score, bool bIsCritical, int32 OrbCount)
+	FVector WorldPos, int32 StepNumber, float Score, bool bIsCritical, int32 OrbCount, bool bPlaySpectacle)
 {
 	if (!ScoreOrbContainer)
 	{
@@ -1018,6 +1735,10 @@ void UOfficeMainWidget::OnScoreOrbRequestedReceived(
 
 	APlayerController* PC = GetWorld()->GetFirstPlayerController();
 	if (!PC) return;
+
+	// 사무실 개발 = 구슬은 모니터 위에서 출발하고(책상 작업물 조각도 함께 난다), "+N" 숫자는 그대로 머리 위에서 뜬다
+	FVector OrbWorldPos = WorldPos;
+	UWorkstationDevFxComponent::HandleScoreOrb(GetWorld(), WorldPos, StepNumber, bIsCritical, bPlaySpectacle, OrbWorldPos);
 
 	// OrbCanvas의 Geometry (모든 좌표를 이 Canvas 로컬로 변환)
 	FGeometry CanvasGeo = ScoreOrbContainer->GetCanvasGeometry();
@@ -1059,78 +1780,23 @@ void UOfficeMainWidget::OnScoreOrbRequestedReceived(
 
 	// 3. 구슬 다중 스폰 (둘 다 Canvas 로컬 좌표) — 루트 느낌, 많을수록 좋아 기본 개수 유지
 	// 정상 틱 = orb 1개 조용한 드립 / 크리 = 버스트
-	ScoreOrbContainer->SpawnOrbBurst(StartLocal, TargetLocal, StepNumber, bIsCritical, bIsCritical ? 5 : OrbCount);
+	FVector2D OrbStartLocal = StartLocal;
+	FVector2D OrbViewportPos;
+	if (!OrbWorldPos.Equals(WorldPos) && UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(PC, OrbWorldPos, OrbViewportPos, true))
+	{
+		OrbStartLocal = CanvasGeo.AbsoluteToLocal(ViewportGeo.LocalToAbsolute(OrbViewportPos));
+	}
+	ScoreOrbContainer->SpawnOrbBurst(OrbStartLocal, TargetLocal, StepNumber, bIsCritical, OrbCount);
 
 	// 점수 숫자 "+N"도 같은 시작점에서 orb와 함께 (스크린스페이스, C++ 애니)
 	ScoreOrbContainer->SpawnScoreNumber(StartLocal, static_cast<int64>(Score), StepNumber, bIsCritical);
 
-	// 4. 크리 때만 타격 스펙터클 (월드 Niagara + 셰이크 + 음) — 1초 드립에선 매 틱 재생 = 스팸
-	if (bIsCritical)
+	// 분할 목적지는 같은 크리 색을 유지하고 원본 기여에서만 크리 음을 재생한다.
+	if (bIsCritical && bPlaySpectacle)
 	{
-		PlayDevSpectacleFeedback(WorldPos, true);
-	}
-}
-
-void UOfficeMainWidget::PlayDevSpectacleFeedback(const FVector& WorldPos, bool bIsCritical)
-{
-	UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
-	if (!GI) return;
-
-	// 월드 Niagara — 평타=알록달록 루트 튐(DevScoreHit), 크리=흰 스파이크(DevCrit).
-	// GetVFXAsset 은 행/에셋 미배치 시 nullptr 반환 → 스폰 자체를 건너뛰어 안전(DT_VFX 채워지기 전 단계 대비).
-	if (UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>())
-	{
-		const EVFXType HitType = bIsCritical ? EVFXType::DevCrit : EVFXType::DevScoreHit;
-
-		bool bHasRow = false;
-		const FVFXTableRow RowData = TableMgr->GetVFXData(HitType, bHasRow);
-		if (UNiagaraSystem* HitSystem = TableMgr->GetVFXAsset(HitType))
+		if (USoundManagerSubsystem* SoundMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<USoundManagerSubsystem>() : nullptr)
 		{
-			// 좌석 직원 기준 위치는 DT_VFX LocationOffset 으로 조정(라이브 튜닝, 리빌드 불필요)
-			const FVector SpawnPos = WorldPos + (bHasRow ? RowData.LocationOffset : FVector(0.f, 0.f, 60.f));
-			const float SpawnScale = bHasRow ? RowData.DefaultScale : 1.0f;
-			UNiagaraComponent* HitComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-				GetWorld(), HitSystem, SpawnPos, FRotator::ZeroRotator,
-				FVector(SpawnScale), /*bAutoDestroy*/ true);
-
-			// KiAura 는 Infinite 루프라 bAutoDestroy(완료 시 정리)나 Deactivate 만으론 안 사라질 수 있음.
-			// 2단계 종료: BurstDuration 에 Deactivate(방출 중단, 잔여 페이드) → 꼬리 뒤 DestroyComponent 로 확실히 회수.
-			// 평타는 매 기여마다 떠서 길면 누적·뭉개짐 → 짧은 팝(0.3s). 크리는 드무니 길게(1.2s) 머무름.
-			if (HitComp)
-			{
-				const float BurstDuration = bIsCritical ? 1.2f : 0.3f;
-				const float FadeTail = 0.6f;
-				TWeakObjectPtr<UNiagaraComponent> WeakComp(HitComp);
-				FTimerManager& TimerMgr = GetWorld()->GetTimerManager();
-
-				FTimerHandle DeactivateHandle;
-				TimerMgr.SetTimer(DeactivateHandle, [WeakComp]()
-				{
-					if (WeakComp.IsValid()) { WeakComp->Deactivate(); }
-				}, BurstDuration, false);
-
-				FTimerHandle DestroyHandle;
-				TimerMgr.SetTimer(DestroyHandle, [WeakComp]()
-				{
-					if (WeakComp.IsValid()) { WeakComp->DestroyComponent(); }
-				}, BurstDuration + FadeTail, false);
-			}
-		}
-	}
-
-	// 사운드 — 한 액션 한 사운드. 짧고 굵은 percussive(클립 미배정이면 무음, 죽은 태그 아님).
-	if (USoundManagerSubsystem* SoundMgr = GI->GetSubsystem<USoundManagerSubsystem>())
-	{
-		SoundMgr->PlaySound(bIsCritical ? FName("Dev_Crit") : FName("Dev_ScoreHit"));
-	}
-
-	// 크리 전용 — 라이트 카메라 셰이크(기존 건물 착지 패턴 재사용, 작은 Scale 로 "쿵" 정도).
-	if (bIsCritical && !USettingsManagerSubsystem::IsReduceMotion(this))
-	{
-		if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
-		{
-			// 개발 크리티컬 = 가벼운 타격 파형 (착지 thud 축소판이 아닌 독립 응답). 스케일 1.0
-			PC->ClientStartCameraShake(ULightImpactCameraShake::StaticClass(), 1.0f);
+			SoundMgr->PlaySound(FName("Dev_Crit"));
 		}
 	}
 }
@@ -1240,37 +1906,30 @@ void UOfficeMainWidget::SpawnFeverBurst(int32 MaxWorkers)
 
 void UOfficeMainWidget::PlayCategoryMilestone(int32 CategoryIndex)
 {
-	UProgressBar* Bar = StripStageBars.IsValidIndex(CategoryIndex) ? StripStageBars[CategoryIndex] : nullptr;
+	const UOfficeStageProgressManager* StageMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	if (!StageMgr || !StageMgr->IsTimerRunning()) return;
 
-	// 비파괴 팝 — RenderScale 로 톡 부풀렸다 0.18s 뒤 원복 (WBP 스타일 색은 안 건드림)
-	if (Bar)
+	// 그 분야가 주 직능인 직원이 같은 순간 기뻐한다(칸 순서 = 스텝 순서)
+	const FStageProgressData& MilestoneProgress = StageMgr->GetProgressData();
+	if (MilestoneProgress.Steps.IsValidIndex(CategoryIndex))
 	{
-		Bar->SetRenderScale(FVector2D(1.12f, 1.12f));
-		TWeakObjectPtr<UProgressBar> WeakBar(Bar);
-		if (UWorld* World = GetWorld())
-		{
-			FTimerHandle RevertHandle;
-			World->GetTimerManager().SetTimer(RevertHandle, [WeakBar]()
-			{
-				if (WeakBar.IsValid()) { WeakBar->SetRenderScale(FVector2D(1.0f, 1.0f)); }
-			}, 0.18f, false);
-		}
+		// 책상 메모지가 먼저 — 몰입 가속을 거둔 뒤에 반응 연출이 기준 타자 속도를 읽는다
+		UWorkstationDevFxComponent::NotifyDisciplineMilestone(GetWorld(), MilestoneProgress.Steps[CategoryIndex].DisciplineSlot, CategoryIndex + 1);
+		UEmployeeReactionComponent::NotifyDisciplineMilestone(GetWorld(), MilestoneProgress.Steps[CategoryIndex].DisciplineSlot);
 	}
 
-	// "달성!" 도장 — 셀 중앙 스크린스페이스 팝. 폰트는 WBP 소유(Val) 복사 (경로 하드코딩 금지)
-	UWidget* Cell = StripStageCells.IsValidIndex(CategoryIndex) ? StripStageCells[CategoryIndex] : nullptr;
-	UCommonTextBlock* FontSrc = StripStageVals.IsValidIndex(CategoryIndex) ? StripStageVals[CategoryIndex] : nullptr;
-	if (ScoreOrbContainer && Cell && FontSrc)
+	// 화면 가운데 배너 대신 목표에 닿은 칸 아래에서 탭이 빠져나온다 — 폭은 칸 게이지, 위치는 상단 바 아래 가장자리
+	UWidget* Gauge = StripStageBars.IsValidIndex(CategoryIndex) ? StripStageBars[CategoryIndex] : nullptr;
+	if (!Gauge) Gauge = StripStageCells.IsValidIndex(CategoryIndex) ? StripStageCells[CategoryIndex] : nullptr;
+	if (ScoreOrbContainer && Gauge && StripBG)
 	{
 		const FGeometry CanvasGeo = ScoreOrbContainer->GetCanvasGeometry();
-		const FGeometry& CellGeo = Cell->GetCachedGeometry();
-		const FVector2D CenterLocal = CanvasGeo.AbsoluteToLocal(CellGeo.LocalToAbsolute(CellGeo.GetLocalSize() * 0.5f));
-
-		FSlateFontInfo StampFont = FontSrc->GetFont();
-		StampFont.Size = 40;
-		ScoreOrbContainer->SpawnStampText(CenterLocal,
-			NSLOCTEXT("StageProgress", "StageStamp", "달성!"),
-			UGlobalUtilFunctions::GetStepColor(CategoryIndex + 1), StampFont);
+		const FGeometry GaugeGeo = Gauge->GetCachedGeometry();
+		const FGeometry StripGeo = StripBG->GetCachedGeometry();
+		const FVector2D GaugeMin = CanvasGeo.AbsoluteToLocal(GaugeGeo.LocalToAbsolute(FVector2D::ZeroVector));
+		const FVector2D GaugeMax = CanvasGeo.AbsoluteToLocal(GaugeGeo.LocalToAbsolute(GaugeGeo.GetLocalSize()));
+		const float StripBottom = CanvasGeo.AbsoluteToLocal(StripGeo.LocalToAbsolute(StripGeo.GetLocalSize())).Y;
+		ScoreOrbContainer->PlayDevelopmentGoalTab(CategoryIndex, FVector2D(GaugeMin.X, StripBottom), GaugeMax.X - GaugeMin.X);
 	}
 
 	if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance()))
@@ -1282,59 +1941,40 @@ void UOfficeMainWidget::PlayCategoryMilestone(int32 CategoryIndex)
 	}
 }
 
-void UOfficeMainWidget::PlayLaunchClimax()
+void UOfficeMainWidget::PlayLaunchClimax(bool bManufacturingSuccess)
 {
 	UWorld* World = GetWorld();
 	UCGGameInstance* GI = World ? Cast<UCGGameInstance>(World->GetGameInstance()) : nullptr;
 	if (!GI) return;
 
 	UOfficeStageProgressManager* StageMgr = World->GetSubsystem<UOfficeStageProgressManager>();
-	const EQualityGrade Grade = StageMgr ? StageMgr->GetCurrentQualityGrade() : EQualityGrade::C;
+	const EQualityGrade Grade = !bManufacturingSuccess && StageMgr ? StageMgr->GetCurrentQualityGrade() : EQualityGrade::Max;
 
-	// 등급 비례 강도 (C=1.0 ~ S=2.0)
-	float Intensity = 1.0f;
-	switch (Grade)
-	{
-	case EQualityGrade::S: Intensity = 2.0f; break;
-	case EQualityGrade::A: Intensity = 1.6f; break;
-	case EQualityGrade::B: Intensity = 1.3f; break;
-	default: Intensity = 1.0f; break;
-	}
+	constexpr float Intensity = 1.0f;
 
 	// 1) 좋은 결과(B 이상)만 전원 기립 환호 — 그 외는 매니저의 CheerSitting 을 그대로 둠(전 등급 기립 방지 + 매니저 호출 안 죽임)
-	const bool bGoodResult = static_cast<uint8>(Grade) >= static_cast<uint8>(EQualityGrade::B);
-	if (StageMgr && bGoodResult) { StageMgr->NotifyEmployeesCheerStandUp(); }
-
-	// 2) 스크린 컨페티 팝퍼 — 축하 언어. KiAura(전투 오라)는 피버 전용으로 은퇴 (직원 부착 연출 기각, 2026-07-11)
-	if (ScoreOrbContainer)
+	const bool bGoodResult = bManufacturingSuccess || static_cast<uint8>(Grade) >= static_cast<uint8>(EQualityGrade::B);
+	if (bGoodResult)
 	{
-		int32 Pieces = 24;
-		float GoldRatio = 0.1f;
-		switch (Grade)
+		if (StageMgr && !bManufacturingSuccess) StageMgr->NotifyEmployeesCheerStandUp();
+		// 의자 밀림·회전 + 두 번 폴짝·웃음 + 메모지 팔랑, 카메라는 0.5초에 4% 당김(흔들림 없음 — 결과 창이 닫히면 원복)
+		UWorkstationDevFxComponent::NotifyLaunchCheer(World);
+		if (!USettingsManagerSubsystem::IsReduceMotion(this))
 		{
-		case EQualityGrade::S: Pieces = 90; GoldRatio = 0.5f;  break;
-		case EQualityGrade::A: Pieces = 60; GoldRatio = 0.35f; break;
-		case EQualityGrade::B: Pieces = 40; GoldRatio = 0.2f;  break;
-		default: break;
-		}
-		if (USettingsManagerSubsystem::IsReduceMotion(this)) Pieces /= 2;
-		ScoreOrbContainer->PlayConfettiBurst(Pieces, GoldRatio);
-	}
-
-	// 3) 화면 플래시 — FeverScreenTint 재사용(흰빛 강하게 → 0으로 페이드). 등급 높을수록 강함.
-	if (FeverScreenTint)
-	{
-		FeverOverlayAlpha = FMath::Clamp(0.45f + 0.2f * Intensity, 0.0f, 0.9f);
-		FeverOverlayTargetAlpha = 0.0f;
-		FeverScreenTint->SetColorAndOpacity(FLinearColor(1.0f, 0.96f, 0.85f, 1.0f));
-		FeverScreenTint->SetRenderOpacity(FeverOverlayAlpha);
-		FeverScreenTint->SetVisibility(ESlateVisibility::HitTestInvisible);
-		if (!World->GetTimerManager().IsTimerActive(FeverOverlayTimerHandle))
-		{
-			World->GetTimerManager().SetTimer(FeverOverlayTimerHandle, this,
-				&UOfficeMainWidget::TickFeverOverlay, 0.03f, true);
+			if (AOfficeCameraPawn* Camera = Cast<AOfficeCameraPawn>(UGameplayStatics::GetPlayerPawn(this, 0)))
+			{
+				Camera->PlayPresentationPullIn(0.04f, 0.5f);
+			}
 		}
 	}
+
+	// 「개발 종료!」 판은 두지 않는다 — 0.9초 뒤 결과 창 제목이 같은 말을 하므로 축하는 막과 불꽃만 맡는다
+	UpdateDevelopmentEffectArea();
+	if (ScoreOrbContainer) ScoreOrbContainer->PlayDevelopmentFireworks(Intensity);
+	// 불꽃의 가는 밝은 꼬리가 보이도록 기존 전체 화면 흰빛을 끈다.
+	FeverOverlayAlpha = FeverOverlayTargetAlpha = 0.f;
+	World->GetTimerManager().ClearTimer(FeverOverlayTimerHandle);
+	if (FeverScreenTint) FeverScreenTint->SetVisibility(ESlateVisibility::Collapsed);
 
 	// 4) 출시 사운드
 	if (USoundManagerSubsystem* SoundMgr = GI->GetSubsystem<USoundManagerSubsystem>())
@@ -1342,30 +1982,31 @@ void UOfficeMainWidget::PlayLaunchClimax()
 		SoundMgr->PlaySound(FName("Dev_LaunchClimax"));
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Launch climax (grade %s, intensity %.1f)"),
-		*QualityGradeToAlphabetString(Grade), Intensity);
+	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Completion climax (manufacturing=%d, intensity %.1f)"),
+		bManufacturingSuccess, Intensity);
 }
 
 void UOfficeMainWidget::OnStepStartEffectReceived()
 {
+	if (ScoreOrbContainer) ScoreOrbContainer->ResetDevelopmentEffects();
 	// 새 개발 시작 — 마일스톤/escalate 1회성 플래그 리셋
 	for (bool& bReached : bCategoryMilestoneReached) { bReached = false; }
 	bLateStageEscalated = false;
 	ResetLastSpurtVisual();
 
-	ShowStepStartEffect(1);
+	// 책상 — 지난 판을 거두고 모니터가 화면 왼쪽부터 차례로 켜진다
+	if (AOfficeCameraPawn* Camera = Cast<AOfficeCameraPawn>(UGameplayStatics::GetPlayerPawn(this, 0)))
+	{
+		Camera->ReleasePresentationPullIn(0.3f);
+	}
+	UWorkstationDevFxComponent::NotifyDevelopmentStart(GetWorld());
+
+	ShowStepStartEffect();
 
 	// NameBar를 모드별 "개발 중" 상태로 전환 + 버튼 숨김
 	RefreshProjectNameBar();
 }
 
-void UOfficeMainWidget::UpdateTimerRingColor(float RemainingTime)
-{
-	if (!TimerRing) return;
-
-	const float T = FMath::Clamp(1.0f - RemainingTime / TimerWarnSeconds, 0.0f, 1.0f);
-	TimerRing->SetFillColor(FMath::Lerp(TimerRingGold, TimerRingRed, T));
-}
 
 void UOfficeMainWidget::UpdateProjectCardProgress()
 {
@@ -1467,11 +2108,6 @@ void UOfficeMainWidget::BindOperationDelegates()
 		OperationMgr->OnOperationCompleted.AddDynamic(this, &UOfficeMainWidget::OnOperationCompletedReceived);
 	}
 
-	if (ULaunchReactionSubsystem* Reactions = GetWorld() ? GetWorld()->GetSubsystem<ULaunchReactionSubsystem>() : nullptr)
-	{
-		Reactions->OnReactionReady.AddUniqueDynamic(this, &UOfficeMainWidget::OnLaunchReactionReady);
-	}
-
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Operation delegates bound"));
 }
 
@@ -1486,11 +2122,6 @@ void UOfficeMainWidget::UnbindOperationDelegates()
 		OperationMgr->OnOperationStarted.RemoveAll(this);
 		OperationMgr->OnOperationUpdated.RemoveAll(this);
 		OperationMgr->OnOperationCompleted.RemoveAll(this);
-	}
-
-	if (ULaunchReactionSubsystem* Reactions = GetWorld() ? GetWorld()->GetSubsystem<ULaunchReactionSubsystem>() : nullptr)
-	{
-		Reactions->OnReactionReady.RemoveAll(this);
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Operation delegates unbound"));
@@ -1572,28 +2203,29 @@ void UOfficeMainWidget::OnOperationCompletedReceived(int32 BuildingID, const FOp
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Operation completed for building %d, Project: %s"),
 		BuildingID, *Data.ProjectName);
 
-	// 완료 안내 = 토스트만 (가운데 NiagaraTextEffect 는 결산서에 가려 안 보이고 과잉이라 제거 2026-07-08)
-	UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
-	if (GI)
-	{
-		UUIManagerSubsystem* UIManager = GI->GetSubsystem<UUIManagerSubsystem>();
-		if (UIManager)
-		{
-			FText NotificationMessage = NSLOCTEXT("Operation", "OperationCompleteNotify", "프로젝트 운영이 완료되었습니다");
-			UIManager->ShowNotification(NotificationMessage, 3.0f, ENotificationType::Success);
-		}
-	}
-
 	if (UI_OfficeProjectCardCurrent)
 	{
 		UI_OfficeProjectCardCurrent->SwitchToStageMode();
 	}
 
 	ShowProjectReportModal(Data);
+
+	// 결산서가 이미 「운영 완료」를 말한다 ― 토스트는 결산서 위에 겹치므로 결산서를 못 띄웠을 때만 대신 알린다
+	if (!ActiveReportWidget)
+	{
+		UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
+		if (UUIManagerSubsystem* UIManager = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+		{
+			FText NotificationMessage = NSLOCTEXT("Operation", "OperationCompleteNotify", "프로젝트 운영이 완료되었습니다");
+			UIManager->ShowNotification(NotificationMessage, 3.0f, ENotificationType::Success);
+		}
+	}
 }
 
 void UOfficeMainWidget::OnSpeedToggleClickedHandler()
 {
+	const UOfficeStageProgressManager* StageMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	if (!StageMgr || !StageMgr->IsTimerRunning()) return;
 	ApplyDevSpeed(DevSpeedMultiplier > 1.5f ? 1.0f : 2.0f);
 }
 
@@ -1605,6 +2237,10 @@ void UOfficeMainWidget::ApplyDevSpeed(float NewSpeed)
 	if (UWorld* SpeedWorld = GetWorld())
 	{
 		UGameplayStatics::SetGlobalTimeDilation(SpeedWorld, NewSpeed);
+	}
+	if (StepStartBannerWidget)
+	{
+		StepStartBannerWidget->SetPresentationSpeed(NewSpeed);
 	}
 
 	RefreshSpeedIcon();
@@ -1733,111 +2369,48 @@ int32 UOfficeMainWidget::GetCurrentBuildingIDAsInt() const
 
 // ========== Step 시작 이펙트 ==========
 
-void UOfficeMainWidget::ShowStepStartEffect(int32 StepNumber)
+void UOfficeMainWidget::ShowStepStartEffect()
 {
-	UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
-	if (!GI) return;
+	RemoveStepStartEffect();
+	UWorld* EffectWorld = GetWorld();
+	UCGGameInstance* GI = GetGameInstance<UCGGameInstance>();
+	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	if (!EffectWorld || !TableMgr) return;
 
-	UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-	if (!TableMgr) return;
-
-	// 1. BlindMaskSweep 위젯
-	TSubclassOf<UUserWidget> BlindClass = TableMgr->GetWidgetClass(EWidgetType::BlindMaskSweep);
-	if (BlindClass)
+	const TSubclassOf<UUserWidget> BannerClass = TableMgr->GetWidgetClass(EWidgetType::DevelopmentStart);
+	if (!BannerClass || !BannerClass->IsChildOf(UDevelopmentBannerWidget::StaticClass()))
 	{
-		BlindMaskSweepWidget = CreateWidget<UUserWidget>(GetWorld(), BlindClass);
-		if (BlindMaskSweepWidget)
-		{
-			BlindMaskSweepWidget->AddToViewport(999);
-
-			if (UImage* SweepImage = Cast<UImage>(BlindMaskSweepWidget->GetWidgetFromName(TEXT("BlindMask_Sweep_2"))))
-			{
-				BlindMaskMID = SweepImage->GetDynamicMaterial();
-				if (BlindMaskMID)
-				{
-					BlindMaskMID->SetScalarParameterValue(TEXT("Progress"), 0.0f);
-					BlindMaskAnimElapsed = 0.0f;
-
-					GetWorld()->GetTimerManager().SetTimer(
-						BlindMaskAnimTimerHandle,
-						this,
-						&UOfficeMainWidget::UpdateBlindMaskAnimation,
-						0.016f,
-						true
-					);
-				}
-			}
-		}
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] DevelopmentStart banner is missing or incompatible in DT_WidgetClass."));
+		return;
 	}
+	StepStartBannerWidget = CreateWidget<UDevelopmentBannerWidget>(EffectWorld, BannerClass);
+	if (!StepStartBannerWidget) return;
 
-	// 2. TextGlitch 위젯
-	TSubclassOf<UUserWidget> GlitchClass = TableMgr->GetWidgetClass(EWidgetType::TextGlitch);
-	if (GlitchClass)
+	StepStartBannerWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
+	StepStartBannerWidget->SetPresentationSpeed(DevSpeedMultiplier);
+	StepStartBannerWidget->AddToViewport(1000);
+	StepStartBannerWidget->StartPresentation(USettingsManagerSubsystem::IsReduceMotion(this));
+	const float Duration = StepStartBannerWidget->GetPresentationDuration();
+	if (Duration <= 0.f)
 	{
-		StepStartGlitchWidget = CreateWidget<UTextGlitchEffectWidget>(GetWorld(), GlitchClass);
-		if (StepStartGlitchWidget)
-		{
-			StepStartGlitchWidget->SetTextFromString(TEXT("START!"));
-			StepStartGlitchWidget->AddToViewport(1000);
-		}
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] DevelopmentStart Presentation animation is not bound."));
+		RemoveStepStartEffect();
+		return;
 	}
-
-	// 3. 2초 후 이펙트 제거
-	if (UWorld* World = GetWorld())
-	{
-		World->GetTimerManager().SetTimer(
-			StepEffectTimerHandle,
-			this,
-			&UOfficeMainWidget::RemoveStepStartEffect,
-			2.0f,
-			false
-		);
-
-		// BlindMaskSweep 동안 swoosh looping + sin envelope (가운데 max, 양 끝 0)
-		if (USoundManagerSubsystem* SoundMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<USoundManagerSubsystem>() : nullptr)
-		{
-			BlindSweepVariantIdx = 0;
-			BlindSweepStartTime = World->GetTimeSeconds();
-			TWeakObjectPtr<USoundManagerSubsystem> WeakMgr(SoundMgr);
-			TWeakObjectPtr<UOfficeMainWidget> WeakSelf(this);
-			World->GetTimerManager().SetTimer(BlindSweepSoundHandle, FTimerDelegate::CreateLambda(
-				[WeakMgr, WeakSelf]()
-				{
-					if (!WeakMgr.IsValid() || !WeakSelf.IsValid()) return;
-					UWorld* W = WeakSelf->GetWorld();
-					if (!W) return;
-					float Elapsed = W->GetTimeSeconds() - WeakSelf->BlindSweepStartTime;
-					// 사운드는 visual(2.0s)보다 짧게 끝 — peak 도 visual 30% 시점으로 앞당김
-					constexpr float SoundDuration = 1.2f;
-					float T = FMath::Clamp(Elapsed / SoundDuration, 0.0f, 1.0f);
-					float Envelope = FMath::Sin(PI * T);  // 0→1→0 bell curve, peak at 0.6s
-					FName SoundID = FName(*FString::Printf(TEXT("BlindSweep_%d"), (WeakSelf->BlindSweepVariantIdx % 4) + 1));
-					WeakMgr->PlaySoundWithVolume(SoundID, Envelope);
-					WeakSelf->BlindSweepVariantIdx++;
-				}), 0.12f, true);
-		}
-	}
+	EffectWorld->GetTimerManager().SetTimer(StepEffectTimerHandle,
+		this, &UOfficeMainWidget::RemoveStepStartEffect, Duration, false);
 }
 
 void UOfficeMainWidget::RemoveStepStartEffect()
 {
-	if (GetWorld())
+	if (UWorld* EffectWorld = GetWorld())
 	{
-		GetWorld()->GetTimerManager().ClearTimer(BlindMaskAnimTimerHandle);
-		GetWorld()->GetTimerManager().ClearTimer(BlindSweepSoundHandle);
+		EffectWorld->GetTimerManager().ClearTimer(StepEffectTimerHandle);
 	}
-	BlindMaskMID = nullptr;
-
-	if (BlindMaskSweepWidget)
+	if (StepStartBannerWidget)
 	{
-		BlindMaskSweepWidget->RemoveFromParent();
-		BlindMaskSweepWidget = nullptr;
-	}
-
-	if (StepStartGlitchWidget)
-	{
-		StepStartGlitchWidget->RemoveFromParent();
-		StepStartGlitchWidget = nullptr;
+		StepStartBannerWidget->RemoveFromParent();
+		StepStartBannerWidget = nullptr;
 	}
 
 	if (TimerRing)
@@ -1848,29 +2421,8 @@ void UOfficeMainWidget::RemoveStepStartEffect()
 		TimerRing->SetFillColor(TimerRingGold);
 	}
 
-	if (ProcessTimeText)
-	{
-		ProcessTimeText->SetText(FText::FromString(TEXT("15")));
-	}
-}
-
-void UOfficeMainWidget::UpdateBlindMaskAnimation()
-{
-	BlindMaskAnimElapsed += 0.016f;
-	float Progress = FMath::Clamp(BlindMaskAnimElapsed / BlindMaskAnimDuration, 0.0f, 1.0f);
-
-	if (BlindMaskMID)
-	{
-		BlindMaskMID->SetScalarParameterValue(TEXT("Progress"), Progress);
-	}
-
-	if (Progress >= 1.0f)
-	{
-		if (GetWorld())
-		{
-			GetWorld()->GetTimerManager().ClearTimer(BlindMaskAnimTimerHandle);
-		}
-	}
+	const UOfficeStageProgressManager* TimerMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+	if (TimerMgr) OnTimerUpdated(TimerMgr->GetProgressData().RemainingTime);
 }
 
 // ========== 출시 확인 모달 ==========
@@ -1883,6 +2435,7 @@ void UOfficeMainWidget::ShowLaunchConfirmModal()
 	UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
 	UUIManagerSubsystem* UIManager = GI->GetSubsystem<UUIManagerSubsystem>();
 	if (!TableMgr || !UIManager || !UIManager->GetUIBase()) return;
+	if (Cast<ULaunchConfirmWidget>(UIManager->GetUIBase()->GetActivePromptWidget())) return;
 
 	TSubclassOf<UUserWidget> LaunchConfirmClass = TableMgr->GetWidgetClass(EWidgetType::LaunchConfirm);
 	if (!LaunchConfirmClass)
@@ -1892,12 +2445,16 @@ void UOfficeMainWidget::ShowLaunchConfirmModal()
 	}
 
 	UCommonActivatableWidget* PushedWidget = UIManager->GetUIBase()->PushPromptClass(LaunchConfirmClass.Get());
+	// 결과 창 바탕이 페이드인하는 동안 개발 종료 막을 같이 거둬 화면이 두 번 밝아지지 않게 한다
+	if (ScoreOrbContainer) ScoreOrbContainer->FadeDevelopmentDim();
 	ULaunchConfirmWidget* LaunchWidget = Cast<ULaunchConfirmWidget>(PushedWidget);
 	if (LaunchWidget)
 	{
+		LaunchWidget->OnManufacturingResearchResultClosed.RemoveAll(this);
 		UOfficeStageProgressManager* StageMgr = GetWorld()->GetSubsystem<UOfficeStageProgressManager>();
 		if (StageMgr)
 		{
+			StageMgr->PrepareLaunchLoot();
 			const FStageProgressData& StageData = StageMgr->GetProgressData();
 			LaunchWidget->SetPreviewData(StageData, StageData.ProjectNumber);
 		}
@@ -1914,88 +2471,30 @@ void UOfficeMainWidget::OnLaunchConfirmedHandler()
 	UOfficeStageProgressManager* StageMgr = GetWorld()->GetSubsystem<UOfficeStageProgressManager>();
 	if (!StageMgr) { return; }
 
-	// ⚠ StartLaunch 가 FSM 전이로 ProgressData 를 갱신/리셋할 수 있다 — 리빌에 필요한 값은 전이 전에 복사
-	const FStageProgressData Snapshot = StageMgr->GetProgressData();
-	const bool bHasReview = (Snapshot.ReviewScore > 0 && Snapshot.CriticScores.Num() >= 4);
 	const EProjectLifecycle LifecycleBefore = StageMgr->GetLifecycle();
+	UMissionManagerSubsystem* MissionMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr;
+	if (MissionMgr)
+	{
+		MissionMgr->SuspendGuideUntilLaunchRewardConfirmed();
+	}
 
 	StageMgr->StartLaunch();
+	if (MissionMgr) { MissionMgr->ResumeGuideAfterLaunchRewardConfirmed(); }
 	UpdateProjectCardProgress();
 	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] Launch confirmed"));
 
-	// 확정 2회 탭 = StartLaunch no-op → 리빌 재push 방지
-	if (StageMgr->GetLifecycle() == LifecycleBefore) { return; }
-
-	if (!bHasReview) { return; }   // 수주/제조 = 리뷰·전리품 없음
-
-	UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
-	ULaunchLootManagerSubsystem* LootMgr = GI ? GI->GetSubsystem<ULaunchLootManagerSubsystem>() : nullptr;
-
-	FLaunchRewardRevealData Data;
-	Data.ProjectName = FText::FromString(Snapshot.ProjectName);
-	Data.ReviewScore = Snapshot.ReviewScore;
-	Data.BandKey = ULaunchLootManagerSubsystem::ReviewScoreToTableKey(Snapshot.ReviewScore);
-	Data.Loot = LootMgr ? LootMgr->GetLastLaunchLoot() : TArray<FMissionReward>();
-	Data.bFirstDiscovery = Snapshot.bFirstDiscovery;
-	ShowLaunchRewardReveal(Data);
-}
-
-void UOfficeMainWidget::ShowLaunchRewardReveal(const FLaunchRewardRevealData& Data)
-{
-	UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
-	if (!GI) { return; }
-	UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-	UUIManagerSubsystem* UIManager = GI->GetSubsystem<UUIManagerSubsystem>();
-	if (!TableMgr || !UIManager || !UIManager->GetUIBase()) { return; }
-
-	TSubclassOf<UUserWidget> RevealClass = TableMgr->GetWidgetClass(EWidgetType::LaunchRewardReveal);
-	if (!RevealClass)
+	// 확정 2회 탭은 FSM에서 무시한다. 반응도 실제 출시 후 한 번만 시작한다.
+	if (StageMgr->GetLifecycle() == LifecycleBefore)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[OfficeMainWidget] LaunchRewardReveal widget not registered in DataTable! - 리빌 생략, 드립 즉시 시작"));
-		OnLaunchRevealClosed();
 		return;
 	}
-
-	ULaunchRewardRevealWidget* Reveal = Cast<ULaunchRewardRevealWidget>(UIManager->GetUIBase()->PushPromptClass(RevealClass.Get()));
-	if (!Reveal)
+	if (StageMgr->GetLifecycle() == EProjectLifecycle::Operating)
 	{
-		OnLaunchRevealClosed();
-		return;
+		if (ULaunchReactionSubsystem* Reactions = GetWorld()->GetSubsystem<ULaunchReactionSubsystem>())
+		{
+			Reactions->BeginDrip(GetCurrentBuildingIDAsInt());
+		}
 	}
-	// 프롬프트 스택 풀 재사용 대비 — 같은 인스턴스 재push 시 바인딩 누적 방지
-	Reveal->OnRevealClosed.AddUniqueDynamic(this, &UOfficeMainWidget::OnLaunchRevealClosed);
-	Reveal->Setup(Data);
-}
-
-void UOfficeMainWidget::OnLaunchRevealClosed()
-{
-	if (ULaunchReactionSubsystem* Reactions = GetWorld() ? GetWorld()->GetSubsystem<ULaunchReactionSubsystem>() : nullptr)
-	{
-		Reactions->BeginDrip(GetCurrentBuildingIDAsInt());
-	}
-}
-
-void UOfficeMainWidget::OnLaunchReactionReady(int32 BuildingID, const FLaunchReaction& Reaction)
-{
-	if (!EventRail || BuildingID != GetCurrentBuildingIDAsInt()) { return; }   // 다른 건물/오피스 밖 = 소실(의도)
-
-	UCGGameInstance* GI = Cast<UCGGameInstance>(GetWorld()->GetGameInstance());
-	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
-	TSubclassOf<UUserWidget> ToastClass = TableMgr ? TableMgr->GetWidgetClass(EWidgetType::ReviewReactionToast) : nullptr;
-	if (!ToastClass)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] ReviewReactionToast widget class not registered - 반응 생략"));
-		return;
-	}
-
-	UReviewReactionToastWidget* Toast = CreateWidget<UReviewReactionToastWidget>(this, ToastClass);
-	if (!Toast) { return; }
-
-	UOfficeEventRailWidget* Rail = EventRail;
-	Toast->OnRailRemoveRequested.BindUObject(Rail, &UOfficeEventRailWidget::RemoveEventCard, static_cast<UUserWidget*>(Toast));
-	// ⚠ Setup 을 Add 보다 먼저 — 레일이 가득 차 있으면 AddTransientCard 가 이 토스트를 즉시 트림할 수 있다
-	Toast->SetupReaction(Reaction);
-	Rail->AddTransientCard(Toast);
 }
 
 void UOfficeMainWidget::OnLaunchCancelledHandler()
@@ -2014,27 +2513,41 @@ void UOfficeMainWidget::OnLaunchCancelledHandler()
 void UOfficeMainWidget::OnLaunchRetryRequestedHandler()
 {
 	UOfficeStageProgressManager* StageMgr = GetWorld()->GetSubsystem<UOfficeStageProgressManager>();
-	if (!StageMgr || !StageMgr->TryRetryDevelopment())
+	if (!StageMgr)
 	{
-		// 게이트/잔액 미충족 — 상태를 바꾸지 않았으므로 결과 모달이 다시 뜨도록 되돌린다
-		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] 컨티뉴 실패 - 결과 모달 재표시"));
-
-		// 게이트를 통과했는데 실패했다면 남은 원인은 잔액뿐 — 모달만 되살리면 왜 안 됐는지 알 길이 없다.
-		if (StageMgr && StageMgr->CanRetryDevelopment())
-		{
-			if (UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
-			{
-				UIMgr->NotifyInsufficientResource(EResourceType::Diamond, StageMgr->GetRetryDiamondCost());
-			}
-		}
-
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] 컨티뉴 실패 - StageMgr 없음, 결과 모달 재표시"));
 		ShowLaunchConfirmModal();
 		return;
 	}
 
-	RefreshLeftSlotState();
-	UpdateProjectCardProgress();
-	UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] 컨티뉴 - 개발 재개"));
+	// 차감은 서버가 하고 타이머 재개는 성공 응답 뒤다 — 실패면 상태가 그대로이므로 결과 모달을 되살린다
+	StageMgr->RequestRetryDevelopment(
+		FOnCloudEconomyOpDone::CreateWeakLambda(this, [this](bool bOk, FName Code)
+	{
+		if (!bOk)
+		{
+			// 게이트/잔액/서버 미충족 — 상태를 바꾸지 않았으므로 결과 모달이 다시 뜨도록 되돌린다
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] 컨티뉴 실패 - 결과 모달 재표시. Code=%s"), *Code.ToString());
+
+			// 모달만 되살리면 왜 안 됐는지 알 길이 없다. 원인은 코드로 갈린다 —
+			// 잔액 부족만 부족액 토스트, 잠금/네트워크/서버는 3상태·DT 문구(1-B-4c)
+			UOfficeStageProgressManager* Mgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
+			if (Mgr && Mgr->CanRetryDevelopment())
+			{
+				if (UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+				{
+					UIMgr->NotifyCloudOpFailure(Code, EResourceType::Diamond, Mgr->GetRetryDiamondCost());
+				}
+			}
+
+			ShowLaunchConfirmModal();
+			return;
+		}
+
+		RefreshLeftSlotState();
+		UpdateProjectCardProgress();
+		UE_LOG(LogTemp, Log, TEXT("[OfficeMainWidget] 컨티뉴 - 개발 재개"));
+	}));
 }
 
 // ========== 프로젝트 결산서 모달 ==========
@@ -2558,18 +3071,29 @@ void UOfficeMainWidget::UpdateIdleTierText()
 
 void UOfficeMainWidget::CacheStripStageCells()
 {
+	StripRequirementRow = GetWidgetFromName(TEXT("StageRow"));
+	StageTray = Cast<UBorder>(GetWidgetFromName(TEXT("StageTray")));
+	LastStageTrayMatSize = FVector2D::ZeroVector;
 	StripStageCells.Reset();
 	StripStageNames.Reset();
 	StripStageVals.Reset();
 	StripStageBars.Reset();
-	StripStageDoneBadges.Reset();
+	StripStageDisciplineIcons.Reset();
+	StripStageGoalRings.Reset();
+	StripRootWidget = GetWidgetFromName(TEXT("StripRoot"));
+	// 체인 카드와 성장 목표판이 함께 붙는 칼럼을 옮긴다(목표판은 MissionManager가 이 칼럼에 형제로 붙인다).
+	MissionAnchor = MissionTracker && MissionTracker->GetParent() ? Cast<UWidget>(MissionTracker->GetParent()) : GetWidgetFromName(TEXT("MissionAnchorBox"));
+	MissionAnchorShiftY = 0.0f;
 	for (int32 i = 1; i <= 6; ++i)
 	{
 		StripStageCells.Add(GetWidgetFromName(*FString::Printf(TEXT("Stage%dCell"), i)));
 		StripStageNames.Add(Cast<UCommonTextBlock>(GetWidgetFromName(*FString::Printf(TEXT("Stage%dName"), i))));
 		StripStageVals.Add(Cast<UCommonTextBlock>(GetWidgetFromName(*FString::Printf(TEXT("Stage%dVal"), i))));
 		StripStageBars.Add(Cast<UProgressBar>(GetWidgetFromName(*FString::Printf(TEXT("Stage%dBar"), i))));
-		StripStageDoneBadges.Add(GetWidgetFromName(*FString::Printf(TEXT("Stage%dDone"), i)));
+		StripStageDisciplineIcons.Add(Cast<UImage>(GetWidgetFromName(*FString::Printf(TEXT("Stage%dDisciplineIcon"), i))));
+		StripStageGoalRings.Add(Cast<UImage>(GetWidgetFromName(*FString::Printf(TEXT("Stage%dGoalRing"), i))));
+		StripStageRingMatSize[i - 1] = FVector2D::ZeroVector;
+		if (UWidget* Cell = StripStageCells.Last()) Cell->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
 	}
 
 	// 값은 바 위에 겹친 labeled meter — 중앙 정렬이라 펀치 피봇도 중앙(정렬 기준점 일치, 좌우 대칭 확장).
@@ -2580,19 +3104,9 @@ void UOfficeMainWidget::CacheStripStageCells()
 		ValT->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
 	}
 
-	StripRow = GetWidgetFromName(TEXT("StageRow"));
-	if (!StripRow)
+	if (StripStageDisciplineIcons.Contains(nullptr) || StripStageGoalRings.Contains(nullptr))
 	{
-		// StageRow 이름 없으면 M10 WatchStrip 하이라이트 타겟이 조용히 null이 되어 관찰 4초가 무연출로 지나간다 — 여기서만 1회 로그.
-		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] StageRow 위젯을 찾을 수 없습니다 ― M10 스트립 관찰 가이드의 하이라이트 타겟이 사라집니다"));
-	}
-
-	// 배지 이름은 외부 스크립트가 만드는 유일한 캐시라 트리를 재paste 하면 6개가 통째로 사라지고
-	// ApplyStripStageVisual 의 토글이 조용히 no-op 이 된다(육안으로는 "달성해도 배지가 없다"로만 보인다) ― 여기서만 1회 로그.
-	const bool bAnyDoneBadge = StripStageDoneBadges.ContainsByPredicate([](const UWidget* W) { return W != nullptr; });
-	if (!bAnyDoneBadge)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] Stage{1..6}Done 배지를 하나도 찾을 수 없습니다 ― 달성 배지가 표시되지 않습니다. Tools/StageBadge/inject_stage_done.py 재실행 필요"));
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] Development strip icon or goal ring is missing. Run Tools/OfficeStrip/apply_hud_finish.py run(fit_only=True)."));
 	}
 
 	// 썸네일 프레임/크기 스타일은 WBP 소유 (슬림 키라인 트리 2026-07-11 paste) — C++ 스타일링 금지 규칙
@@ -2604,19 +3118,26 @@ UWidget* UOfficeMainWidget::GetStripStepBar(int32 StepNumber) const
 	return StripStageBars.IsValidIndex(Idx) ? StripStageBars[Idx] : nullptr;
 }
 
-UWidget* UOfficeMainWidget::GetStripRowWidget() const
-{
-	return StripRow;
-}
-
 UWidget* UOfficeMainWidget::GetStripSpeedButtonWidget() const
 {
 	return StripSpeedButton;
 }
 
+UWidget* UOfficeMainWidget::GetStripRequirementRowWidget() const
+{
+	return StripRequirementRow;
+}
+
+UWidget* UOfficeMainWidget::GetStripOperationTimeWidget() const
+{
+	// 운영 띠의 시간 숫자는 갱신 경로도 이름으로 찾는다(UpdateStripOperationMetrics) ― 같은 위젯을 짚는다
+	return GetWidgetFromName(TEXT("OpModeBadgeText"));
+}
+
 void UOfficeMainWidget::PopulateStripIdentity()
 {
 	UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	if (GI && IsManufacturingType(GI->GetCurrentBuildingCompanyType())) return;
 	UOfficeStageProgressManager* SM = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
 	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
 	if (!SM || !TableMgr) return;
@@ -2639,15 +3160,22 @@ void UOfficeMainWidget::PopulateStripIdentity()
 	if (!Progress.Genre.IsNone()) Genre = Progress.Genre;
 
 	// 운영 중이면 운영 이름/등급으로 덮음
-	FString GradeStr;
+	EQualityGrade OpGrade = EQualityGrade::Max;
 	if (FOperationData* Op = GetCurrentBuildingOperation())
 	{
 		if (!Op->ProjectName.IsEmpty()) NameText = FText::FromString(Op->ProjectName);
-		GradeStr = QualityGradeToAlphabetString(Op->QualityGrade);
+		OpGrade = Op->QualityGrade;
 	}
 
 	if (DevProjectName) DevProjectName->SetText(NameText);
-	if (OpProjectName)  OpProjectName->SetText(NameText);
+	if (OpProjectName)
+	{
+		if (OpTitleBaseFontSize <= 0.0f) OpTitleBaseFontSize = OpProjectName->GetFont().Size;
+		FSlateFontInfo TitleFont = OpProjectName->GetFont();
+		const USizeBox* TitleBox = Cast<USizeBox>(GetWidgetFromName(TEXT("OpProjectNameBox")));
+		OpProjectName->SetText(FitOpCardTitle(NameText, TitleFont, OpTitleBaseFontSize, TitleBox ? TitleBox->GetWidthOverride() : 0.0f));
+		OpProjectName->SetFont(TitleFont);
+	}
 
 	// 썸네일 커버 — 운영/개발 공용. 매번 새 브러시로 구성: SetBrushFromMaterial 은 이전 폴백 다크브러시의
 	// TintColor/DrawAs 를 보존해 커버가 다크퍼플과 곱해짐(보라 섞임 사고 — SetBrushColor 는 별개 프로퍼티라 무효였음).
@@ -2690,9 +3218,25 @@ void UOfficeMainWidget::PopulateStripIdentity()
 			if (QText) QText->SetVisibility(ESlateVisibility::HitTestInvisible);
 		}
 	};
-	// 커버는 출시 후(운영)만 공개 — 개발 중 DevThumb 은 "?" 미스터리 유지 (스포일러 방지, 사용자 확정 2026-07-11)
-	// 인셋 2px 기준 내부 크기 — WBP OpThumb SizeBox 160x120 과 계약
-	ApplyThumbCover(OpThumbInner, OpThumbQ, 156.0f, 116.0f);
+	// 커버는 출시 후(운영)만 공개한다. 개발 중 표지 자리는 WBP에서 접어 분야 칸 폭으로 쓴다(사용자 확정 2026-10-13).
+	// WBP의 표지 크기에서 프레임 인셋 2px를 제외해 재질 비율과 모서리를 맞춘다.
+	if (const USizeBox* OpCoverSize = Cast<USizeBox>(GetWidgetFromName(TEXT("OpThumb"))))
+	{
+		for (const TCHAR* FrameName : { TEXT("OpThumbBG"), TEXT("OpThumbLine") })
+		{
+			if (UImage* FrameImage = Cast<UImage>(GetWidgetFromName(FrameName)))
+			{
+				if (UMaterialInstanceDynamic* FrameMID = FrameImage->GetDynamicMaterial())
+				{
+					FrameMID->SetScalarParameterValue(TEXT("Wpx"), OpCoverSize->GetWidthOverride());
+					FrameMID->SetScalarParameterValue(TEXT("Hpx"), OpCoverSize->GetHeightOverride());
+				}
+			}
+		}
+		ApplyThumbCover(OpThumbInner, OpThumbQ,
+			FMath::Max(1.f, OpCoverSize->GetWidthOverride() - 4.f),
+			FMath::Max(1.f, OpCoverSize->GetHeightOverride() - 4.f));
+	}
 
 	// 개발 썸네일 키라인 = 장르색 (정체성 액센트 — 기획 보드 카드와 동일 출처 DT_ProjectGenre.Color)
 	if (DevThumbLine)
@@ -2723,23 +3267,37 @@ void UOfficeMainWidget::PopulateStripIdentity()
 		}
 	}
 
-	// 등급 배지(운영) — 등급 없으면 Collapsed
-	if (OpGradeBadgeBox)
+	ApplyOpGradeEmblem(OpGrade);
+}
+
+void UOfficeMainWidget::ApplyOpGradeEmblem(EQualityGrade Grade)
+{
+	if (!OpGradeBadgeBox) return;
+
+	ECompanyType Company = ECompanyType::None;
+	if (USaveLoadManager* SaveMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<USaveLoadManager>() : nullptr)
 	{
-		if (!GradeStr.IsEmpty() && GradeStr != TEXT("-"))
-		{
-			if (OpGradeBadge) OpGradeBadge->SetText(FText::FromString(GradeStr));
-			OpGradeBadgeBox->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-		}
-		else
-		{
-			OpGradeBadgeBox->SetVisibility(ESlateVisibility::Collapsed);
-		}
+		const int32 BuildingIndex = GetCurrentBuildingIDAsInt();
+		if (BuildingIndex != INDEX_NONE) Company = SaveMgr->GetBuildingCompanyType(BuildingIndex);
 	}
+	if (Grade == AppliedOpGrade && Company == AppliedOpGradeCompany) return;
+	AppliedOpGrade = Grade;
+	AppliedOpGradeCompany = Company;
+
+	if (Grade == EQualityGrade::Max)
+	{
+		OpGradeBadgeBox->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+	if (OpGradeBadge) OpGradeBadge->SetText(FText::FromString(QualityGradeToAlphabetString(Grade)));
+	OpGradeBadgeBox->SetVisibility(ESlateVisibility::HitTestInvisible);
+	CGQualityGradeMedal::Apply(GetGameInstance(), Company, Grade, OpGradeBadgeBox, OpGradeBadge);
 }
 
 void UOfficeMainWidget::UpdateStripStageCells()
 {
+	const UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance());
+	if (GI && IsManufacturingType(GI->GetCurrentBuildingCompanyType())) return;
 	UOfficeStageProgressManager* SM = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
 	if (!SM) return;
 	const FStageProgressData& Progress = SM->GetProgressData();
@@ -2760,6 +3318,14 @@ void UOfficeMainWidget::UpdateStripStageCells()
 		{
 			NameT->SetText(FText::FromString(Step.StepName));
 		}
+		if (UImage* Icon = StripStageDisciplineIcons.IsValidIndex(i) ? StripStageDisciplineIcons[i] : nullptr)
+		{
+			UTexture2D* Texture = UGlobalUtilFunctions::GetDisciplineIcon(Step.DisciplineSlot);
+			Icon->SetBrushFromTexture(Texture, false);
+			// 흰 글리프를 분야 고유색으로 물들여 여섯 칸이 한눈에 갈리게 한다(결과창 막대와 같은 출처).
+			Icon->SetColorAndOpacity(UGlobalUtilFunctions::GetStepColor(Step.DisciplineSlot + 1));
+			Icon->SetVisibility(Texture ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		}
 
 		// 상태 전환/리프레시 = 스냅 (라운드 진행이 아니므로 애니메이션 없이 즉시). 이후 라이브 점수는 NativeTick 이 lerp.
 		StripStageTargetScore[i] = Step.TargetScore;
@@ -2767,17 +3333,22 @@ void UOfficeMainWidget::UpdateStripStageCells()
 		bStripStagePendingDirty[i] = false;
 		StripStageFlashAlpha[i] = 0.0f;
 		StripStagePunchElapsed[i] = 99.0f;
-		if (UCommonTextBlock* PunchValT = StripStageVals.IsValidIndex(i) ? StripStageVals[i] : nullptr)
+		StripStageGoalElapsed[i] = StripGoalDuration;
+		StripStageVisualState[i] = 0;
+		if (Cell) Cell->SetRenderScale(FVector2D(1.0f, 1.0f));
+		if (UImage* Ring = StripStageGoalRings.IsValidIndex(i) ? StripStageGoalRings[i] : nullptr)
 		{
-			PunchValT->SetRenderScale(FVector2D(1.0f, 1.0f));
+			Ring->SetRenderOpacity(0.0f);
+		}
+		if (UCommonTextBlock* ValT = StripStageVals.IsValidIndex(i) ? StripStageVals[i] : nullptr)
+		{
+			ValT->SetRenderScale(FVector2D(1.0f, 1.0f));
+			// 글자 최소 폭은 점수 줄 ScaleBox 안쪽이라 좁은 화면에서는 칸을 넓히지 않고 글자 배율만 함께 낮춘다.
+			ValT->SetMinDesiredWidth(MeasureStripScoreWidth(ValT, FMath::RoundToInt64(Step.TargetScore)));
 		}
 		StripStageShownPct[i] = Pct;
 		StripStageTargetPct[i] = Pct;
 		ApplyStripStageVisual(i, Pct);
-
-		// 폭 예약 없음 — 값 줄이 셀 전폭(WellBox 170)을 채우고 우측 정렬하므로 자릿수가 늘어도 폭이 안 흔들린다.
-		// 크기 권위는 WellBox 하나 (카탈로그 공통 마감 §8). 여기서 MinDesiredWidth 를 주장하면
-		// 칸이 평균폭보다 넓어지길 요구하게 되고, StageRow 는 Fill 균등분배라 그만큼 이름이 잘린다.
 	}
 }
 
@@ -2802,18 +3373,39 @@ bool UOfficeMainWidget::FlushStripStagePending(int32 Index)
 	const float Pct = StripStagePendingPct[Index];
 	StripStageTargetPct[Index] = Pct;   // NativeTick lerp가 여기서부터 카운트업
 
-	// 마일스톤 — 바가 시각적으로 100%에 닿는 순간(착지/폴백)과 일치하도록 이 시점에서 판정
-	if (!bCategoryMilestoneReached[Index]
-		&& StripStageTargetScore[Index] > 0.0f && IsStageGoalMet(Pct))
-	{
-		bCategoryMilestoneReached[Index] = true;
-		PlayCategoryMilestone(Index);
-	}
 	return true;
 }
 
 void UOfficeMainWidget::UpdateStripShellMaterialSize()
 {
+	if (StageTray)
+	{
+		const FVector2D TraySize = StageTray->GetCachedGeometry().GetLocalSize();
+		if (TraySize.X >= 1.f && TraySize.Y >= 1.f && !TraySize.Equals(LastStageTrayMatSize, 0.5f))
+		{
+			if (UMaterialInstanceDynamic* TrayMID = StageTray->GetDynamicMaterial())
+			{
+				TrayMID->SetScalarParameterValue(TEXT("Wpx"), TraySize.X);
+				TrayMID->SetScalarParameterValue(TEXT("Hpx"), TraySize.Y);
+				LastStageTrayMatSize = TraySize;
+			}
+		}
+	}
+	// 금색 테두리는 칩 라인 계열이라 게이지 실치수를 받아야 코너가 맞는다. 테두리는 평소 투명이라 같은 칸을 채우는 바 크기를 쓴다.
+	for (int32 i = 0; i < 6; ++i)
+	{
+		UImage* Ring = StripStageGoalRings.IsValidIndex(i) ? StripStageGoalRings[i] : nullptr;
+		const UProgressBar* Bar = StripStageBars.IsValidIndex(i) ? StripStageBars[i] : nullptr;
+		if (!Ring || !Bar) continue;
+		const FVector2D BarSize = Bar->GetCachedGeometry().GetLocalSize();
+		if (BarSize.X < 1.f || BarSize.Y < 1.f || BarSize.Equals(StripStageRingMatSize[i], 0.5f)) continue;
+		if (UMaterialInstanceDynamic* RingMID = Ring->GetDynamicMaterial())
+		{
+			RingMID->SetScalarParameterValue(TEXT("Wpx"), BarSize.X);
+			RingMID->SetScalarParameterValue(TEXT("Hpx"), BarSize.Y);
+			StripStageRingMatSize[i] = BarSize;
+		}
+	}
 	if (!StripBG && !StripLine) return;
 	const FVector2D LocalSize = (StripBG ? StripBG : StripLine)->GetCachedGeometry().GetLocalSize();
 	if (LocalSize.X < 1.f || LocalSize.Y < 1.f || LocalSize.Equals(LastStripMatSize, 0.5f)) return;
@@ -2830,6 +3422,61 @@ void UOfficeMainWidget::UpdateStripShellMaterialSize()
 			MID->SetScalarParameterValue(HpxParam, LocalSize.Y);
 		}
 	}
+}
+
+void UOfficeMainWidget::UpdateMissionAnchorBelowStrip(float DeltaTime)
+{
+	if (!MissionAnchor) return;
+	float TargetY = 0.0f;
+	if (StripRootWidget && StripRootWidget->IsVisible())
+	{
+		// 같은 화면 좌표로 바닥/윗변을 재고, 이미 준 이동량은 빼서 원래 자리 기준으로 계산한다.
+		const FGeometry& Own = GetCachedGeometry();
+		const FGeometry& StripGeo = StripRootWidget->GetCachedGeometry();
+		const FGeometry& AnchorGeo = MissionAnchor->GetCachedGeometry();
+		if (StripGeo.GetLocalSize().Y > 1.0f && AnchorGeo.GetLocalSize().Y > 1.0f)
+		{
+			const float StripBottom = Own.AbsoluteToLocal(StripGeo.LocalToAbsolute(FVector2D(0.0f, StripGeo.GetLocalSize().Y))).Y;
+			const float AnchorTop = Own.AbsoluteToLocal(AnchorGeo.LocalToAbsolute(FVector2D::ZeroVector)).Y - MissionAnchorShiftY;
+			TargetY = FMath::Max(0.0f, StripBottom + MissionAnchorGap - AnchorTop);
+		}
+	}
+	MissionAnchorShiftY = FMotionGate::IsReduced() || FMath::IsNearlyEqual(MissionAnchorShiftY, TargetY, 0.5f)
+		? TargetY : FMath::FInterpTo(MissionAnchorShiftY, TargetY, DeltaTime, 12.0f);
+	MissionAnchor->SetRenderTranslation(FVector2D(0.0f, MissionAnchorShiftY));
+}
+
+void UOfficeMainWidget::ApplyStripRailPlacement(bool bStripOnTop)
+{
+	UWidget* Rail = GetWidgetFromName(TEXT("StripRailColumn"));
+	UOverlaySlot* RailSlot = Rail ? Cast<UOverlaySlot>(Rail->Slot) : nullptr;
+	if (!RailSlot)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeMainWidget] StripRailColumn(Overlay 칸) 없음 ― 진행 줄 자리를 못 옮긴다"));
+		return;
+	}
+	FMargin Pad = RailSlot->GetPadding();
+	if (StripRailTopBelowBlock < 0.0f)
+	{
+		StripRailTopBelowBlock = Pad.Top;
+	}
+	const float Top = bStripOnTop ? StripRailTopFocus : StripRailTopBelowBlock;
+	if (!FMath::IsNearlyEqual(Pad.Top, Top))
+	{
+		Pad.Top = Top;
+		RailSlot->SetPadding(Pad);
+	}
+}
+
+void UOfficeMainWidget::RefreshOpCardVisibility(EProjectLifecycle State)
+{
+	if (!OpCard) return;
+	const UCGGameInstance* OfficeGI = Cast<UCGGameInstance>(GetGameInstance());
+	const AOfficeCameraPawn* Camera = PlacementEditPawn.Get();
+	const bool bOperating = State == EProjectLifecycle::Operating || State == EProjectLifecycle::ReportPending;
+	const bool bManufacturing = OfficeGI && IsManufacturingType(OfficeGI->GetCurrentBuildingCompanyType());
+	const bool bEditing = Camera && Camera->IsOfficePlacementEditing();
+	OpCard->SetVisibility(bOperating && !bManufacturing && !bEditing ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
 }
 
 void UOfficeMainWidget::ResetLastSpurtVisual()
@@ -2875,6 +3522,7 @@ void UOfficeMainWidget::StartStripStageJuice(int32 Index, bool bIsCritical)
 		}
 	}
 
+	if (FMotionGate::IsReduced()) return;
 	StripStagePunchElapsed[Index] = 0.0f;
 	StripStagePunchPeak[Index] = bIsCritical ? 1.2f : 1.12f;
 	// 크리 착지 = 골드 플래시로 차별화 (일반 = 화이트)
@@ -2883,26 +3531,48 @@ void UOfficeMainWidget::StartStripStageJuice(int32 Index, bool bIsCritical)
 	StripStageFlashAlpha[Index] = 1.0f;
 }
 
-void UOfficeMainWidget::ApplyStripStageVisual(int32 Index, float Pct)
+void UOfficeMainWidget::ApplyStripStageVisual(int32 Index, float Pct, bool bAnimateGoalTransition)
 {
 	if (Index < 0 || Index >= 6) return;
 
 	static const FLinearColor BarBlue(0.046665f, 0.327778f, 0.745404f, 1.0f);
-	// 이 그린은 실제로 3벌이다 ― 여기 + Tools/StageBadge/inject_stage_done.py 의 GR/GG/GB + 그 스크립트가
-	// .uasset 에 베이크한 배지 브러시. 여기만 고치면 배지가 조용히 갈라진다(스크립트 재실행이 있어야 따라온다).
 	static const FLinearColor BarGreen(0.104616f, 0.630757f, 0.254152f, 1.0f);
 	static const FLinearColor BarGold(0.887923f, 0.533276f, 0.076185f, 1.0f);
-	// 과락 미달 레드 — 결과 모달 분야 행(UStatRowWidget::GetProgressBarColor)이 쓰는 값 그대로. 두 화면의 사다리를 맞춘다.
-	static const FLinearColor BarRed(0.9f, 0.25f, 0.2f, 1.0f);
-	// 값 글자는 바 위에 겹치므로 상태색을 쓰지 않는다 — 블루 채움 위 블루 글자가 되고, 상태는 바 채움색이 이미 말한다.
-	static const FLinearColor ValInk(1.0f, 0.941f, 0.871f, 1.0f);   // #FFF8F0 — 컬러 면 위 라벨 표준(카탈로그 §6)
+	static const FLinearColor ValInk(1.0f, 0.982251f, 0.921582f, 1.0f);
+	// 같은 계열의 진한 외곽선 — 금색·초록 위 흰 글자는 대비가 3:1 미만이라 외곽선이 받쳐야 하고, 검정보다 덜 뭉쳐 보인다.
+	static const FLinearColor ValOutlineBlue(0.004391f, 0.023153f, 0.057805f, 1.0f);
+	static const FLinearColor ValOutlineGreen(0.004777f, 0.042311f, 0.015996f, 1.0f);
+	static const FLinearColor ValOutlineGold(0.068478f, 0.029557f, 0.001821f, 1.0f);
+	static const FLinearColor NameInk(0.887923f, 0.913099f, 0.930111f, 1.0f);
+	static const FLinearColor NameGreen(0.564712f, 0.871367f, 0.62396f, 1.0f);
+	static const FLinearColor NameGold(1.0f, 0.799103f, 0.434154f, 1.0f);
 
-	const bool bOver = Pct > 1.001f;        // 목표 초과(오버필) → 골드 강조
-	const bool bFull = IsStageGoalMet(Pct); // 목표 달성 → 그린 (배지와 같은 문턱)
-	// 과락 = 이 분야 하나만 미달해도 출시가 막힌다(MeetsMinimumClearScore 는 AND). 문턱은 게이트와 같은 상수를 쓴다.
-	const bool bBelowMin = Pct < FStageProgressData::MinimumScoreRatio;
+	// 색과 숫자가 서로 다른 문턱을 보이지 않도록 획득·목표를 같은 반올림 정수로 비교한다.
+	// 초과(금색)는 목표의 110%부터다 — 점수가 덩어리로 들어와도 도달(초록) 구간이 실제로 보이게 한다.
+	// 출시 가능 여부는 StageProgressData의 최소 점수 판정이 별도로 담당한다.
+	static constexpr int64 OverPercent = 110;
+	const float Target = StripStageTargetScore[Index];
+	const int64 ShownScore = FMath::RoundToInt64(Pct * Target);
+	const int64 GoalScore = FMath::RoundToInt64(Target);
+	const bool bFull = GoalScore > 0 && ShownScore >= GoalScore;
+	const bool bOver = bFull && ShownScore * 100 >= GoalScore * OverPercent;
+	const uint8 VisualState = bOver ? 3 : (bFull ? 2 : 1);
+	// 목표 배너도 보간된 숫자가 문턱을 넘은 프레임에 재생해 셀 색보다 앞서지 않게 한다.
+	if (bAnimateGoalTransition && bFull && !bCategoryMilestoneReached[Index])
+	{
+		bCategoryMilestoneReached[Index] = true;
+		PlayCategoryMilestone(Index);
+	}
+	if (bAnimateGoalTransition && StripStageVisualState[Index] != 0
+		&& VisualState > StripStageVisualState[Index] && bFull && !FMotionGate::IsReduced())
+	{
+		StripStageGoalElapsed[Index] = 0.0f;
+		StripStageFlashAlpha[Index] = 1.0f;
+		StripStageFlashColor[Index] = FLinearColor::White;
+	}
+	StripStageVisualState[Index] = VisualState;
 
-	const FLinearColor BaseBarCol = bOver ? BarGold : (bFull ? BarGreen : (bBelowMin ? BarRed : BarBlue));
+	const FLinearColor BaseBarCol = bOver ? BarGold : (bFull ? BarGreen : BarBlue);
 	// 착지 플래시 — 화이트 순간 블렌드 후 감쇠 (상태색 로직 위에 얹힘)
 	const float Flash = StripStageFlashAlpha[Index] * 0.6f;
 	const FLinearColor BarCol = (Flash > 0.0f)
@@ -2915,30 +3585,19 @@ void UOfficeMainWidget::ApplyStripStageVisual(int32 Index, float Pct)
 	}
 	if (UCommonTextBlock* ValT = StripStageVals.IsValidIndex(Index) ? StripStageVals[Index] : nullptr)
 	{
-		// "획득 / 목표" — 목표가 프로젝트별로 30~38만까지 벌어져 획득 숫자만으로는 진척을 읽을 수 없다.
-		// 축약은 WesternSuffix(K/M) 고정 — 이 셀에 꽂히는 orb 가 같은 표기라 단위계가 갈리면 안 된다(카탈로그 §9 스코어 예외).
-		// Pct 미클램프라 목표 초과분도 그대로 상승하고, 그때는 색(골드)이 초과를 알린다.
-		const float Tgt = StripStageTargetScore[Index];
-		ValT->SetText(FText::FromString(FString::Printf(TEXT("%s / %s"),
-			*UGlobalUtilFunctions::AbbreviateNumber(static_cast<int64>(FMath::RoundToInt(Pct * Tgt)),
-				ENumberAbbrevStyle::WesternSuffix, ENumberRoundMode::Floor).ToString(),
-			*UGlobalUtilFunctions::AbbreviateNumber(static_cast<int64>(Tgt),
-				ENumberAbbrevStyle::WesternSuffix, ENumberRoundMode::Floor).ToString())));
+		ValT->SetText(FText::FromString(FString::Printf(TEXT("%s/%s"), *FormatStripScore(ShownScore), *FormatStripScore(GoalScore))));
 		ValT->SetColorAndOpacity(FSlateColor(ValInk));
+		const FLinearColor& OutlineCol = bOver ? ValOutlineGold : (bFull ? ValOutlineGreen : ValOutlineBlue);
+		if (!ValT->GetFont().OutlineSettings.OutlineColor.Equals(OutlineCol))
+		{
+			FSlateFontInfo ValFont = ValT->GetFont();
+			ValFont.OutlineSettings.OutlineColor = OutlineCol;
+			ValT->SetFont(ValFont);
+		}
 	}
 	if (UCommonTextBlock* NameT = StripStageNames.IsValidIndex(Index) ? StripStageNames[Index] : nullptr)
 	{
-		// 이름 라벨 = 직능 슬롯 위치색(1파랑/2초록/3주황/4보라/5청록/6로즈 ― orb·+N 숫자와 단일 출처 GetStepColor).
-		// 진행 상태색(바 fill)과 분리 → 색=직능 정체성, 바=진행도로 역할 분담.
-		NameT->SetColorAndOpacity(FSlateColor(UGlobalUtilFunctions::GetStepColor(Index + 1)));
-	}
-	// 달성 배지 ― 도장(1회성 팝)이 사라진 뒤에도 남는 상태 표시. 오버필이어도 그린 유지(초과는 바 색이 말한다).
-	// HitTestInvisible(자기+자식 전부): 스트립은 상시 HUD 라 배지가 입력을 먹으면 안 된다.
-	// SelfHitTestInvisible 로는 부족하다 ― 자식 Stage{N}DoneIcon(UImage)은 생성자에서 가시성을 안 건드려
-	// UWidget 기본값 Visible 로 남는다(HorizontalBox/SizeBox/CommonTextBlock 은 생성자가 SelfHitTestInvisible 을 건다).
-	if (UWidget* Done = StripStageDoneBadges.IsValidIndex(Index) ? StripStageDoneBadges[Index] : nullptr)
-	{
-		Done->SetVisibility(bFull ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		NameT->SetColorAndOpacity(FSlateColor(bOver ? NameGold : (bFull ? NameGreen : NameInk)));
 	}
 }
 
@@ -2962,24 +3621,23 @@ void UOfficeMainWidget::UpdateStripOperationMetrics(const FOperationData& Data)
 			static_cast<int64>(Data.TotalRevenueEarned), ENumberAbbrevStyle::Auto, ENumberRoundMode::Floor));
 	}
 
-	// 등급 배지도 운영 중 실시간 갱신 (RefreshOfficeUI 밖 per-tick 경로)
-	if (OpGradeBadge)
-	{
-		OpGradeBadge->SetText(FText::FromString(QualityGradeToAlphabetString(Data.QualityGrade)));
-	}
-	if (OpGradeBadgeBox)
-	{
-		OpGradeBadgeBox->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-	}
+	ApplyOpGradeEmblem(Data.QualityGrade);
 
-	// 운영 수명 카운트다운 — "운영 중" 배지(OpModeBadgeText)를 남은시간으로 재사용 (GetWidgetFromName, 신규 위젯/바인딩 불필요)
+	// 종료 행동 옆에 남은 시간을 고정해 수익 정보와 분리한다.
 	if (UCommonTextBlock* ModeBadge = Cast<UCommonTextBlock>(GetWidgetFromName(TEXT("OpModeBadgeText"))))
 	{
 		const int32 Rem = FMath::Max(0, FMath::CeilToInt(Data.RemainingTime));
-		ModeBadge->SetText(FText::FromString(FString::Printf(TEXT("종료 %d:%02d"), Rem / 60, Rem % 60)));
+		ModeBadge->SetText(FText::FromString(FString::Printf(TEXT("%02d:%02d"), Rem / 60, Rem % 60)));
 		// 15초 이하 = 종료 임박 → 골드 경고
-		static const FLinearColor OpGreen(0.327778f, 0.806952f, 0.508881f, 1.0f);
+		static const FLinearColor OpTimeInk(0.887923f, 0.913099f, 0.930111f, 1.0f);
 		static const FLinearColor OpWarn(0.921582f, 0.679542f, 0.270498f, 1.0f);
-		ModeBadge->SetColorAndOpacity(FSlateColor(Rem <= 15 ? OpWarn : OpGreen));
+		static const FLinearColor OpLabelMute = FLinearColor::FromSRGBColor(FColor(0x9A, 0xA4, 0xB2));   // 옆 칸 「누적 수익」 라벨과 같은 회색
+		ModeBadge->SetColorAndOpacity(FSlateColor(Rem <= 15 ? OpWarn : OpTimeInk));
+		if (UCommonTextBlock* TimeLabel = Cast<UCommonTextBlock>(GetWidgetFromName(TEXT("OpTimeLabel"))))
+		{
+			TimeLabel->SetText(Rem <= 15 ? NSLOCTEXT("Office", "OperationEndingSoon", "곧 종료")
+				: NSLOCTEXT("Office", "OperationRemainingTime", "남은 시간"));
+			TimeLabel->SetColorAndOpacity(FSlateColor(Rem <= 15 ? OpWarn : OpLabelMute));
+		}
 	}
 }

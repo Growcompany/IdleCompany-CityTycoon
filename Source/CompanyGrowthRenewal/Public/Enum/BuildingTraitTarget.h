@@ -6,7 +6,7 @@
 #include "Enum/BuildingTraitCategory.h"
 #include "BuildingTraitTarget.generated.h"
 
-// 건물 특성 효과가 붙는 게임플레이 수량(대상). 19 분야 : 19 대상 1:1.
+// 건물 특성 효과가 붙는 게임플레이 수량(대상). 18 분야 : 18 대상 1:1.
 // ⚠ 대상을 추가하려면 소비처 배선을 같은 작업 단위에 만들 것 — 소비처 없는 대상은 UI 에 뜨는 거짓말이 된다.
 UENUM(BlueprintType)
 enum class EBuildingTraitTarget : uint8
@@ -26,7 +26,6 @@ enum class EBuildingTraitTarget : uint8
 	FatigueRecovery		UMETA(DisplayName = "피로 회복"),			// 복지
 	TradeValue			UMETA(DisplayName = "제조품 판매가"),		// 글로벌 (유일한 전사 적용)
 	HRPower				UMETA(DisplayName = "채용 잠재 등급 운"),	// HR
-	AuraPower			UMETA(DisplayName = "특수 빌딩 버프 흡수"),	// 파트너십
 	VaultCapacity		UMETA(DisplayName = "금고 용량 배율"),		// CRM
 	RiskLoss			UMETA(DisplayName = "도박 실패 손실 감소"),	// 리스크
 	MetaAmplify			UMETA(DisplayName = "다른 특성 효과 증폭"),	// 마인드셋
@@ -69,7 +68,6 @@ inline EBuildingTraitTarget GetTargetForCategory(EBuildingTraitCategory Category
 	case EBuildingTraitCategory::Welfare:       return EBuildingTraitTarget::FatigueRecovery;
 	case EBuildingTraitCategory::Global:        return EBuildingTraitTarget::TradeValue;
 	case EBuildingTraitCategory::HR:            return EBuildingTraitTarget::HRPower;
-	case EBuildingTraitCategory::Network:       return EBuildingTraitTarget::AuraPower;
 	case EBuildingTraitCategory::CRM:           return EBuildingTraitTarget::VaultCapacity;
 	case EBuildingTraitCategory::Risk:          return EBuildingTraitTarget::RiskLoss;
 	case EBuildingTraitCategory::Mindset:       return EBuildingTraitTarget::MetaAmplify;
@@ -100,7 +98,6 @@ inline FText GetTraitTargetDisplayName(EBuildingTraitTarget Target)
 	case EBuildingTraitTarget::FatigueRecovery:  return FText::FromString(TEXT("피로 회복"));
 	case EBuildingTraitTarget::TradeValue:       return FText::FromString(TEXT("제조품 판매가"));
 	case EBuildingTraitTarget::HRPower:          return FText::FromString(TEXT("채용 잠재 등급 운"));
-	case EBuildingTraitTarget::AuraPower:        return FText::FromString(TEXT("특수 빌딩 버프 흡수"));
 	case EBuildingTraitTarget::VaultCapacity:    return FText::FromString(TEXT("금고 용량 배율"));
 	case EBuildingTraitTarget::RiskLoss:         return FText::FromString(TEXT("도박 실패 손실 감소"));
 	case EBuildingTraitTarget::MetaAmplify:      return FText::FromString(TEXT("다른 특성 효과 증폭"));
@@ -159,11 +156,10 @@ inline FString GetTraitTargetUnitSuffix(EBuildingTraitTarget Target)
 }
 
 /**
- * 특성 효과 1줄 문구를 생성한다 — UI 는 CSV 텍스트 대신 이 함수만 쓴다.
- * 표시와 실효과가 같은 (Target, Value) 에서 나오므로 구조적으로 어긋날 수 없다.
- * 예: "운영 수익 +10%" / "개발비 -3.5%" / "크리티컬 확률 +1.2%p" / "HR 파워 +2"
+ * 특성 효과의 수치 부분만 생성한다 — 이름과 수치를 다른 줄·다른 서체로 놓는 UI(장착 슬롯 캡션)용.
+ * 예: "+10%" / "-3.5%" / "+1.2%p" / "+2"
  */
-inline FText FormatTraitEffectText(EBuildingTraitTarget Target, float Value)
+inline FText FormatTraitEffectValueText(EBuildingTraitTarget Target, float Value)
 {
 	if (Target == EBuildingTraitTarget::None || FMath::IsNearlyZero(Value))
 	{
@@ -171,11 +167,25 @@ inline FText FormatTraitEffectText(EBuildingTraitTarget Target, float Value)
 	}
 
 	const TCHAR* Sign = (GetTraitTargetPolarity(Target) == ETraitTargetPolarity::Decrease) ? TEXT("-") : TEXT("+");
-	const FString ValueStr = TraitValueToDisplayString(Value);
-	const FString Suffix = GetTraitTargetUnitSuffix(Target);
+	return FText::FromString(FString::Printf(TEXT("%s%s%s"),
+		Sign, *TraitValueToDisplayString(Value), *GetTraitTargetUnitSuffix(Target)));
+}
 
-	return FText::FromString(FString::Printf(TEXT("%s %s%s%s"),
-		*GetTraitTargetDisplayName(Target).ToString(), Sign, *ValueStr, *Suffix));
+/**
+ * 특성 효과 1줄 문구를 생성한다 — UI 는 CSV 텍스트 대신 이 함수만 쓴다.
+ * 표시와 실효과가 같은 (Target, Value) 에서 나오므로 구조적으로 어긋날 수 없다.
+ * 예: "운영 수익 +10%" / "개발비 -3.5%" / "크리티컬 확률 +1.2%p" / "HR 파워 +2"
+ */
+inline FText FormatTraitEffectText(EBuildingTraitTarget Target, float Value)
+{
+	const FText ValueText = FormatTraitEffectValueText(Target, Value);
+	if (ValueText.IsEmpty())
+	{
+		return FText::GetEmpty();
+	}
+
+	return FText::FromString(FString::Printf(TEXT("%s %s"),
+		*GetTraitTargetDisplayName(Target).ToString(), *ValueText.ToString()));
 }
 
 /**
@@ -194,43 +204,41 @@ inline FText GetTraitTargetDetailText(EBuildingTraitTarget Target, float Value)
 	switch (Target)
 	{
 	case EBuildingTraitTarget::OperationRevenue:
-		return FText::FromString(FString::Printf(TEXT("이 건물이 출시한 프로젝트의 운영 수익이 %s 늘어납니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("프로젝트의 운영 수익이 %s 늘어납니다."), *V));
 	case EBuildingTraitTarget::DevCost:
 		return FText::FromString(FString::Printf(TEXT("프로젝트 착수 비용이 %s 줄어듭니다."), *V));
 	case EBuildingTraitTarget::DevScore:
-		return FText::FromString(FString::Printf(TEXT("직원이 개발 중 쌓는 점수가 %s 늘어납니다. 직능 구분 없이 모든 점수에 함께 적용됩니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("개발 점수가 %s 늘어납니다."), *V));
 	case EBuildingTraitTarget::RevenueStability:
-		return FText::FromString(FString::Printf(TEXT("품질 평가가 낮게 나와도 수익이 S등급 수익 쪽으로 %s 당겨집니다. S등급에서는 효과가 없습니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("낮은 등급으로 출시해도 수익이 S등급 쪽으로 %s 당겨집니다."), *V));
 	case EBuildingTraitTarget::Quality:
-		return FText::FromString(FString::Printf(TEXT("출시 등급을 정하는 완성도가 %s 높게 계산됩니다. 직능 전체의 달성률 평균이며, 등급이 오르면 수익이 오릅니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("출시 등급을 정하는 완성도가 %s 오릅니다."), *V));
 	case EBuildingTraitTarget::IdleIncome:
-		return FText::FromString(FString::Printf(TEXT("직원이 방치 중 벌어들이는 수익과 게임을 꺼 둔 동안의 정산 수익이 %s 늘어납니다. 오프라인 정산은 운영 중인 프로젝트가 있을 때만 발생하며, 금고 여유분까지만 받습니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("방치 수익과 오프라인 정산 수익이 %s 늘어납니다."), *V));
 	case EBuildingTraitTarget::MarketCap:
-		return FText::FromString(FString::Printf(TEXT("출시를 마칠 때 오르는 시가총액이 %s 늘어납니다. 브랜드파워 강화와 곱해집니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("출시할 때 오르는 시가총액이 %s 늘어납니다."), *V));
 	case EBuildingTraitTarget::RevenueDecay:
-		return FText::FromString(FString::Printf(TEXT("출시 후 수익이 절반으로 줄어드는 데 걸리는 시간이 %s 길어집니다. 출시하는 순간의 특성으로 고정되며, 산업별 상한에 닿으면 더 늘어나지 않습니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("출시 후 수익이 절반으로 줄기까지의 시간이 %s 길어집니다."), *V));
 	case EBuildingTraitTarget::OperationTime:
-		return FText::FromString(FString::Printf(TEXT("출시한 프로젝트의 운영 기간이 %s 길어집니다. 히트작수명 강화와 곱해지며, 출시하는 순간의 특성으로 고정됩니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("프로젝트의 운영 기간이 %s 길어집니다."), *V));
 	case EBuildingTraitTarget::CritChance:
-		return FText::FromString(FString::Printf(TEXT("직원이 점수를 낼 때 크리티컬이 터질 확률이 %s 늘어납니다. 크리티컬 확률은 스탯·버프·피버를 모두 합쳐 30%%까지만 오릅니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("크리티컬 확률이 %s 오릅니다(전체 최대 30%%)."), *V));
 	case EBuildingTraitTarget::FatigueRecovery:
 		return FText::FromString(FString::Printf(TEXT("직원의 피로가 %s 빨리 회복됩니다."), *V));
 	case EBuildingTraitTarget::TradeValue:
-		return FText::FromString(FString::Printf(TEXT("항구에서 제조품을 팔 때 받는 금액이 %s 올라갑니다. 회사 전체에 적용되는 유일한 특성이지만, 여러 건물에 장착해도 가장 높은 값 하나만 적용됩니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("제조품 판매 금액이 %s 오릅니다. 여러 건물에 장착하면 가장 높은 값 하나만 적용됩니다."), *V));
 	case EBuildingTraitTarget::HRPower:
-		return FText::FromString(FString::Printf(TEXT("일반 채용의 잠재 등급 확률 표를 결정하는 HR 파워가 %s 늘어납니다. HR 부서 직원의 강화 레벨 합과 같은 자리에 더해지고, 10/20/30/50 을 넘길 때 확률 표가 좋아집니다. 고급·프리미엄 채용에는 영향이 없습니다."), *V));
-	case EBuildingTraitTarget::AuraPower:
-		return FText::FromString(FString::Printf(TEXT("특수 빌딩 영향권 안에 있을 때, 특수 빌딩이 주는 버프가 %s 강해집니다. 영향권 밖에서는 효과가 없습니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("일반 채용의 HR 파워가 %s 늘어납니다."), *V));
 	case EBuildingTraitTarget::VaultCapacity:
-		return FText::FromString(FString::Printf(TEXT("금고에 담아 둘 수 있는 금액이 %s 늘어납니다. 금고용량 강화와 곱해집니다. 사무실 밖에서 쌓이는 운영 수익만 금고를 거치며, 꽉 차면 초과분은 사라집니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("금고 용량이 %s 늘어납니다. 금고용량 강화와 곱해집니다."), *V));
 	case EBuildingTraitTarget::RiskLoss:
-		return FText::FromString(FString::Printf(TEXT("개발 중 돌발 이벤트에서 도박에 실패했을 때 손실 폭이 %s 줄어듭니다. 산업에 따라 줄어드는 것이 개발 점수일 수도, 출시 후 수익 배율일 수도 있습니다. 성공률은 오르지 않습니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("돌발 이벤트 도박에 실패했을 때 손실이 %s 줄어듭니다."), *V));
 	case EBuildingTraitTarget::MetaAmplify:
-		return FText::FromString(FString::Printf(TEXT("이 건물의 다른 특성 효과와 받고 있는 특수 빌딩 오라가 모두 %s 강해집니다. 특수 빌딩 버프 흡수와는 서로 증폭하지 않고, 개수로 표시되는 효과는 정수 단위로 반영됩니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("이 건물의 다른 특성 효과가 %s 강해집니다."), *V));
 	case EBuildingTraitTarget::ProductionCount:
 		return FText::FromString(FString::Printf(TEXT("제조 주문 수량이 %s개 늘어납니다."), *V));
 	case EBuildingTraitTarget::GambleSuccess:
-		return FText::FromString(FString::Printf(TEXT("개발 중 돌발 이벤트의 도박 성공률이 %s 올라갑니다."), *V));
+		return FText::FromString(FString::Printf(TEXT("돌발 이벤트 도박 성공률이 %s 오릅니다."), *V));
 	default:
 		return FText::GetEmpty();
 	}

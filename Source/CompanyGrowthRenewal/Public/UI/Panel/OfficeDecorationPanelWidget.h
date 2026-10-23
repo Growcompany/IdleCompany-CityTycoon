@@ -5,21 +5,25 @@
 #include "CoreMinimal.h"
 #include "UI/AnimatedActivatableWidget.h"
 #include "Table/DecorationCardTable.h"
+#include "Table/DecorationCatalogTable.h"
 #include "OfficeDecorationPanelWidget.generated.h"
 
 class UButtonWidget;
+class UCloseButtonWidget;
+class UTabButtonWidget;
 class UTableManagerSubsystem;
 class UListView;
 class UCommonButtonGroupBase;
 class AOfficeInterior;
 class UEntityCardData;
 class UOfficeDecorationCardWidget;
+class UCommonTextBlock;
+class UCommonButtonBase;
 
 /**
  * 오피스 장식 배치 패널
- * - 8개 카테고리: 그림, 창문, 의자, 가구, 파티션, 벽, 화분, 바닥 타일
- * - CommonButtonGroup으로 탭 버튼 관리
- * - 각 카테고리별 WidgetSwitcher로 전환
+ * - 큰 분류와 세부 필터를 별도 CommonButtonGroup으로 관리
+ * - 카드 클릭은 기존 배치 경로로 바로 연결
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UOfficeDecorationPanelWidget : public UAnimatedActivatableWidget
@@ -33,8 +37,24 @@ class COMPANYGROWTHRENEWAL_API UOfficeDecorationPanelWidget : public UAnimatedAc
 	UPROPERTY()
 	UCommonButtonGroupBase* DecorationTabButtonGroup;
 
-	// 인덱스에 해당하는 카테고리 로드
-	void LoadCategoryByIndex(int32 CategoryIndex);
+	UPROPERTY() UCommonButtonGroupBase* CatalogGroupButtons;
+	UPROPERTY() TArray<FDecorationCatalogRow> CatalogRows;
+	TArray<FName> CatalogGroups;
+	int32 CurrentGroupIndex = 0;
+	int32 CurrentFilterIndex = 0;
+	void RefreshCatalog();
+	void UpdateCategoryFilters();
+	TArray<UButtonWidget*> GetCategoryButtons() const;
+	const FDecorationCatalogRow* FindCategory(EDecorationCategory Category) const;
+
+public:
+	UWidget* GetCloseButtonWidget() const;
+	// 튜토리얼 M20 — 카테고리가 지금 목록에 나오는가(RefreshCatalog 의 그룹·세부 필터 거르기와 같은 규칙)
+	bool IsCategoryListed(EDecorationCategory Category) const;
+	// 그 카테고리로 가는 다음 탭 — 다른 그룹이면 그룹 탭, 같은 그룹의 다른 세부 필터면 그 카테고리 버튼, 이미 보이면 nullptr
+	UWidget* GetCategoryNavigationWidget(EDecorationCategory Category) const;
+	// 생성된 카드 중 지금 자금으로 살 수 있는 가장 싼 카드. 가상화로 아직 안 만들어진 카드는 짚지 못한다
+	UWidget* GetCheapestAffordableCardWidget(EDecorationCategory Category) const;
 
 protected:
 	virtual void NativeConstruct() override;
@@ -44,18 +64,30 @@ protected:
 
 	UFUNCTION()
 	void OnBackButtonClicked();
+	UFUNCTION() void OnRelocateClicked();
+	bool bPendingPlacementEdit = false;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UButtonWidget* RelocateButton;
 
 	// 탭 선택 변경 이벤트 (CommonButtonGroup 델리게이트)
 	UFUNCTION()
 	void OnDecorationTabSelectionChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
+	UFUNCTION()
+	void OnCatalogGroupChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
 
-	// 카테고리별 카드 새로고침 (ListView 통합)
-	void RefreshDecorationCards(EDecorationCategory Category);
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget)) UTabButtonWidget* GroupTab0;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget)) UTabButtonWidget* GroupTab1;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget)) UTabButtonWidget* GroupTab2;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget)) UTabButtonWidget* GroupTab3;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget)) UButtonWidget* AllTab;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget)) UCommonTextBlock* CatalogCount;
 
+
+	// 공용 닫기 X (UIE_CloseButton)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UButtonWidget* BackButton;
+	TObjectPtr<UCloseButtonWidget> BackButton;
 
-	// 카테고리 탭 버튼들 (8개)
+	// 카테고리 탭 버튼들
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButtonWidget* PictureTab;
 
@@ -80,12 +112,12 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UButtonWidget* FloorTileTab;
 
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UButtonWidget* CarpetTab;
+
 	// 장식 카드 ListView (모든 카테고리 공용)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UListView* DecorationListView;
-
-	// 현재 선택된 카테고리
-	EDecorationCategory CurrentCategory;
 
 	// 인덱스 → 카테고리 변환
 	EDecorationCategory IndexToCategory(int32 Index) const;

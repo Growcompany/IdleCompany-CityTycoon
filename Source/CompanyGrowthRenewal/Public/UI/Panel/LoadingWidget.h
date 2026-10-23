@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "Styling/SlateBrush.h"
 #include "LoadingWidget.generated.h"
 
 class UProgressBar;
@@ -69,7 +70,7 @@ protected:
 	// ---- 튜너블 (WBP CDO 에서 조정) ----
 	// 전환 대상 레벨 패키지 경로 (데이터 주도)
 	UPROPERTY(EditAnywhere, Category = "Loading")
-	FString TargetLevelPackagePath = TEXT("/Game/CompanyGrowth/Level/MainMap_TheRiverwalkCity");
+	FString TargetLevelPackagePath = TEXT("/Game/CompanyGrowth/Level/MainMap_City");
 
 	// 최소 표시 시간(초) — 바가 이 시간에 걸쳐 차도록 페이스 고정 (깜빡임 방지)
 	UPROPERTY(EditAnywhere, Category = "Loading")
@@ -87,13 +88,52 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Loading")
 	float LoadTimeout = 30.0f;
 
+	// 첫 부팅 그림 위에만 그리는 장식. WBP 브러시 참조가 쿠킹 대상 에셋을 소유한다.
+	UPROPERTY(EditAnywhere, Category = "Loading|Ambient")
+	FSlateBrush SailboatBrush;
+
+	UPROPERTY(EditAnywhere, Category = "Loading|Ambient")
+	FSlateBrush WakeBrush;
+
+	// 배경 그림 폭에 대한 배의 크기와 초당 이동량.
+	UPROPERTY(EditDefaultsOnly, Category = "Loading|Ambient", meta = (ClampMin = "0.001"))
+	float SailboatWidthUV = 0.040f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Loading|Ambient")
+	float SailboatSpeedUV = 0.008f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Loading|Ambient", meta = (ClampMin = "0", ClampMax = "1"))
+	float WakeOpacity = 0.16f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Loading|Ambient", meta = (ClampMin = "0"))
+	float CloudDriftScale = 1.f;
+
+	UPROPERTY(EditAnywhere, Category = "Loading|Ambient")
+	FSlateBrush FactorySmokeBrush;
+
+	// 배경 그림의 굴뚝 입구 좌표. 화면 크롭과 같은 Paint 공간으로 변환한다.
+	UPROPERTY(EditAnywhere, Category = "Loading|Ambient")
+	TArray<FVector2D> FactoryChimneyUVs;
+
+	// 하늘 새가 나는 높이 범위(배경 그림 높이 비율, 최소·최대)와 사라지는 가로 위치(그림 폭 비율).
+	// 기본값은 좌상단 로고를 비켜 가는 배치 — 로고가 다른 곳에 있는 변형 WBP 가 바꾼다.
+	UPROPERTY(EditAnywhere, Category = "Loading|Ambient")
+	FVector2D SkyBirdBandY = FVector2D(0.09f, 0.24f);
+
+	UPROPERTY(EditAnywhere, Category = "Loading|Ambient")
+	float SkyBirdExitX = 0.45f;
+
+	// 바람 줄이 지나는 높이를 통째로 옮기는 값(화면 단위, 위쪽이 음수)
+	UPROPERTY(EditAnywhere, Category = "Loading|Ambient")
+	float WindBandOffsetY = 0.f;
+
 private:
 	void StartTargetLevelLoad();
 	void BeginTransition();
 	void UpdateProgressUI();
 
 	// ---- 앰비언트 새 (하늘 실루엣 — 에셋 없이 NativePaint 라인 드로잉) ----
-	// 로고(좌상단)와 안 겹치게 x 0.30 이하로는 안 들어옴. 우→좌 드리프트 + 날갯짓.
+	// 하늘 새는 SkyBirdExitX 에서 사라져 로고와 안 겹친다. 우→좌 드리프트 + 날갯짓.
 	struct FAmbientBird
 	{
 		float PosX = 0.f;        // 화면폭 비율
@@ -103,10 +143,30 @@ private:
 		float FlapPhase = 0.f;
 		float FlapSpeed = 7.f;
 		float DriftPhase = 0.f;
+		bool bSea = false;
 	};
 	TArray<FAmbientBird> Birds;
 	void ResetBird(FAmbientBird& Bird, bool bInitialScatter);
 	void TickAmbientBirds(float InDeltaTime);
+
+	struct FWakeMark
+	{
+		FVector2D UV = FVector2D::ZeroVector;
+		float Age = 0.f;
+	};
+	struct FAmbientBoat
+	{
+		float PosX = 0.f;
+		float BaseY = 0.f;
+		float SpeedX = 0.f;
+		float WidthUV = 0.f;
+		float BobPhase = 0.f;
+		float WakeClock = 0.f;
+		TArray<FWakeMark> Wake;
+	};
+	FAmbientBoat Sailboat;
+	void TickAmbientBoat(FAmbientBoat& Boat, float InDeltaTime);
+	float SmokeTime = 0.f;
 
 	float CloudTime = 0.0f;
 	void TickClouds(float InDeltaTime);

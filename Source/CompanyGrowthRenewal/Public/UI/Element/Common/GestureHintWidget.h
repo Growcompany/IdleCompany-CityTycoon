@@ -29,6 +29,8 @@ public:
 	void SetGesture(EGestureHintKind Kind);
 	void SetLabel(const FText& Label);
 	EGestureHintKind GetGesture() const { return Gesture; }
+	// 손 그림이 움직이며 덮는 영역(OverlayGeometry 로컬) ― 말풍선이 손을 피하게 한다. 지오메트리가 아직 없으면 false
+	bool GetHandRectLocal(const FGeometry& OverlayGeometry, FSlateRect& OutRect) const;
 
 protected:
 	virtual void NativeConstruct() override;

@@ -19,7 +19,7 @@ class UTableManagerSubsystem;
  * - 각 티어 범위 필터 (1-10, ..., 91-100)
  * - Back 버튼으로 닫기
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOfficeCollectionPanelWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()

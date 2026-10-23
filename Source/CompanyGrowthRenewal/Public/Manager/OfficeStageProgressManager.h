@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "Data/CloudEconomyData.h"
 #include "Data/StageProgressData.h"
 #include "Data/EmployeeTypes.h"
 #include "Table/ProjectDataTable.h"
@@ -13,13 +14,16 @@
 #include "Enum/DevelopStartResult.h"
 #include "Data/ProjectBoardData.h"
 #include "Table/BoostGambleTable.h"
+#include "Utils/EmployeeEquipmentEffectEvaluator.h"
 #include "Engine/DeveloperSettings.h"
 #include "OfficeStageProgressManager.generated.h"
 
 class UEmployeeManager;
 class UResourceItemManager;
+class UCloudEconomySubsystem;
 class UTableManagerSubsystem;
 class UProjectTraitEventHandler;
+class AOfficeworker;
 struct FOperationData;
 struct FProjectEventData;
 
@@ -42,7 +46,7 @@ public:
 	// 종료 이펙트+환호 후 출시 확인 팝업까지의 대기 (초)
 	UPROPERTY(EditAnywhere, config, Category = "진행 연출", meta = (ClampMin = "0.0", ClampMax = "6.0",
 		DisplayName = "종료 후 출시 팝업 대기 (초)"))
-	float LaunchPopupDelay = 3.0f;
+	float LaunchPopupDelay = 0.9f;
 
 	virtual FName GetCategoryName() const override { return TEXT("Game"); }
 };
@@ -100,9 +104,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnStepStartEffect);
 // 프로젝트 선택 시 (타이머/직원 모드 변경 없이 데이터만 설정됨)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnProjectSelected);
 
-// 구슬 비행 요청 (직원 위치 → ProgressBar). OrbCount = 업무속도 Overflow 환산 배출 개수(정상 틱), 크리는 수신부에서 고정 버스트로 override.
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FOnScoreOrbRequested,
-	FVector, WorldPosition, int32, StepNumber, float, Score, bool, bIsCritical, int32, OrbCount);
+// 목적지별 구슬/크리 외형을 유지하며, bPlaySpectacle은 원본 기여의 첫 목적지에서만 켠다.
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(FOnScoreOrbRequested,
+	FVector, WorldPosition, int32, StepNumber, float, Score, bool, bIsCritical, int32, OrbCount, bool, bPlaySpectacle);
 
 // 티어 해금 시
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTierUnlocked, int32, NewTier);
@@ -214,6 +218,19 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Stage Progress|Score")
 	void AddDisciplineContribution(int32 DisciplineSlot, float Score);
 
+	/** 원본 기여 1건의 모든 목적지를 검증한 뒤 점수와 장비 이력을 한 번 확정한다. */
+	bool TryCommitContributionBatch(const FEquipmentContributionContext& Context,
+		const TArray<FEquipmentContributionPacket>& Packets, TArray<FEquipmentContributionPacket>& OutAppliedPackets);
+	float GetContributionYieldMultiplier() const;
+	TArray<FEquipmentDisciplineState> GetEquipmentDisciplines() const;
+	const FEquipmentEffectLoadout& GetEquipmentLoadout(int32 EmployeeId) const;
+	TArray<FEquipmentParticipant> GetEquipmentParticipants() const;
+	/** 호출 중에만 유효한 계정 원장 참조. 액터는 이를 캐시하거나 별도로 저장하지 않는다. */
+	FEquipmentAttemptRuntime* FindEquipmentAttempt() const;
+	void ApplyEquipmentRelief(const TArray<FEquipmentReliefAction>& Actions);
+	UFUNCTION(BlueprintCallable, Category = "Stage Progress|Equipment")
+	bool RequestEquipmentManualPriority(int32 EmployeeId, int32 DisciplineSlot);
+
 	/**
 	 * 점수 추가 (Active 스킬 보너스 등 외부 점수) — 활성 직능 스텝에 균등 배분
 	 * @param BonusScore 추가할 점수
@@ -303,7 +320,7 @@ public:
 	FOnScoreOrbRequested OnScoreOrbRequested;
 
 	UFUNCTION(BlueprintCallable, Category = "Stage Progress|Score")
-	void RequestScoreOrb(FVector WorldPos, int32 StepNumber, float Score, bool bIsCritical, int32 OrbCount);
+	void RequestScoreOrb(FVector WorldPos, int32 StepNumber, float Score, bool bIsCritical, int32 OrbCount, bool bPlaySpectacle = true);
 
 	// ===== GDS 착수/티어 시스템 (프로젝트형 산업군 전용) =====
 
@@ -332,7 +349,7 @@ public:
 	 * @param ExpectedQuality 현재 로스터 기준 예상 품질 [0.5, 2.0] (FProjectOutlookEstimate::ExpectedQuality)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Stage Progress|Board")
-	void EstimatePitchEconomy(ECompanyType Industry, float ExpectedQuality, bool bTrend,
+	void EstimatePitchEconomy(ECompanyType Industry, float ExpectedQuality,
 		int64& OutRevenue, int32& OutOpTimeSec, int32 ProjectNumberOverride = -1);
 
 	/**
@@ -390,6 +407,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Stage Progress|Board")
 	void SetTierProgress(const FProjectTierProgress& InProgress) { TierProgress = InProgress; }
 
+	// 최초 제품 개발 완료 뒤 기존 도감 완성과 진행 안내를 갱신한다.
+	void NotifyManufacturingProductDeveloped(int32 ProjectIndex);
+
 	// ===== 이벤트/티어 델리게이트 =====
 
 	UPROPERTY(BlueprintAssignable, Category = "Stage Progress|Board")
@@ -420,7 +440,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Stage Progress|Lifecycle")
 	bool IsFocusLocked() const
 	{
-		return Lifecycle == EProjectLifecycle::Developing || Lifecycle == EProjectLifecycle::LaunchPending;
+		return IsFocusLockedPhase(Lifecycle);
 	}
 
 	/**
@@ -460,6 +480,10 @@ public:
 
 	// ===== 출시 시스템 =====
 
+	/** 출시 결과의 전리품을 한 번 추첨해 저장한다. 지급은 출시 확정 시에만 한다. */
+	UFUNCTION(BlueprintCallable, Category = "Stage Progress|Launch")
+	void PrepareLaunchLoot();
+
 	/**
 	 * 출시/양산 확정 시작 (LaunchConfirmWidget에서 호출)
 	 */
@@ -497,6 +521,38 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Stage Progress|Launch")
 	bool TryRetryDevelopment();
+
+	// ========== 서버 권위 컨티뉴 ==========
+
+	/** 요청 1건 완료. 성공·실패 어느 쪽이든 정확히 1회 호출된다 */
+	DECLARE_DELEGATE_OneParam(FOnStageEconomyDone, bool /*bOk*/);
+
+	/**
+	 * `/wallet/spend`(office.retryDevelopment) -> 성공 응답 뒤에만 RetryCount 증가 + 타이머 재개.
+	 * 차감은 서버가 하고 응답 지갑이 콜백 전에 로컬에 적용된다 ― 로컬에서 또 깎지 않는다.
+	 */
+	void RequestRetryDevelopment(FOnStageEconomyDone Done);
+
+	/**
+	 * 위와 같은 요청인데 **실패 코드까지** 준다(1-B-4c).
+	 * 코드가 없으면 호출부가 부족액 토스트로 서버·네트워크 실패까지 덮는다.
+	 * bool 버전은 이 함수로 위임한다 ― 기존 호출부는 그대로 컴파일된다.
+	 */
+	void RequestRetryDevelopment(FOnCloudEconomyOpDone Done);
+
+	/** `/wallet/spend` reason ― spendRules.json 과 바이트 단위로 같아야 한다(구 이름 office.stage 는 폐기) */
+	static FName GetRetryDevelopmentSpendReason();
+
+	/** 중복 클릭 차단 키 ― 오피스 프로젝트는 동시에 하나뿐이라 인자가 없다 */
+	static FName RetryDevelopmentActionKey();
+
+	/** `/wallet/credit` source ― creditRules.json 과 바이트 단위로 같아야 한다 */
+	static FName GetCodexTierCreditSource();
+	static FName GetCodexFullCreditSource();
+
+	/** 지급 claimKey ― 서버 claims 문서 ID 가 된다(^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$) */
+	static FString CodexTierClaimKey(int32 Tier);
+	static FString CodexFullClaimKey();
 
 	// 실패 프로젝트 [폐기]는 별도 API 없이 기존 취소 경로(HandleLaunchDismissed)를 그대로 탄다 — 동작이 동일하다
 
@@ -543,9 +599,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Stage Progress|Fever")
 	float GetFeverScoreMultiplier() const { return bFeverActive ? FeverOutputMult : 1.0f; }
 
-	// 이번 판에 직원 1인이 받은 경험치 총량(3스텝 합, 큐브 배율 전) — 게이트 판정보다 먼저 지급되므로 실패 화면도 이걸 쓴다
+	// 개발·추가 개발 중 참여 직원들에게 실제 적립된 개인 경험치 합계. 결과 데이터와 함께 저장된다.
 	UFUNCTION(BlueprintPure, Category = "Stage Progress")
-	float GetLastRoundEmployeeExp() const { return LastRoundEmployeeExp; }
+	float GetLastRoundEmployeeExp() const { return ProgressData.EarnedExperience; }
 
 protected:
 	// ===== 내부 처리 함수 =====
@@ -576,6 +632,19 @@ protected:
 	float CheckCritical() const;
 
 private:
+
+	friend class FEquipmentWorkerOwnershipTest;
+	void BeginEquipmentAttempt(bool bNewAttempt, float Duration);
+	void TickEquipmentClock(float DeltaTime);
+	void FinalizeEquipmentAttempt(EEquipmentAttemptOutcome Outcome);
+	mutable int64 EquipmentCachedRevision = -1;
+	mutable TMap<int32, FEquipmentEffectLoadout> EquipmentLoadoutCache;
+	mutable TMap<int32, TWeakObjectPtr<AOfficeworker>> EquipmentWorkerCache;
+	mutable bool bEquipmentWorkerCacheDirty = true;
+	FDelegateHandle EquipmentActorSpawnedHandle;
+	void HandleEquipmentActorSpawned(AActor* SpawnedActor);
+	void HandleEquipmentChanged();
+	void RefreshEquipmentWorkerCache() const;
 	// 스테이지 진행 데이터
 	UPROPERTY()
 	FStageProgressData ProgressData;
@@ -584,9 +653,6 @@ private:
 	UPROPERTY()
 	bool bStageInProgress = false;
 
-	// 이번 판 직원 경험치 누적 (타이머 종료 시 0 으로 리셋 후 3스텝 합산)
-	UPROPERTY()
-	float LastRoundEmployeeExp = 0.0f;
 
 	// 동시 진행 타이머 핸들
 	FTimerHandle SimultaneousTimerHandle;
@@ -642,11 +708,25 @@ private:
 	static constexpr int32 CodexTierMilestoneDiamond = 20;
 	static constexpr int32 CodexFullMilestoneDiamond = 200;
 
-	// 자체개발 클리어 직후 도감 마일스톤(티어 10/10, 전체 100%) 체크 + 보상 지급(중복 방지, 세이브).
+	// 자체개발 클리어 직후 도감 마일스톤(티어 10/10, 전체 100%) 체크 + 보상 요청(중복 방지, 세이브).
 	void CheckAndGrantCodexMilestone(int32 ClearedProjectIndex);
 
-	// 리뷰 /40 계산 + (장르,소재) 발견 기록 — 개발 종료 시, InHouse 프로젝트형만
+	// 서버 응답 뒤 로컬 효과 — RetryCount 증가 + 기간 연장 + 타이머 재개. 게이트를 다시 검사한다.
+	bool ApplyRetryDevelopmentEffect();
+
+	// 마일스톤 지급 요청 — 성공/ALREADY_CLAIMED 면 로컬 기록(재요청 중단), 성공만 토스트.
+	// 지갑은 응답이 적용하므로 로컬 StoreResource 는 하지 않는다(이중 계상).
+	void RequestCodexTierMilestone(int32 Tier);
+	void RequestCodexFullMilestone();
+
+	UCloudEconomySubsystem* GetCloudEconomy() const;
+
+	// 승급(7/7)만 토스트가 있어 1~6 번째 클리어는 화면에 아무 변화가 없었다 - 진행이 오른 것을 그 자리에서 알린다
+	void NotifyTierProgressAdvanced() const;
+
+	// 리뷰 /40와 첫 발견 여부 계산 — 개발 종료 시, InHouse 프로젝트형만
 	void ComputeReviewAndDiscovery();
+	void CommitLaunchDiscovery();
 
 	// 타이머 틱 간격 (초)
 	static constexpr float TimerTickInterval = 0.1f;

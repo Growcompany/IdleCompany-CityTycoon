@@ -3,9 +3,28 @@
 #include "UI/AnimatedActivatableWidget.h"
 #include "Animation/WidgetAnimation.h"
 #include "TimerManager.h"
+#include "Utils/FWidgetAnimationUtils.h"
+
+namespace
+{
+	struct FAppearPopSettings
+	{
+		float Duration;
+		float StartScale;
+		float RiseDistance;
+	};
+
+	constexpr FAppearPopSettings GetPopSettings(EAppearPopStyle Style)
+	{
+		return Style == EAppearPopStyle::Compact
+			? FAppearPopSettings{0.18f, 0.96f, 12.f}
+			: FAppearPopSettings{0.24f, 0.92f, 24.f};
+	}
+}
 
 void UAnimatedActivatableWidget::NativeOnActivated()
 {
+	FinishAppearTween();
 	Super::NativeOnActivated();
 
 	bIsClosing = false;
@@ -52,13 +71,19 @@ void UAnimatedActivatableWidget::NativeOnActivated()
 void UAnimatedActivatableWidget::NativeOnDeactivated()
 {
 	// 풀 재사용 대비 잔여 상태 정리 (트윈 중단 + failsafe 해제)
-	bAppearing = false;
+	FinishAppearTween();
 	if (UWorld* OwningWorld = GetWorld())
 	{
 		OwningWorld->GetTimerManager().ClearTimer(CloseFailsafeHandle);
 	}
 
 	Super::NativeOnDeactivated();
+}
+
+void UAnimatedActivatableWidget::NativeDestruct()
+{
+	FinishAppearTween();
+	Super::NativeDestruct();
 }
 
 UWidget* UAnimatedActivatableWidget::GetSlideWidget() const
@@ -76,11 +101,75 @@ FVector2D UAnimatedActivatableWidget::GetAppearOffset() const
 	}
 }
 
-void UAnimatedActivatableWidget::StartAppearTween()
+void UAnimatedActivatableWidget::PlayOverlayAppear()
 {
+	StartAppearTween(true);
+}
+
+void UAnimatedActivatableWidget::StartAppearTween(bool bFadeIn)
+{
+	FinishAppearTween();
+	if (bInstantAppear || FMotionGate::IsReduced())
+	{
+		return;
+	}
+
+	const bool bWantsPop = AppearFrom == EAppearSlideFrom::Bottom && !AppearPopTargetName.IsNone();
+	UWidget* PopWidget = bWantsPop ? GetWidgetFromName(AppearPopTargetName) : nullptr;
+	if (bWantsPop && !PopWidget)
+	{
+		// 이름이 UMG 자동 생성분(SizeBox_128 등)이라 WBP 를 손대면 조용히 어긋난다. 그대로 두면
+		// 딤까지 같이 밀려 화면 가장자리에 띠가 생기는데, 증상만으로는 원인을 못 찾는다.
+		UE_LOG(LogTemp, Warning, TEXT("[Appear] %s: 팝 대상 '%s' 를 WBP 에서 못 찾음 — 위젯 전체 슬라이드로 대체됨."),
+			*GetClass()->GetName(), *AppearPopTargetName.ToString());
+	}
+	bPopping = PopWidget != nullptr;
+	UWidget* TweenWidget = bPopping ? PopWidget : GetSlideWidget();
+	AppearTweenTarget = TweenWidget;
+	AppearOriginalTransform = TweenWidget->GetRenderTransform();
+	AppearOriginalPivot = TweenWidget->GetRenderTransformPivot();
 	bAppearing = true;
+	bFading = bFadeIn;
 	AppearElapsed = 0.f;
-	GetSlideWidget()->SetRenderTranslation(GetAppearOffset());
+	AppearOriginalOpacity = GetRenderOpacity();
+	if (bFading)
+	{
+		SetRenderOpacity(0.f);
+	}
+
+	FWidgetTransform InitialTransform = AppearOriginalTransform;
+	if (bPopping)
+	{
+		const FAppearPopSettings PopSettings = GetPopSettings(AppearPopStyle);
+		TweenWidget->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+		InitialTransform.Scale *= PopSettings.StartScale;
+		InitialTransform.Translation += FVector2D(0.f, PopSettings.RiseDistance);
+	}
+	else
+	{
+		InitialTransform.Translation += GetAppearOffset();
+	}
+	TweenWidget->SetRenderTransform(InitialTransform);
+}
+
+void UAnimatedActivatableWidget::FinishAppearTween()
+{
+	if (bAppearing)
+	{
+		if (UWidget* TweenWidget = AppearTweenTarget.Get())
+		{
+			TweenWidget->SetRenderTransform(AppearOriginalTransform);
+			TweenWidget->SetRenderTransformPivot(AppearOriginalPivot);
+		}
+		if (bFading)
+		{
+			SetRenderOpacity(AppearOriginalOpacity);
+		}
+	}
+	bAppearing = false;
+	bPopping = false;
+	bFading = false;
+	AppearTweenTarget.Reset();
 }
 
 void UAnimatedActivatableWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -91,17 +180,38 @@ void UAnimatedActivatableWidget::NativeTick(const FGeometry& MyGeometry, float I
 	{
 		return;
 	}
+	if (FMotionGate::IsReduced() || !AppearTweenTarget.IsValid())
+	{
+		FinishAppearTween();
+		return;
+	}
 
 	AppearElapsed += InDeltaTime;
-	const float T = (AppearDuration > 0.f) ? FMath::Clamp(AppearElapsed / AppearDuration, 0.f, 1.f) : 1.f;
+	const FAppearPopSettings PopSettings = GetPopSettings(AppearPopStyle);
+	const float Duration = bPopping ? PopSettings.Duration : AppearDuration;
+	const float T = Duration > 0.f ? FMath::Clamp(AppearElapsed / Duration, 0.f, 1.f) : 1.f;
 	const float Eased = 1.f - FMath::Pow(1.f - T, 3.f); // CubicOut
-	UWidget* SlideWidget = GetSlideWidget();
-	SlideWidget->SetRenderTranslation(GetAppearOffset() * (1.f - Eased));
+	FWidgetTransform CurrentTransform = AppearOriginalTransform;
+	if (bPopping)
+	{
+		// 오버슈트 이즈(EaseOutBack)는 쓰지 않는다 — 스케일이 1.0 을 넘는 순간 ClipToBounds 부모가
+		// 내용판 테두리를 깎고 래스터가 거칠어진다. 커지는 느낌은 시작 스케일로만 낸다.
+		CurrentTransform.Scale *= FMath::Lerp(PopSettings.StartScale, 1.f, Eased);
+		CurrentTransform.Translation += FVector2D(0.f, PopSettings.RiseDistance * (1.f - Eased));
+	}
+	else
+	{
+		CurrentTransform.Translation += GetAppearOffset() * (1.f - Eased);
+	}
+	AppearTweenTarget->SetRenderTransform(CurrentTransform);
+	if (bFading)
+	{
+		SetRenderOpacity(AppearOriginalOpacity * Eased);
+	}
 
 	if (T >= 1.f)
 	{
-		bAppearing = false;
-		SlideWidget->SetRenderTranslation(FVector2D::ZeroVector);
+		FinishAppearTween();
 	}
 }
 
@@ -112,6 +222,7 @@ void UAnimatedActivatableWidget::CloseWithAnimation()
 		return;
 	}
 	bIsClosing = true;
+	FinishAppearTween();
 
 	if (Hide)
 	{

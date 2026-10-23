@@ -14,7 +14,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWallSelectionCancelled);
 /**
  * 벽 장식 배치 시 왼쪽/오른쪽 벽을 선택하는 UI
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UWallSelectionWidget : public UUserWidget
 {
 	GENERATED_BODY()

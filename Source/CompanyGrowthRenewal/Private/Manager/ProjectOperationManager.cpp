@@ -1,20 +1,21 @@
 #include "Manager/ProjectOperationManager.h"
 #include "Manager/ResourceItemManager.h"
-#include "Manager/EntityManager.h"
 #include "Manager/EmployeeManager.h"
 #include "Manager/SaveLoadManager.h"
 #include "Manager/MissionManagerSubsystem.h"
-#include "Manager/TrendManagerSubsystem.h"
 #include "TableManagerSubsystem.h"
 #include "Core/CGGameInstance.h"
 #include "Engine/World.h"
 #include "Data/BuildingEnhancementData.h"
 #include "Entity/Building/BuildingBaseActor.h"
 #include "Manager/BuildingTraitManagerSubsystem.h"
+#include "Manager/LiveOpsSubsystem.h"
+#include "Manager/SideContentSubsystem.h"
 #include "Enum/BuildingTraitTarget.h"
 #include "Data/EmployeeStatsData.h"
 #include "Data/EmployeePotentialData.h"
 #include "Data/ProjectBoardData.h"
+#include "Data/ShippedRecord.h"
 #include "Data/TierLayout.h"
 
 // 이 파일에서 특성 배율을 네 군데(감쇠/수명/스프레드/금고)에 붙이므로 획득을 한 곳으로 모은다.
@@ -118,7 +119,48 @@ namespace
 
 int32 UProjectOperationManager::StartOperation(const FStageProgressData& StageData, int32 BuildingID)
 {
-	FOperationData NewOperation;
+	const FInitialOperationSetup Setup = BuildInitialOperation(StageData, BuildingID);
+	FOperationData NewOperation = Setup.Operation;
+
+	int32 OperationIndex = ActiveOperations.Add(NewOperation);
+	if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
+	{
+		const EQualityGrade LaunchedGrade = NewOperation.QualityGrade;
+		SaveMgr->RecordProjectCompletion(LaunchedGrade == EQualityGrade::A || LaunchedGrade == EQualityGrade::S,
+			LaunchedGrade == EQualityGrade::S);
+	}
+
+	OnOperationStarted.Broadcast(BuildingID);
+
+	UE_LOG(LogTemp, Log, TEXT("[ProjectOperationManager] Started Operation: Project=%s, Building=%d, Quality=%s (%.2f), Duration=%.0fs"),
+		*NewOperation.ProjectName,
+		BuildingID,
+		*QualityGradeToAlphabetString(NewOperation.QualityGrade),
+		NewOperation.QualityScore,
+		NewOperation.TotalOperationTime);
+
+	return OperationIndex;
+}
+
+FOperationLaunchForecast UProjectOperationManager::GetLaunchForecast(const FStageProgressData& StageData, int32 BuildingID) const
+{
+	const FInitialOperationSetup Setup = BuildInitialOperation(StageData, BuildingID);
+	FOperationLaunchForecast Forecast;
+	Forecast.EffectiveGrade = Setup.Operation.QualityGrade;
+	Forecast.QualityMultiplier = Setup.QualityMultiplier;
+	Forecast.OperationSeconds = Setup.Operation.TotalOperationTime;
+	Forecast.BaseTotalRevenue = ComputeLaunchRevenue(Setup.BasePeakRevenuePerSecond, 1.0f, 1.0f,
+		Forecast.OperationSeconds, Setup.Operation.HalfLifeFrac);
+	Forecast.TotalRevenue = ComputeLaunchRevenue(Setup.Operation.ActualRevenuePerSecond, 1.0f, 1.0f,
+		Forecast.OperationSeconds, Setup.Operation.HalfLifeFrac);
+	return Forecast;
+}
+
+UProjectOperationManager::FInitialOperationSetup UProjectOperationManager::BuildInitialOperation(
+	const FStageProgressData& StageData, int32 BuildingID) const
+{
+	FInitialOperationSetup Setup;
+	FOperationData& NewOperation = Setup.Operation;
 	NewOperation.ProjectID = StageData.ProjectID;
 	NewOperation.ProjectNumber = StageData.ProjectNumber;
 	NewOperation.StageNumber = StageData.StageNumber;
@@ -143,8 +185,7 @@ int32 UProjectOperationManager::StartOperation(const FStageProgressData& StageDa
 	NewOperation.Volatility = Volatility;
 
 	// 이벤트 보상 배율(예: 규제 변경 "무시" → 0.8) 반영 — 자체개발 운영수익에 적용 (트레이트 배율과 분리)
-	// 산업 PeakMult 곱: 게임 2.2(뾰족)/IT 0.55(낮음). 트렌드 매칭 = 추가 x1.5
-	const float TrendMult = StageData.bTrendMatched ? UTrendManagerSubsystem::TrendPeakMult : 1.0f;
+	// 산업별 피크 배율은 DT_IndustryProfile에서 읽는다.
 	// 품질 등급이 수익 배율을 좌우 (ReviewLeverage=산업별 등급 격차 강도). 리뷰/40은 표시 전용.
 	float Leverage = 1.0f;
 	if (UCGGameInstance* RevGI = UCGGameInstance::GetInstance())
@@ -157,11 +198,14 @@ int32 UProjectOperationManager::StartOperation(const FStageProgressData& StageDa
 		}
 	}
 	const float SpreadMult = ComputeQualityRevenueMult(NewOperation.QualityGrade, Leverage, GetRevenueStabilityFrac(BuildingID));
-	NewOperation.BaseRevenuePerSecond = CalculateBaseRevenue(StageData) * StageData.EventRewardMultiplier * PeakMult * TrendMult * SpreadMult;
+	Setup.QualityMultiplier = SpreadMult;
+	NewOperation.QualityRevenueMultiplier = SpreadMult;
+	const float UnqualifiedBaseRate = CalculateBaseRevenue(StageData) * StageData.EventRewardMultiplier * PeakMult;
+	NewOperation.BaseRevenuePerSecond = UnqualifiedBaseRate * SpreadMult;
 
 	// 표시 경로(출시확인/픽칭 카드)와 같은 함수 — 여기서 배율을 따로 곱하면 표기와 실제가 갈린다
 	NewOperation.TotalOperationTime = ComputeEffectiveOperationTime(
-		StageData.CalculateQualityGrade(), StageData.ProjectNumber, BuildingID);
+		NewOperation.QualityGrade, StageData.ProjectNumber, BuildingID);
 	NewOperation.RemainingTime = NewOperation.TotalOperationTime;
 	NewOperation.ElapsedTime = 0.0f;
 
@@ -169,20 +213,9 @@ int32 UProjectOperationManager::StartOperation(const FStageProgressData& StageDa
 	const float IncomeMult = GetBuildingIncomeMultiplier(BuildingID);
 	const float StatBonus = CalculateEmployeeStatBonus(BuildingID);
 	NewOperation.ActualRevenuePerSecond = NewOperation.BaseRevenuePerSecond * NewOperation.GetTotalMultiplier() * IncomeMult * StatBonus;
+	Setup.BasePeakRevenuePerSecond = UnqualifiedBaseRate * NewOperation.GetTotalMultiplier() * IncomeMult * StatBonus;
 	NewOperation.State = EOperationState::Operating;
-
-	int32 OperationIndex = ActiveOperations.Add(NewOperation);
-
-	OnOperationStarted.Broadcast(BuildingID);
-
-	UE_LOG(LogTemp, Log, TEXT("[ProjectOperationManager] Started Operation: Project=%s, Building=%d, Quality=%s (%.2f), Duration=%.0fs"),
-		*NewOperation.ProjectName,
-		BuildingID,
-		*QualityGradeToAlphabetString(NewOperation.QualityGrade),
-		NewOperation.QualityScore,
-		NewOperation.TotalOperationTime);
-
-	return OperationIndex;
+	return Setup;
 }
 
 void UProjectOperationManager::EndOperation(int32 OperationIndex)
@@ -248,39 +281,32 @@ void UProjectOperationManager::UpdateOperations(float DeltaTime)
 		OnOperationComplete(CompletedIndices[i]);
 	}
 
-	// 모뉴먼트 특수빌딩 자체 패시브 산출 (직원 무관, 매 틱 가산)
-	if (UWorld* W = GetWorld())
+	if (PendingTickPayout > 0)
 	{
-		if (UEntityManager* EM = W->GetSubsystem<UEntityManager>())
+		// ⚠ 클래스 자신의 캐시 접근자를 쓴다. `UCGGameInstance::GetInstance()` 는 정적 포인터라
+		// 이 서브시스템을 소유한 GameInstance 와 같다는 보장이 없고, 어긋나면 돈이 로그 없이 사라진다.
+		if (UResourceItemManager* ResourceMgr = GetResourceItemManager())
 		{
-			int64 MonumentIncome = 0;
-			for (ABuildingBaseActor* B : EM->GetBuildings())
-			{
-				if (B && B->IsKeystoneMonument())
-				{
-					MonumentIncome += B->GetMonumentPassiveOutput();
-				}
-			}
-			if (MonumentIncome > 0)
-			{
-				MonumentIncome = (int64)(MonumentIncome * DeltaTime); // /sec 정규화
-				if (MonumentIncome > 0)
-				{
-					if (UResourceItemManager* ResMgr = GetResourceItemManager())
-					{
-						// 매 틱 디스크 저장 방지(bShouldSave=false) — 주기적 자동저장이 커버
-						ResMgr->StoreResource(EResourceType::Money, MonumentIncome, false);
-					}
-				}
-			}
+			// 매 틱 디스크 저장 방지(bShouldSave=false) — 레벨 전환 시 SaveGameBeforeLevelTransition 이 덮는다
+			ResourceMgr->StoreResource(EResourceType::Money, PendingTickPayout, /*bShouldSave=*/false);
+			// 튜토리얼 M7 이 이 델리게이트로 "첫 수익" 을 판정한다 — 수거 버튼이 없어져도 그대로 동작한다.
+			// 지급 성공 안에서만 방송한다. 밖이면 돈 없이 M7 이 완료된다.
+			OnRevenueCollected.Broadcast(PendingTickPayout);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ProjectOperationManager] ResourceItemManager 없음 — 틱 지급 %lld원 유실"), PendingTickPayout);
 		}
 	}
 
+	// ⚠ 리셋은 반드시 조건 밖 — 안에 두면 누산기가 어떤 이유로든 0 이하로 굳었을 때
+	// 리셋이 영영 안 돌아 그 뒤 모든 건물 수익이 세션 내내 침묵한다.
+	PendingTickPayout = 0;
 }
 
 float UProjectOperationManager::GetBuildingDisplayNetPerSec(int32 BuildingID) const
 {
-	// 표시 정의 = Base × TotalMult × IncomeMult × StatBonus × Decay (진동 제외).
+	// 표시 정의 = Base × TotalMult × IncomeMult × StatBonus × 핫타임 × Decay (진동 제외).
 	// UpdateSingleOperation 의 지급 계산과 동일하되 25초 Volatility 항만 뺀다.
 	for (const FOperationData& Op : ActiveOperations)
 	{
@@ -292,6 +318,10 @@ float UProjectOperationManager::GetBuildingDisplayNetPerSec(int32 BuildingID) co
 		const float IncomeMult = GetBuildingIncomeMultiplier(BuildingID);
 		const float StatBonus = CalculateEmployeeStatBonus(BuildingID);
 		float Rate = Op.BaseRevenuePerSecond * Op.GetTotalMultiplier() * IncomeMult * StatBonus;
+		if (const ULiveOpsSubsystem* LiveOps = GetGameInstance()->GetSubsystem<ULiveOpsSubsystem>())
+		{
+			Rate *= LiveOps->GetRevenueMultiplierNow();
+		}
 
 		const float HalfLifeFrac = (Op.HalfLifeFrac > 0.0f) ? Op.HalfLifeFrac : 0.5f;
 		const float DecayHalfLife = FMath::Max(1.0f, Op.TotalOperationTime * HalfLifeFrac);
@@ -308,21 +338,6 @@ double UProjectOperationManager::GetCompanyNetPerSec() const
 	{
 		Sum += GetBuildingDisplayNetPerSec(Op.BuildingID);
 	}
-
-	// 모뉴먼트 패시브 합산 (어떤 수익 UI에도 안 잡히던 값 — 회사 전체엔 포함)
-	if (UWorld* W = GetWorld())
-	{
-		if (UEntityManager* EM = W->GetSubsystem<UEntityManager>())
-		{
-			for (ABuildingBaseActor* B : EM->GetBuildings())
-			{
-				if (B && B->IsKeystoneMonument())
-				{
-					Sum += static_cast<double>(B->GetMonumentPassiveOutput());
-				}
-			}
-		}
-	}
 	return Sum;
 }
 
@@ -338,7 +353,11 @@ void UProjectOperationManager::UpdateSingleOperation(FOperationData& Operation, 
 	const float StatBonus = CalculateEmployeeStatBonus(Operation.BuildingID);
 	Operation.ActualRevenuePerSecond = Operation.BaseRevenuePerSecond * Operation.GetTotalMultiplier() * IncomeMult * StatBonus;
 
-	// 운영 수익 시간 감쇠 — 산업별 반감기(HalfLifeFrac). 게임 빨리 식음(0.28)/IT 긴 꼬리(0.85).
+	// 핫타임(라이브옵스) 배율 ― 지급 순간에만 곱한다. 저장 필드엔 절대 굽지 않는다(정산은 저장된 원 비율만 쓴다).
+	const ULiveOpsSubsystem* LiveOps = GetGameInstance()->GetSubsystem<ULiveOpsSubsystem>();
+	const float HotMult = LiveOps ? LiveOps->GetRevenueMultiplierNow() : 1.0f;
+
+	// 운영 수익 시간 감쇠 — 산업별 HalfLifeFrac은 운영 시작 때 DT에서 캐시한다.
 	const float HalfLifeFrac = (Operation.HalfLifeFrac > 0.0f) ? Operation.HalfLifeFrac : 0.5f;
 	const float DecayHalfLife = FMath::Max(1.0f, Operation.TotalOperationTime * HalfLifeFrac);
 	const float DecayFactor = FMath::Pow(0.5f, Operation.ElapsedTime / DecayHalfLife);
@@ -353,55 +372,29 @@ void UProjectOperationManager::UpdateSingleOperation(FOperationData& Operation, 
 		Operation.ActualRevenuePerSecond *= FMath::Max(0.0f, 1.0f + Operation.Volatility * Osc);
 	}
 
-	// 수익 누적 (오피스 안/밖 모두 TotalRevenueEarned에는 기록)
-	// 오피스 안에선 StoredRevenue 지급은 건너뛰고 누적 표시만 갱신 (직원 수익과 중복 방지)
-	const float Revenue = Operation.ActualRevenuePerSecond * DeltaTime;
-	if (IsPlayerInOffice(Operation.BuildingID))
+	// 실제 지급은 UpdateOperations 가 전 운영 순회를 마친 뒤 1회로 합산한다.
+	const float Revenue = Operation.ActualRevenuePerSecond * HotMult * DeltaTime;
+	const bool bPlayerInOffice = IsPlayerInOffice(Operation.BuildingID);
+	// 오피스에서는 직원 지급액만 AddEmployeeRevenue 에서 결산한다.
+	if (!bPlayerInOffice)
 	{
 		Operation.TotalRevenueEarned += Revenue;
 	}
-	else
+
+	const FOperationTickPayout Payout = ResolveOperationTickPayout(
+		bPlayerInOffice,
+		Operation.PendingPayout,
+		static_cast<double>(Revenue));
+	Operation.PendingPayout = Payout.NewPending;
+	PendingTickPayout += Payout.PayoutNow;
+
+	if (Payout.PayoutNow > 0)
 	{
-		ProcessRevenue(Operation, Revenue);
+		OnBuildingIncomeStreamed.Broadcast(Operation.BuildingID, Payout.PayoutNow);
 	}
 
 	// 업데이트 델리게이트
 	OnOperationUpdated.Broadcast(Operation.BuildingID, Operation);
-}
-
-void UProjectOperationManager::ProcessRevenue(FOperationData& Operation, float RevenueAmount)
-{
-	if (RevenueAmount <= 0.0f)
-	{
-		return;
-	}
-
-	// 결산용 누적 수익 기록
-	Operation.TotalRevenueEarned += RevenueAmount;
-
-	// 프로젝트 수익은 항상 StoredRevenue에 누적 (OfficeMap 직원 수익과 분리)
-	FOfficeSaveData* OfficeData = GetOfficeSaveDataByBuildingID(Operation.BuildingID);
-	if (OfficeData)
-	{
-		float Capacity = CalculateWarehouseCapacity(Operation.BuildingID);
-
-		// 이미 번 돈은 깎지 않고 신규 적립만 막는다 (용량 축소 시 "쌓은 돈 증발" 회귀 방지). 초과분은 수거로 자연해소.
-		float AvailableSpace = FMath::Max(0.0f, Capacity - OfficeData->StoredRevenue);
-		float AmountToStore = FMath::Min(RevenueAmount, AvailableSpace);
-
-		if (AmountToStore > 0.0f)
-		{
-			OfficeData->StoredRevenue += AmountToStore;
-		}
-
-		// 적립 여부와 무관하게 항상 브로드캐스트 (버블 갱신용)
-		OnWarehouseUpdated.Broadcast(Operation.BuildingID, OfficeData->StoredRevenue, Capacity);
-
-		if (OfficeData->StoredRevenue >= Capacity)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[ProjectOperationManager] Stored Revenue Full: BuildingID=%d"), Operation.BuildingID);
-		}
-	}
 }
 
 void UProjectOperationManager::OnOperationComplete(int32 OperationIndex)
@@ -410,12 +403,11 @@ void UProjectOperationManager::OnOperationComplete(int32 OperationIndex)
 
 	int32 CompletedBuildingID = -1;
 
-	// 운영 완료 시 경험치 분배 및 결산서 생성
+	// 운영 완료 시 결산서 생성
 	if (ActiveOperations.IsValidIndex(OperationIndex))
 	{
 		const FOperationData& Operation = ActiveOperations[OperationIndex];
 		CompletedBuildingID = Operation.BuildingID;
-		DistributeOperationExperience(Operation);
 		GenerateReport(Operation);
 
 	}
@@ -456,7 +448,7 @@ int64 UProjectOperationManager::CollectAllWarehouseByBuilding(int32 BuildingID)
 	return CollectStoredRevenueByBuilding(BuildingID);
 }
 
-int64 UProjectOperationManager::CollectStoredRevenueByBuilding(int32 BuildingID)
+int64 UProjectOperationManager::CollectStoredRevenueByBuilding(int32 BuildingID, bool bSaveImmediately)
 {
 	FOfficeSaveData* OfficeData = GetOfficeSaveDataByBuildingID(BuildingID);
 	if (!OfficeData)
@@ -476,17 +468,22 @@ int64 UProjectOperationManager::CollectStoredRevenueByBuilding(int32 BuildingID)
 		ResourceMgr->StoreResource(EResourceType::Money, CollectedAmount, /*bShouldSave=*/false);
 	}
 
-	OfficeData->StoredRevenue = 0.0f;
+	OfficeData->TakeStoredRevenue();
 
 	OnRevenueCollected.Broadcast(CollectedAmount);
+	// 명시 수거 전용 신호 — 퀘스트 카운터는 이쪽만 듣는다(틱 적립은 초당 1회라 원장을 자동 완성시킨다)
+	OnStoredRevenueCollected.Broadcast(CollectedAmount);
 	OnWarehouseUpdated.Broadcast(BuildingID, 0.0f, CalculateWarehouseCapacity(BuildingID));
 
 	// 디스크 저장 — 레벨 전환 시 LoadGameData 가 디스크 옛값으로 메모리를 덮어쓰는 부활 버그 방지
-	if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
+	if (bSaveImmediately)
 	{
-		if (USaveLoadManager* SLMgr = GI->GetSubsystem<USaveLoadManager>())
+		if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
 		{
-			SLMgr->SaveGameData();
+			if (USaveLoadManager* SLMgr = GI->GetSubsystem<USaveLoadManager>())
+			{
+				SLMgr->SaveGameData();
+			}
 		}
 	}
 
@@ -520,7 +517,13 @@ int64 UProjectOperationManager::CollectAllStoredRevenue()
 	int64 TotalCollected = 0;
 	for (int32 BuildingID : BuildingIds)
 	{
-		TotalCollected += CollectStoredRevenueByBuilding(BuildingID);
+		TotalCollected += CollectStoredRevenueByBuilding(BuildingID, /*bSaveImmediately=*/false);
+	}
+
+	// 건물 수와 무관하게 디스크 쓰기 1회 (42채면 전체 스냅샷 42회였다)
+	if (TotalCollected > 0)
+	{
+		SaveLoadMgr->SaveGameData();
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[ProjectOperationManager] CollectAllStoredRevenue: %d개 빌딩, 총 %lld원"),
@@ -554,7 +557,6 @@ int32 UProjectOperationManager::FillAllStoredRevenue(int64 AmountPerBuilding)
 		const float Capacity = CalculateWarehouseCapacity(BuildingID);
 		if (Capacity <= 0.0f) continue; // 금고 없는(비프로젝트) 건물은 스킵
 		OfficeData->StoredRevenue = Amount; // 용량 무시 절대액 강제 — 수거 시 그대로 회수(대량 코인)
-		// 버블 재평가 트리거 — StoredRevenue >= Capacity 라 VaultFull 버블. InGameLayer 가 OnWarehouseUpdated 구독.
 		OnWarehouseUpdated.Broadcast(BuildingID, OfficeData->StoredRevenue, Capacity);
 		++FilledCount;
 	}
@@ -643,13 +645,6 @@ float UProjectOperationManager::CalculateEmployeeStatBonus(int32 BuildingID) con
 		TotalPotentialMult += UEmployeePotentialHelper::AggregateModifiers(Emp.PotentialAbility).IncomeMult;
 	}
 	const float Count = static_cast<float>(OfficeData->EmployeeList.Num());
-
-	// 잠재 수익줄도 여기로 합류(2026-08-13) — 유일한 소비처였던 방치 수익이 사라져 무효 옵션이 될 뻔했다.
-	// "사무실 평균" 단위여야 인원 증감이 요율을 흔들지 않는다.
-	//
-	// 직원 **스탯**의 수익 기여는 2026-08-13 폐지(구 IncomeBonus → Focus 로 교체). 6스탯 중 유일하게
-	// 사무실 평균으로 작동해 개인 카드에 개인값을 적으면 거짓말이 되는 축이었다. 남은 건 잠재 축뿐이지만
-	// 함수·캐시·무효화 배선은 그대로 둔다 — 잠재 옵션이 바뀌면 여전히 재계산이 필요하다.
 	const float Bonus = TotalPotentialMult / Count;
 
 	CachedStatBonus.Add(BuildingID, Bonus);
@@ -750,7 +745,8 @@ bool UProjectOperationManager::IsPlayerInOffice(int32 BuildingID) const
 		return false;
 	}
 
-	if (!GameInstance->IsInOfficeMap())
+	// 스카이라인에선 false — 적립은 MainMap 과 같은 즉시 자금 경로를 타고, 코인 연출만 빠진다(InGameLayer 부재).
+	if (!GameInstance->IsInOfficeMap() || GameInstance->GetOfficeMode() == EOfficeMode::Skyline)
 	{
 		return false;
 	}
@@ -784,16 +780,43 @@ float UProjectOperationManager::ComputeEffectiveOperationTime(EQualityGrade Grad
 
 float UProjectOperationManager::CalculateBaseRevenue(const FStageProgressData& Data) const
 {
-	return CalculateBaseRevenueForProjectNumber(Data.ProjectNumber);
+	return CalculateBaseRevenueForProjectNumber(Data.ProjectNumber, Data.CompanyType);
 }
 
-float UProjectOperationManager::CalculateBaseRevenueForProjectNumber(int32 ProjectNumber) const
+double UProjectOperationManager::ComputeBaseRevenuePerSec(int32 ProjectNumber, const FIndustryProfileRow& Profile)
 {
-	// 프로젝트 번호 기반 수익, 원/초 (StageNumber 확장 시: (ProjectNumber-1)*MaxStages + StageNumber)
-	// ⚠ OfficeStageProgressManager::EstimatePitchEconomy 의 Base 와 거울이다 — 한쪽만 바꾸면
-	//    카드 표기와 실제 결산이 갈라진다(둘이 같은 산식이라는 게 이 시스템의 계약).
-	float BaseRevenue = static_cast<float>(FTierLayout::RevenueScaleIndex(ProjectNumber)) * 200.0f;
-	return FMath::Max(BaseRevenue, 20.0f);
+	if (!FMath::IsFinite(Profile.RevenueGrowthPerProject) || Profile.RevenueGrowthPerProject <= 0.0
+		|| Profile.RevenueGrowthStartIndex < 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ProjectOperationManager] Invalid revenue growth profile for project %d"), ProjectNumber);
+		return 0.0;
+	}
+	const double Base = FMath::Max(20.0, static_cast<double>(FTierLayout::RevenueScaleIndex(ProjectNumber)) * 200.0);
+	const int32 Steps = FMath::Max(0, ProjectNumber - Profile.RevenueGrowthStartIndex);
+	const double Revenue = Base * FMath::Pow(Profile.RevenueGrowthPerProject, static_cast<double>(Steps));
+	if (!FMath::IsFinite(Revenue))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ProjectOperationManager] Revenue overflow for project %d"), ProjectNumber);
+		return 0.0;
+	}
+	return Revenue;
+}
+
+float UProjectOperationManager::CalculateBaseRevenueForProjectNumber(int32 ProjectNumber, ECompanyType Industry) const
+{
+	FIndustryProfileRow Profile;
+	if (IsProjectType(Industry))
+	{
+		UTableManagerSubsystem* TableMgr = GetTableManager();
+		bool bProfileFound = false;
+		if (TableMgr) Profile = TableMgr->GetIndustryProfile(Industry, bProfileFound);
+		if (!bProfileFound)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ProjectOperationManager] Missing revenue profile for industry %d"), static_cast<int32>(Industry));
+			return 0.0f;
+		}
+	}
+	return static_cast<float>(ComputeBaseRevenuePerSec(ProjectNumber, Profile));
 }
 
 void UProjectOperationManager::GetIndustryCurveKnobs(ECompanyType Industry, float& OutPeakMult, float& OutHalfLifeFrac, float& OutVolatility) const
@@ -842,6 +865,14 @@ float UProjectOperationManager::GetBuildingIncomeMultiplier(int32 BuildingID) co
 	USaveGame_GameData* SaveData = SaveMgr->GetCurrentSaveData();
 	if (!SaveData) return 1.0f;
 
+	// 스카이라인 최고 층 10층당 +1% — 건물이 아니라 계정에 붙는 상시 보너스라 전 건물에 같은 값이 곱해진다.
+	// 수익 경로 세 곳이 전부 이 함수를 지나므로 여기 한 번만 곱하면 표시와 지급이 갈리지 않는다(설계 §모듈2).
+	float SkylineMult = 1.0f;
+	if (USideContentSubsystem* SideMgr = GI->GetSubsystem<USideContentSubsystem>())
+	{
+		SkylineMult = SideMgr->GetSkylineRevenueMultiplier();
+	}
+
 	for (const FBuildingEntitySaveData& B : SaveData->GameData.Buildings)
 	{
 		if (B.BuildingIndex != BuildingID) continue;
@@ -857,9 +888,22 @@ float UProjectOperationManager::GetBuildingIncomeMultiplier(int32 BuildingID) co
 		{
 			RevenueTraitMultiplier = TraitMgr->GetTraitFactor(B.BuildingIndex, EBuildingTraitTarget::OperationRevenue);
 		}
-		return IncomeMult * RevenueTraitMultiplier;
+
+		// 건물 종이 가진 고정 배율. 같은 칸수 안의 종을 가르는 유일한 축이라 여기 없으면 40종이 전부 같은 건물이 된다.
+		float ModelMultiplier = 1.0f;
+		if (UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>())
+		{
+			bool bRowOk = false;
+			const FBuildingData ModelRow = TableMgr->GetBuildingData(B.InteractableName, bRowOk);
+			if (bRowOk)
+			{
+				ModelMultiplier = ModelRow.GetModelIncomeMultiplier();
+			}
+		}
+
+		return IncomeMult * RevenueTraitMultiplier * SkylineMult * ModelMultiplier;
 	}
-	return 1.0f;
+	return SkylineMult;
 }
 
 float UProjectOperationManager::GetBuildingEnhancementMultiplier(int32 BuildingID, EBuildingEnhancementType Type) const
@@ -886,20 +930,22 @@ float UProjectOperationManager::GetVaultReferenceRatePerSecond(int32 BuildingID)
 	// 기준을 운영 스냅샷이 아니라 빌딩 티어에 두는 이유: 금고는 "이 빌딩이 얼마까지 보관하나"라
 	// 운영 착수/종료로 용량이 튀면 안 되고, 비운영 빌딩이 200원으로 붕괴해서도 안 된다.
 	// 티어 밴드 시작 = 그 단계의 첫 프로젝트 규모 → 티어 진행 중 금고 강화 압력을 유지한다.
-	// 배율 스택은 적립(ProcessRevenue)과 동일. 감쇠·품질 굴림만 제외 — 용량이 시간에 따라 흔들리면 안 되므로.
+	// 배율 스택은 적립(UpdateSingleOperation)과 동일. 감쇠·품질 굴림만 제외 — 용량이 시간에 따라 흔들리면 안 되므로.
 	int32 Tier = 1;
+	ECompanyType Industry = ECompanyType::None;
 	if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
 	{
 		if (USaveLoadManager* SaveLoadMgr = GI->GetSubsystem<USaveLoadManager>())
 		{
 			Tier = SaveLoadMgr->GetBuildingTier(BuildingID);
+			Industry = SaveLoadMgr->GetBuildingCompanyType(BuildingID);
 		}
 	}
 
 	int32 BandStart = 0, UnusedBandEnd = 0;
 	FProjectTierProgress::GetTierProjectRange(FMath::Max(1, Tier), BandStart, UnusedBandEnd);
 
-	const float ReferenceRate = CalculateBaseRevenueForProjectNumber(BandStart)
+	const float ReferenceRate = CalculateBaseRevenueForProjectNumber(BandStart, Industry)
 		* GetBuildingIncomeMultiplier(BuildingID)
 		* CalculateEmployeeStatBonus(BuildingID);
 	return FMath::Max(0.0f, ReferenceRate);
@@ -936,7 +982,7 @@ float UProjectOperationManager::CalculateWarehouseCapacity(int32 BuildingID) con
 
 float UProjectOperationManager::CalculateWarehouseCapacityAtLevel(int32 BuildingID, int32 VaultLevel) const
 {
-	// "0 아님" 가드 (VaultFull 버블/치트가 Capacity>0 을 전제). 기준레이트가 티어 기반이라 실제로는 안 걸린다.
+	// "0 아님" 가드 (치트 충전이 Capacity>0 을 전제). 기준레이트가 티어 기반이라 실제로는 안 걸린다.
 	// ⚠ CalculateEffectMultiplier(VaultCapacity) 를 쓰지 말 것 — EffectPerLevel 이 곡선 k 로 재정의돼
 	// 배율로 오독되면 하한이 의미 없이 쪼그라든다. 하한은 가드라 배율 불필요.
 	const float FloorCapacity = ABuildingBaseActor::BaseVaultCapacity;
@@ -980,8 +1026,7 @@ void UProjectOperationManager::AddBacklogProduct(const FStageProgressData& Stage
 	}
 	// 품질 배율로 통일 (운영/결산과 동일 공식)
 	const double SpreadMult = static_cast<double>(ComputeQualityRevenueMult(QualityScoreToGrade(BLQuality), BLLeverage, GetRevenueStabilityFrac(BuildingID)));
-	E.BasePeakRevenuePerSec = static_cast<double>(CalculateBaseRevenue(StageData)) * static_cast<double>(StageData.EventRewardMultiplier) * SpreadMult * static_cast<double>(BLPeakMult)
-		* (StageData.bTrendMatched ? static_cast<double>(UTrendManagerSubsystem::TrendPeakMult) : 1.0);
+	E.BasePeakRevenuePerSec = static_cast<double>(CalculateBaseRevenue(StageData)) * static_cast<double>(StageData.EventRewardMultiplier) * SpreadMult * static_cast<double>(BLPeakMult);
 	// 임시 튜너블: 운영비 = 출시 peak의 10% (추후 DT/직원 비례로 교체)
 	E.OperatingCostPerSec = E.BasePeakRevenuePerSec * 0.1;
 	// AssignedEmployeeIDs는 Phase 2(종료·재배치)에서 배선 — 지금은 빈 배열
@@ -1129,35 +1174,21 @@ UTableManagerSubsystem* UProjectOperationManager::GetTableManager() const
 	return CachedTableManager;
 }
 
-void UProjectOperationManager::DistributeOperationExperience(const FOperationData& Operation)
-{
-	// 운영 완료 기본 경험치: 100 EXP
-	const float BaseOperationExp = 100.0f;
-
-	// EmployeeManager를 통해 경험치 분배 (품질 등급 배율 적용)
-	UCGGameInstance* GI = UCGGameInstance::GetInstance();
-	if (!GI)
-	{
-		return;
-	}
-
-	UEmployeeManager* EmployeeMgr = GI->GetSubsystem<UEmployeeManager>();
-	if (EmployeeMgr)
-	{
-		EmployeeMgr->DistributeExperienceToBuilding(Operation.BuildingID, BaseOperationExp, Operation.QualityGrade);
-
-		UE_LOG(LogTemp, Log, TEXT("[ProjectOperationManager] Operation completed - Distributed %.1f base EXP (Grade: %s) to building %d"),
-			BaseOperationExp, *QualityGradeToAlphabetString(Operation.QualityGrade), Operation.BuildingID);
-	}
-}
-
 // ===== Employee Revenue Tracking =====
 
-void UProjectOperationManager::AddEmployeeRevenue(int32 BuildingID, float Amount)
+void UProjectOperationManager::AddEmployeeRevenue(int32 BuildingID, double Amount)
 {
 	if (Amount <= 0.0f)
 	{
 		return;
+	}
+
+	if (BuildingID >= 0)
+	{
+		if (FOfficeSaveData* OfficeData = GetOfficeSaveDataByBuildingID(BuildingID))
+		{
+			OfficeData->RecordEarnedRevenue(Amount);
+		}
 	}
 
 	FOperationData* Operation = GetOperationByBuildingID(BuildingID);
@@ -1181,6 +1212,7 @@ void UProjectOperationManager::GenerateReport(const FOperationData& CompletedOpe
 	Report.BuildingID = CompletedOperation.BuildingID;
 	Report.QualityScore = CompletedOperation.QualityScore;
 	Report.QualityGrade = CompletedOperation.QualityGrade;
+	Report.QualityRevenueMultiplier = CompletedOperation.QualityRevenueMultiplier;
 	Report.DisciplineScores = CompletedOperation.DisciplineScores;
 	Report.DisciplineTargets = CompletedOperation.DisciplineTargets;
 	Report.DisciplineSlots = CompletedOperation.DisciplineSlots;
@@ -1232,7 +1264,7 @@ void UProjectOperationManager::GenerateReport(const FOperationData& CompletedOpe
 			CompletedOperation.BuildingID);
 	}
 
-	// 출시작 누적매출 — (프로젝트 행 인덱스 + 산업)으로 레코드를 특정. 재개발하면 같은 행에 매출이 이어서 쌓인다.
+	// 출시작 누적매출 — 건물·산업·프로젝트로 레코드를 특정. 재개발하면 해당 건물의 행에만 매출이 이어서 쌓인다.
 	// (구 ProjectName 매칭은 플레이어가 이름을 바꾸거나 재개발로 동명 행이 생기면 엉뚱한 곳에 붙었다.)
 	if (UCGGameInstance* RevGI = UCGGameInstance::GetInstance())
 	{
@@ -1242,11 +1274,9 @@ void UProjectOperationManager::GenerateReport(const FOperationData& CompletedOpe
 			{
 				const int64 RevGain = FMath::Max<int64>(0, FMath::RoundToInt64(CompletedOperation.TotalRevenueEarned));
 				const ECompanyType ShippedIndustry = Report.CompanyType;
-				FShippedProjectRecord* RevRecord = RevSave->GameData.ShippedProjects.FindByPredicate(
-					[&CompletedOperation, ShippedIndustry](const FShippedProjectRecord& R)
-					{
-						return R.ProjectIndex == CompletedOperation.ProjectNumber && R.Industry == ShippedIndustry;
-					});
+				FShippedProjectRecord* RevRecord = ShippedProjectRecords::Find(
+					RevSave->GameData.ShippedProjects, CompletedOperation.BuildingID,
+					ShippedIndustry, CompletedOperation.ProjectNumber);
 				if (RevRecord)
 				{
 					RevRecord->CumulativeRevenue += RevGain;

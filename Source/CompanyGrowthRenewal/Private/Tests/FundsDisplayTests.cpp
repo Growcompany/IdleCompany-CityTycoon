@@ -2,11 +2,15 @@
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
 #include "Blueprint/WidgetTree.h"
+#include "Components/CanvasPanel.h"
+#include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
 #include "Components/Image.h"
+#include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Engine/DataTable.h"
 #include "Engine/Texture2D.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Enum/WidgetType.h"
 #include "Global/GlobalUtilFunctions.h"
 #include "Table/ResourceInfo.h"
@@ -51,88 +55,69 @@ void TestIncomeTextIconBehavior(FAutomationTestBase& Test, TWidget* CoinFlyout, 
 	}
 	else
 	{
-		const FString ExpectedAmount(TEXT("+12.4만"));
-		const FLinearColor ExpectedColor(0.17f, 0.43f, 0.71f, 0.83f);
-
-		CoinFlyout->SpawnIncomeText(FVector2D::ZeroVector, 124000, TestTexture, ExpectedColor);
-
-		TArray<UWidget*> WidgetsAfterIconSpawn;
-		CoinFlyout->WidgetTree->GetAllWidgets(WidgetsAfterIconSpawn);
-		int32 MatchingTextCountAfterIconSpawn = 0;
-		UImage* IncomeIcon = nullptr;
-		UTextBlock* AmountText = nullptr;
-		bool bFoundExpectedTextColor = false;
-		for (UWidget* Widget : WidgetsAfterIconSpawn)
+		UCanvasPanel* Canvas = Cast<UCanvasPanel>(CoinFlyout->WidgetTree->RootWidget);
+		if (!Test.TestNotNull(TEXT("직원 수익 캔버스"), Canvas)) return;
+		const FLinearColor FirstColor(0.17f, 0.43f, 0.71f, 0.83f);
+		const FLinearColor SecondColor(0.71f, 0.28f, 0.15f, 0.83f);
+		CoinFlyout->SpawnIncomeText(FVector2D::ZeroVector, 124000, TestTexture, FirstColor);
+		if (!Test.TestEqual(TEXT("Money 아이콘과 +12.4만 행이 생성된다"), Canvas->GetChildrenCount(), 1)) return;
+		UHorizontalBox* FirstRow = Cast<UHorizontalBox>(Canvas->GetChildAt(0));
+		if (!Test.TestNotNull(TEXT("첫 수익 행"), FirstRow)) return;
+		UImage* IncomeIcon = Cast<UImage>(FirstRow->GetChildAt(0));
+		if (Test.TestNotNull(TEXT("전달한 Money 아이콘이 행에 있다"), IncomeIcon))
 		{
-			if (UTextBlock* CandidateText = Cast<UTextBlock>(Widget))
-			{
-				if (CandidateText->GetText().ToString() == ExpectedAmount)
-				{
-					++MatchingTextCountAfterIconSpawn;
-					AmountText = CandidateText;
-					bFoundExpectedTextColor |= CandidateText->GetColorAndOpacity().GetSpecifiedColor().Equals(
-						ExpectedColor, KINDA_SMALL_NUMBER);
-				}
-			}
-			else if (UImage* ResourceIcon = Cast<UImage>(Widget))
-			{
-				if (ResourceIcon->GetBrush().GetResourceObject() == TestTexture)
-				{
-					IncomeIcon = ResourceIcon;
-				}
-			}
-		}
-
-		if (Test.TestNotNull(TEXT("아이콘 입력 시 생성 행에 전달한 Money 아이콘이 남는다"), IncomeIcon))
-		{
+			Test.TestTrue(TEXT("Money 아이콘 텍스처가 유지된다"),
+				IncomeIcon->GetBrush().GetResourceObject() == TestTexture);
 			Test.TestTrue(TEXT("직원 수익 Money 아이콘은 48x48이다"),
-				IncomeIcon->GetBrush().ImageSize.Equals(
-					FVector2D(48.0f, 48.0f), KINDA_SMALL_NUMBER));
-
+				IncomeIcon->GetBrush().ImageSize.Equals(FVector2D(48.0f, 48.0f), KINDA_SMALL_NUMBER));
 			const UHorizontalBoxSlot* IconBoxSlot = Cast<UHorizontalBoxSlot>(IncomeIcon->Slot);
-			if (Test.TestNotNull(TEXT("직원 수익 Money 아이콘은 HorizontalBox 슬롯을 사용한다"), IconBoxSlot))
+			if (Test.TestNotNull(TEXT("Money 아이콘의 HorizontalBox 슬롯"), IconBoxSlot))
 			{
 				Test.TestEqual(TEXT("직원 수익 아이콘 오른쪽 간격은 8px이다"),
 					IconBoxSlot->GetPadding().Right, 8.0f);
 			}
 		}
 
-		Test.TestEqual(TEXT("124000 수익은 손계산한 +12.4만으로 한 번 표시된다"),
-			MatchingTextCountAfterIconSpawn, 1);
-		Test.TestTrue(TEXT("생성된 +12.4만 텍스트는 전달한 DT Money 색을 사용한다"),
-			bFoundExpectedTextColor);
-
-		if (Test.TestNotNull(TEXT("생성 행에 +12.4만 금액 텍스트가 존재한다"), AmountText))
+		auto FindFirstGlyphMID = [&Test](UHorizontalBox* IncomeRow) -> UMaterialInstanceDynamic*
 		{
-			Test.TestEqual(TEXT("직원 수익 글자 크기는 36이다"), AmountText->GetFont().Size, 36.0f);
-			Test.TestEqual(TEXT("직원 수익 NEXON Bold는 Default face를 사용한다"),
-				AmountText->GetFont().TypefaceFontName, FName(TEXT("Default")));
-
-			UObject* ExpectedNexonBoldFont = LoadObject<UObject>(nullptr,
-				TEXT("/Game/CompanyGrowth/Font/NEXONLv1GothicBold_Font.NEXONLv1GothicBold_Font"));
-			if (Test.TestNotNull(TEXT("직원 수익 NEXON Bold 폰트 에셋을 로드한다"), ExpectedNexonBoldFont))
-			{
-				Test.TestTrue(TEXT("직원 수익은 NEXON Bold 폰트를 사용한다"),
-					AmountText->GetFont().FontObject == ExpectedNexonBoldFont);
-			}
+			if (!Test.TestNotNull(TEXT("수익 행 글리프 폭 컨테이너"),
+				IncomeRow->GetChildAt(IncomeRow->GetChildrenCount() - 1))) return nullptr;
+			USizeBox* Bounds = Cast<USizeBox>(IncomeRow->GetChildAt(IncomeRow->GetChildrenCount() - 1));
+			if (!Test.TestNotNull(TEXT("글리프 SizeBox"), Bounds)) return nullptr;
+			UCanvasPanel* GlyphCanvas = Cast<UCanvasPanel>(Bounds->GetChildAt(0));
+			if (!Test.TestNotNull(TEXT("글리프 Canvas"), GlyphCanvas)) return nullptr;
+			Test.TestEqual(TEXT("+12.4만은 6개 글리프 이미지다"), GlyphCanvas->GetChildrenCount(), 6);
+			UImage* FirstGlyph = Cast<UImage>(GlyphCanvas->GetChildAt(0));
+			if (!Test.TestNotNull(TEXT("글리프 첫 글자 +"), FirstGlyph)) return nullptr;
+			return Cast<UMaterialInstanceDynamic>(FirstGlyph->GetBrush().GetResourceObject());
+		};
+		UMaterialInstanceDynamic* FirstMID = FindFirstGlyphMID(FirstRow);
+		FLinearColor FirstMidColor = FLinearColor::White;
+		if (Test.TestNotNull(TEXT("+ 글리프가 동적 재질을 사용한다"), FirstMID))
+		{
+			Test.TestTrue(TEXT("+ 글리프가 Plus 스프라이트를 사용한다"),
+				FirstMID->K2_GetTextureParameterValue(TEXT("Glyph"))
+				&& FirstMID->K2_GetTextureParameterValue(TEXT("Glyph"))->GetName() == TEXT("T_UI_IncomeGlyph_Plus"));
+			Test.TestTrue(TEXT("전달한 Money 색이 글리프 램프에 도달한다"),
+				FirstMID->GetVectorParameterValue(FMaterialParameterInfo(TEXT("MidColor")), FirstMidColor)
+				&& !FirstMidColor.Equals(FLinearColor::White));
 		}
 
-		CoinFlyout->SpawnIncomeText(FVector2D::ZeroVector, 124000, nullptr, ExpectedColor);
-
-		TArray<UWidget*> WidgetsAfterNullIconSpawn;
-		CoinFlyout->WidgetTree->GetAllWidgets(WidgetsAfterNullIconSpawn);
-		int32 MatchingTextCountAfterNullIconSpawn = 0;
-		for (UWidget* Widget : WidgetsAfterNullIconSpawn)
+		CoinFlyout->SpawnIncomeText(FVector2D::ZeroVector, 124000, nullptr, SecondColor);
+		Test.TestEqual(TEXT("아이콘이 null이어도 두 번째 숫자 행이 추가된다"), Canvas->GetChildrenCount(), 2);
+		if (Canvas->GetChildrenCount() != 2) return;
+		UHorizontalBox* SecondRow = Cast<UHorizontalBox>(Canvas->GetChildAt(1));
+		if (!Test.TestNotNull(TEXT("아이콘 없는 수익 행"), SecondRow)) return;
+		Test.TestEqual(TEXT("아이콘이 없으면 글리프 컨테이너만 있다"), SecondRow->GetChildrenCount(), 1);
+		UMaterialInstanceDynamic* SecondMID = FindFirstGlyphMID(SecondRow);
+		if (Test.TestNotNull(TEXT("재사용된 + 글리프 재질"), SecondMID))
 		{
-			if (const UTextBlock* NullIconAmountText = Cast<UTextBlock>(Widget))
-			{
-				MatchingTextCountAfterNullIconSpawn +=
-					NullIconAmountText->GetText().ToString() == ExpectedAmount ? 1 : 0;
-			}
+			Test.TestTrue(TEXT("같은 글리프는 MID를 재사용한다"), SecondMID == FirstMID);
+			FLinearColor SecondMidColor;
+			Test.TestTrue(TEXT("새 Money 색은 재사용 MID의 램프를 갱신한다"),
+				SecondMID->GetVectorParameterValue(FMaterialParameterInfo(TEXT("MidColor")), SecondMidColor)
+				&& !SecondMidColor.Equals(FirstMidColor));
 		}
-
-		Test.TestEqual(TEXT("아이콘이 null이어도 +12.4만 숫자 행은 추가된다"),
-			MatchingTextCountAfterNullIconSpawn, 2);
 	}
 }
 }

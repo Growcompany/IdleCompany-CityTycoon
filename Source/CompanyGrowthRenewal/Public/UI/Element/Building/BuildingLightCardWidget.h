@@ -16,7 +16,7 @@ class USkinInfoWidget;
  * - EntityImage에 EmissiveColor를 단색 tint로 적용 (텍스처 아님)
  * - SkinInfoWidget을 재활용해 이름+희귀도 표시
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UBuildingLightCardWidget : public UCommonButtonBase
 {
     GENERATED_BODY()

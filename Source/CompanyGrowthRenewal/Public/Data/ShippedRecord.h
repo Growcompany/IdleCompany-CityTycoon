@@ -5,7 +5,7 @@
 #include "Enum/QualityGrade.h"
 #include "ShippedRecord.generated.h"
 
-// 출시작 이력 1건 — 리뷰 발표 시 기록, 도감 [출시작] 탭의 데이터 (specs/2026-06-29 §15 도감)
+// 건물별 출시작 이력 1건 — 리뷰 발표 시 기록, 도감 [출시작] 탭의 데이터 (specs/2026-06-29 §15 도감)
 USTRUCT(BlueprintType)
 struct FShippedProjectRecord
 {
@@ -17,7 +17,11 @@ struct FShippedProjectRecord
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Shipped")
 	ECompanyType Industry = ECompanyType::None;
 
-	// DT_Project_* 행 인덱스 — 재개발 시 같은 작품을 찾아 갱신하기 위한 키(이름 매칭은 중복에 취약)
+	// 같은 산업의 다른 건물도 같은 프로젝트를 출시할 수 있다.
+	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Shipped")
+	int32 BuildingIndex = INDEX_NONE;
+
+	// DT_Project_* 행 인덱스 — 같은 건물에서 재개발 시 작품을 찾아 갱신한다.
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Shipped")
 	int32 ProjectIndex = 0;
 
@@ -33,7 +37,30 @@ struct FShippedProjectRecord
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Shipped")
 	int32 ReviewScore = 0;
 
-	// 누적 매출 — 이 출시작의 운영 매출을 결산(GenerateReport) 시점에 누적(근사: ProjectName 매칭)
+	// 누적 매출 — 이 건물의 해당 출시작 운영 매출을 결산(GenerateReport) 시점에 누적한다.
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category = "Shipped")
 	int64 CumulativeRevenue = 0;
 };
+
+namespace ShippedProjectRecords
+{
+	inline const FShippedProjectRecord* Find(const TArray<FShippedProjectRecord>& Records,
+		int32 BuildingIndex, ECompanyType Industry, int32 ProjectIndex)
+	{
+		return Records.FindByPredicate([BuildingIndex, Industry, ProjectIndex](const FShippedProjectRecord& Record)
+		{
+			return Record.BuildingIndex == BuildingIndex && Record.Industry == Industry
+				&& Record.ProjectIndex == ProjectIndex;
+		});
+	}
+
+	inline FShippedProjectRecord* Find(TArray<FShippedProjectRecord>& Records,
+		int32 BuildingIndex, ECompanyType Industry, int32 ProjectIndex)
+	{
+		return Records.FindByPredicate([BuildingIndex, Industry, ProjectIndex](const FShippedProjectRecord& Record)
+		{
+			return Record.BuildingIndex == BuildingIndex && Record.Industry == Industry
+				&& Record.ProjectIndex == ProjectIndex;
+		});
+	}
+}

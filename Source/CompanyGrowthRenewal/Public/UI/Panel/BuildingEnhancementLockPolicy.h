@@ -6,10 +6,10 @@
 namespace CGR::UI
 {
 	inline bool ShouldRefreshEnhancementLocksOnTutorialStateChange(
-		bool bPreviousTutorialCompleted,
-		bool bCurrentTutorialCompleted)
+		bool bPreviousCompanyEnhancementUnlocked,
+		bool bCurrentCompanyEnhancementUnlocked)
 	{
-		return bPreviousTutorialCompleted != bCurrentTutorialCompleted;
+		return bPreviousCompanyEnhancementUnlocked != bCurrentCompanyEnhancementUnlocked;
 	}
 
 	enum class EBuildingEnhancementLockReason : uint8
@@ -22,11 +22,11 @@ namespace CGR::UI
 
 	inline EBuildingEnhancementLockReason ResolveEnhancementLockReason(
 		EBuildingEnhancementType EnhancementType,
-		bool bTutorialCompleted,
+		bool bCompanyEnhancementUnlocked,
 		bool bUnlockedByTier,
 		bool bAuthorityAllowsPurchase)
 	{
-		if (!bTutorialCompleted && EnhancementType != EBuildingEnhancementType::BuildingFloor)
+		if (!bCompanyEnhancementUnlocked && EnhancementType != EBuildingEnhancementType::BuildingFloor)
 		{
 			return EBuildingEnhancementLockReason::Tutorial;
 		}

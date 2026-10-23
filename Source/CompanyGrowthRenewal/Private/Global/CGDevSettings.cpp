@@ -1,6 +1,26 @@
 #include "Global/CGDevSettings.h"
 #include "Engine/DataTable.h"
 
+ECGBackendMode UCGDevSettings::GetEffectiveBackendMode()
+{
+#if UE_BUILD_SHIPPING
+	return ECGBackendMode::Server;
+#else
+	const UCGDevSettings* Settings = GetDefault<UCGDevSettings>();
+	return Settings ? Settings->BackendMode : ECGBackendMode::Local;
+#endif
+}
+
+bool UCGDevSettings::IsOfflineMode()
+{
+	return GetEffectiveBackendMode() == ECGBackendMode::Local;
+}
+
+FString UCGDevSettings::GetPortraitFolderName()
+{
+	return IsOfflineMode() ? TEXT("Portraits") : TEXT("Portraits_Server");
+}
+
 ECGStartMode UCGDevSettings::GetEffectiveStartMode()
 {
 #if UE_BUILD_SHIPPING

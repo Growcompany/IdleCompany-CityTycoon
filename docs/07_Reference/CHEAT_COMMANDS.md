@@ -1,10 +1,11 @@
-# 치트 명령어 가이드
+﻿# 치트 명령어 가이드
 
 ## 개요
 
 `UCGCheatManager`를 통해 모든 맵에서 콘솔 명령어로 디버깅 및 테스트가 가능합니다.
 
 > **참고**: Shipping 빌드에서는 자동으로 비활성화됩니다.
+> 근거 — `APlayerController::AddCheats`(`C:\UE_5.4\...\Private\PlayerController.cpp:1110`)가 `#if UE_WITH_CHEAT_MANAGER` 로 감싸여 있고 `CheatManagerDefines.h:8` 이 `#define UE_WITH_CHEAT_MANAGER (1 && !UE_BUILD_SHIPPING)` 이라, Shipping 에서는 `CheatManager` **객체 자체가 생성되지 않습니다**(명령이 숨는 게 아니라 도달 불가). 치트 본문에 `#if !UE_BUILD_SHIPPING` 을 따로 걸 필요는 없고, **바이너리에 코드가 남지 않아야 하는 경우에만** 이중으로 겁니다.
 > **보기 편한 버전**: 같은 폴더의 `CHEAT_COMMANDS.html`을 브라우저로 열면 검색/복사 가능한 치트 시트로 볼 수 있습니다.
 
 ## 사용 방법
@@ -22,17 +23,20 @@
 
 | 명령어 | 카테고리 | 한 줄 설명 | 동작 맥락 |
 |--------|---------|-----------|-----------|
+| `DevMode` | 개발자모드 | 튜토리얼 종료 + 자원 Rich + HQ20 해금. **이 세션 저장 봉인** | 어디서나 |
 | `CheatPing` | 기본 | 콘솔 디스패치 동작 확인 (PONG) | 어디서나 |
-| `Exp [Amount] [ID]` | 경험치 | 직원에게 경험치 추가 | 직원 선택 필요 |
-| `DistExp [Amount] [Grade]` | 경험치 | 현재 빌딩 직원들에게 분배 | 관리 중 빌딩 필요 |
-| `ExpStatus` | 경험치 | 전체 직원 경험치/레벨 표시 | 어디서나 |
+| `DamageNumberDemo [bFreeze]` | 기본 | 여러 자릿수·직능·크리티컬 작업 점수를 화면에 표시, 기본값 1은 애니메이션 정지 | 어디서나 |
+| `DamageNumberDemoClear` | 기본 | 작업 점수 데모를 제거하고 애니메이션 정지 해제 | 어디서나 |
+| `Exp [Amount] [ID]` | 경험치 | 해당 직원의 획득 배율로 개인 경험치 추가 | 직원 선택 필요 |
+| `DistExp [Amount] [Grade]` | 경험치 | 현재 빌딩 직원 각각에게 개인 경험치 적립 | 관리 중 빌딩 필요 |
+| `ExpStatus` | 경험치 | 직원별 개인 경험치와 레벨 표시 | 어디서나 |
 | `Money [Amount]` | 자원 | 돈 추가 | 어디서나 |
 | `ShowResources` | 자원 | 보유 자원 표시 | 어디서나 |
 | `GrantRes [Row]` | 자원 | 테스트 자원 시나리오 일괄 적용 | 어디서나 |
 | `ListEmp` | 직원 | 전체 직원 목록 표시 | 어디서나 |
 | `SetRank [Level]` | 직원 | 선택 직원 강화 레벨(직급) 설정 | 직원 선택 필요 |
 | `SetCrit [Pct]` | 직원 | 직원 크리티컬 확률 강제 설정(트레일러용, 기본 50%), `-1`=해제 | OfficeMap |
-| `SetStat [Idx] [Val] [ID]` | 직원 | 선택 직원의 6스탯 중 1개 직접 설정 (검증용 — ★ 반복 없이 단일 스탯 격리 확인) | 직원 선택 필요 |
+| `SetStat [Idx] [Val] [ID]` | 직원 | 선택 직원의 5스탯 중 1개 직접 설정 (검증용 — ★ 반복 없이 단일 스탯 격리 확인) | 직원 선택 필요 |
 | `StatStatus [ID]` | 직원 | 선택 직원의 6스탯 저장값/강화보너스/유효값 + 종합 출력 | 직원 선택 필요 |
 | `EmpName [Rarity] [Count]` | 직원 | 이름 생성기만 N번 돌려 로그 출력 (직원 생성 없음) | 어디서나 |
 | `CompleteStep` | 스테이지 | 현재 Step 즉시 완료 | OfficeMap |
@@ -42,12 +46,22 @@
 | `OpStatus` | 운영 | 진행 중인 모든 운영 상태 표시 | 어디서나 |
 | `RevenueMax [Amount]` | 운영 | 모든 건물 금고를 건물당 `Amount`원(기본 500만) 강제 충전 → 대량 코인 수거 연출 (트레일러 "방치 수익" 컷) | 어디서나 |
 | `ShowOfflineReport [Hours] [Zero] [FakeRows]` | 운영 | 오프라인 정산 모달 즉시 표시(대기/앱 라이프사이클 없이). 기본=실제 지은 건물만(금고도 채워 [모두 수령] 검증). `Hours`≥12=캡 변주, `Zero`=1=적립0 변주, `FakeRows`>0=그 개수까지 가짜 행 패딩(레이아웃/스크롤 테스트) | MainMap |
+| `SideOpenTraining [BuildingIndex]` | 운영 | 그 건물의 기술 연구소 표시. 인덱스 생략 시 세이브의 첫 보유 건물 | MainMap |
+| `SideOpenTrip [BuildingIndex]` | 운영 | 그 건물의 출장 창 표시. 인덱스 생략 시 세이브의 첫 보유 건물 | MainMap |
+| `SideSelectTripCard [CardSlot]` | 운영 | 열려 있는 출장 창에서 카드를 고른다(선발 좌석·판정 밴드가 보이게) | MainMap |
+| `SideFillCrew [BuildingIndex] [Count]` | 운영 | 다른 건물 소속 직원을 그 건물로 옮겨 팀 파워를 올린다(충족 화면 만들기) | MainMap |
+| `SideSetTraining [BuildingIndex] [CourseBest] [Entries]` | 운영 | 연구·입장권을 직접 세운다(음수=그대로). 최종 연구 화면용 | MainMap |
+| `SideSetSkyline [BestFloor] [Entries]` | 운영 | 스카이라인 최고 층·입장권을 직접 세운다(음수=그대로). 보스 앞·100층 화면용 | MainMap |
+| `SideOpenSkyline` | 운영 | 스카이라인 전용 화면을 메뉴 시트 없이 바로 띄운다 | MainMap |
+| `SideOpenFusion` | 운영 | 콜라보 개발 창을 메뉴 시트 없이 바로 띄운다 | MainMap |
+| `SideSetFusion [FusionKey] [Level] [RemainingSeconds]` | 운영 | 콜라보별 레벨·남은 시간 설정. None=진행 슬롯만 비움 | MainMap |
 | `Ticket [Amt] [Tier]` | 아이템 | 채용권 지급 | 어디서나 |
 | `TraitTicket [Amt] [Tier]` | 아이템 | 건물 특성 뽑기권 지급 | 어디서나 |
 | `SkinTicket [Amt] [Tier]` | 아이템 | 건물 스킨 뽑기권 지급 | 어디서나 |
 | `Card [Amt] [Tier]` | 아이템 | 잠재 명함 지급 (직원창 잠재 리롤 테스트용) | 어디서나 |
 | `LootRoll [Key] [Tier] [Count]` | 아이템 | 출시 전리품 드랍 롤 시뮬레이션 (지급 없음, 분포 로그만) | 어디서나 |
 | `UnlockSkins [Count]` | 건물 | 스킨 랜덤 해금 | 어디서나 |
+| `BldDefaultSkins` | 건물 | 스킨 100인 완성 건물을 종류별 기본 스킨으로 1회 재배정·저장 | MainMap |
 | `BldLightsOn [0/1]` | 건물 | 모든 건물 창문 조명 항상 켬(1)/정상 복원(0) — 운영 여부 무시 | MainMap |
 | `FactoryMax [AmtLv] [SpeedSec]` | 벽돌공장 | 벽돌공장 개수+속도 만렙, SpeedSec로 버스트 간격 라이브 오버라이드 (트레일러 우수수) | 공장 배치된 맵 |
 | `UnlockFactoryAuto` | 벽돌공장 | 자동 수집 즉시 해금 (HQ Lv.10 대기 없이) | 공장 배치된 맵 |
@@ -72,10 +86,13 @@
 | `ExportStarterPreset` | 프리셋 | 현재 배치를 프리셋 CSV 형식으로 출력 | OfficeMap |
 | `CamPreset [Index]` | 카메라 | 오피스 카메라 각도 프리셋 (0코지~3탑다운, FOV고정) | OfficeMap |
 | `CamBand [InP] [OutP] [InF] [OutF]` | 카메라 | 오피스 카메라 밴드 수동 지정 (피치/FOV) | OfficeMap |
+| `CamPose` | 카메라 | 현재 카메라 포즈와 floor 기준 참조 프레임을 한 줄 로그로 출력 (read-only) | OfficeMap |
+| `CamInfo` | 카메라 | 현재 카메라가 실제로 보는 범위(카메라 거리·vFOV·보이는 구역)를 한 줄 로그로 출력 (read-only) | 맵 무관 |
 | `WorkerBolt [Count]` | 이동속도 | 번아웃 배회(뛰는 상황) 즉시 발동 (생략=전원, N=앞 N명) | OfficeMap |
 | `WorkerSpeed [Value]` | 이동속도 | 전 직원 MaxWalkSpeed 직접 지정 (-1 = 원래 값 복귀) | OfficeMap |
 | `WorkerSpeedStatus` | 이동속도 | 직원별 모드/MaxWalkSpeed/실측 속도 출력 | OfficeMap |
 | `BoltStatus [판초]` | 직원 | 폭주 확률 진단 — 직원별 실효 초당/판당 확률 + 판당 기대 인원 | OfficeMap |
+| `Face_Set [표정번호]` | 직원 | 전 직원 얼굴 표정 고정(0~15 = `EWorkerFaceExpression`), `-1`=해제 | OfficeMap |
 | `Proj_Seed [Count] [Review]` | 프로젝트진척 | 개발 이력 + 출시 기록 임의 채움 (기본 5건, Review 0=랜덤) | OfficeMap |
 | `Proj_SetTier [Tier]` | 프로젝트진척 | 현재 티어 강제 설정 (1~10) | OfficeMap |
 | `Proj_ClearHistory` | 프로젝트진척 | 개발 이력 + 출시 기록 초기화 (빈 상태 확인) | OfficeMap |
@@ -84,10 +101,25 @@
 | `Preset_Verify [Row]` | 진행프리셋 | 현재 상태가 프리셋과 정합한지 단언 + 실패 항목 나열 | 어디서나 |
 | `SkipToMission [Row]` | 튜토리얼 | 임의 미션으로 즉시 점프 | 인세션 |
 | `ResetTutorial` | 튜토리얼 | 세이브 삭제 (다음 Play M1부터) | 어디서나 |
+| `CG_PreviewCityOpening` | 튜토리얼 | 세이브 초기화 없이6초 헬기 야경·오전 벽돌공장 페이드 재생 | MainMap_City |
 | `UnlockGoalBoard` | 미션판 | 미션판 즉시 언락 + 전수 재평가 + 저장 (체인 완주 없이) | 인세션 |
 | `CompleteGoal [Row]` | 미션판 | 지정 미션 강제 충족 (보상 지급 없음 — 수령은 보드에서) | 인세션 |
 | `ResetGoals` | 미션판 | 미션판 초기화 (언락/충족/수령 전부 리셋) + 저장 | 인세션 |
 | `ResetPanelIntro` | 미션판 | 패널 최초 진입 안내(코치마크)를 안 본 상태로 리셋 + 저장 + 제스처 힌트 졸업 카운트(졸음/폭주) 리셋 | 인세션 |
+| `ClockOffset [Seconds]` | LiveOps | 공용 게임 시계의 서버 시각에 디버그 오프셋을 누적 (하루 넘김 = 86400) | 인세션 |
+| `ClockStatus` | LiveOps | 시계 상태 덤프 (동기 여부 / 서버 now / KST 하루·주 키 / 남은 시간 / 오프셋) | 인세션 |
+| `QuestReport [Counter] [Amount]` | LiveOps | 퀘스트 카운터를 강제로 보고 (EQuestCounter 이름 그대로) | 인세션 |
+| `QuestReset` | LiveOps | 퀘스트 원장(일일/주간/업적) 전체 초기화 + 저장 | 인세션 |
+| `QuestStatus` | LiveOps | 일일/주간/업적 행 상태와 활약도 현황 로그 | 인세션 |
+| `AttendClaim` | LiveOps | 오늘 출석 보상 수령 시도 (서버 시간 유효 + 오늘 미수령일 때만) | 인세션 |
+| `AttendReset` | LiveOps | 출석 이력(순환 일차/마지막 수령 키/누계) 초기화 + 저장 | 인세션 |
+| `AttendStatus` | LiveOps | 출석 현황 로그 (수령 가능 / 다음 일차 / 현재 일차 / 누계) | 인세션 |
+| `MailSend [DiamondAmount]` | LiveOps | 테스트 우편 1통 발송 (다이아 N + 일반 채용권 5, 7일 만료) | 인세션 |
+| `MailClear` | LiveOps | 우편함 비우기 (글로벌 메일 수신 이력 포함) + 저장 | 인세션 |
+| `MailStatus` | LiveOps | 우편함 통수 + 각 메일 제목/보상 수/만료 시각 로그 | 인세션 |
+| `LiveOpsRefresh` | LiveOps | 운영 콘텐츠(TitleData) 강제 재요청 ― 10분 스로틀 무시 | 인세션 |
+| `EventPoints [EventId] [Amount]` | LiveOps | 활성 수집 이벤트의 점수를 직접 가산 | 인세션 |
+| `EventStatus` | LiveOps | 활성 이벤트 유형/진행/마일스톤 + 핫타임 배율 + 공지 미읽음 수 로그 | 인세션 |
 | `Acq_Buy [Key]` | 도시인수 | 지정 Key 회사 인수 시도 (자금 차감 + Milking 전환) | MainMap |
 | `Acq_State [Key]` | 도시인수 | 지정 Key 인수 상태 출력 (0=미인수 1=수익중 2=고갈 3=완료) | MainMap |
 | `Acq_Demolish [Key]` | 도시인수 | 지정 Key의 회사 철거 = 캐시아웃 (Milking/Depleted 에서 동작 -> Cleared) | MainMap |
@@ -96,12 +128,18 @@
 | `Plot_OwnAll` | 도시인수 | 모든 도시 부지 즉시 소유 (인접/자금/결제 게이트 우회) + 저장 | MainMap |
 | `Day` | 시간대 | 낮으로 고정 (12:00 + 사이클 정지) | TimeCycle 액터 필요 |
 | `Night` | 시간대 | 밤으로 고정 (00:00 + 사이클 정지) | TimeCycle 액터 필요 |
+| `Dusk` | 시간대 | 석양(노을 정점)으로 고정 — 시각은 맵의 황혼 노브에서 파생 | TimeCycleSky 액터 필요 |
+| `Dawn` | 시간대 | 여명(노을 정점)으로 고정 | TimeCycleSky 액터 필요 |
 | `SetTime [H] [M]` | 시간대 | 임의 시각 고정 (+ 사이클 정지) | TimeCycle 액터 필요 |
 | `TimeResume` | 시간대 | 시간 사이클 재개 (고정 해제) | TimeCycle 액터 필요 |
 | `CG_TestBacklogMath` | 백로그 | 순익 지수감쇠 수학 자가검증 (4샘플 로그) | 어디서나 |
 | `CG_DumpBacklog` | 백로그 | 현재 관리 빌딩 백로그 제품 목록 + 순익 합산 출력 | OfficeMap |
 | `CG_DumpUI` | UI디버그 | UIBase 3스택 내용 + 현재 EInputMode 출력 (입력잠금 진단) | 어디서나 |
 | `CG_UnlockInput` | UI디버그 | 입력모드 UI 잠김 시 강제 Normal 복원 (탈출용) | 어디서나 |
+| `CG_HideMesh <부분이름>` | 렌더격리 | 스태틱메시명·액터명·클래스명 부분일치로 프리미티브 숨김 (실기기 GPU 비용 귀속용) | 어디서나 |
+| `CG_ShowMesh <부분이름>` | 렌더격리 | `CG_HideMesh` 로 숨긴 것을 같은 부분일치로 다시 표시 | 어디서나 |
+| `CG_PreviewTransition` | 전환오버레이 | 레벨 이동 없이 전환 홀드 화면 + 하단 팁 밴드를 N초간 띄움 | 어디서나 |
+| `CG_ListTips` | 전환오버레이 | 로드된 `DT_LoadingTip` 행 전체 출력 (상한 초과 표시) | 어디서나 |
 | `Balance_DumpDevScore` | 밸런스계측 | 개발 중 프로젝트 직능 스텝별 획득/목표 + 가중치 + q + 등급을 `[BALV]` 한 줄로 | OfficeMap |
 | `Balance_DumpEconomy` | 밸런스계측 | 전 재화 잔액 + 빌딩별 수익률/안정율/금고잔량/금고용량 + 직원·방치 인원을 `[BALV]` 한 줄로 | 어디서나 |
 | `Balance_SimOffline [Sec]` | 밸런스계측 | 오프라인 정산을 모의 경과초로 dry-run (세이브 무변경) — 적립/금고초과 손실/운영 경과 진행분 | 어디서나 |
@@ -117,6 +155,8 @@
 | 명령어 | 설명 | 예시 |
 |--------|------|------|
 | `CheatPing` | 콘솔 디스패치가 작동하는지 확인 (`PONG` 로그 + 화면 메시지) | `CheatPing` |
+| `DamageNumberDemo [bFreeze]` | 게임플레이 진행 없이 여러 자릿수·직능·크리티컬 작업 점수를 뷰포트에 표시. 기본값 1은 `cg.DamageNumber.Freeze`를 켜 정지 상태로 유지하고, 0은 애니메이션 재생 | `DamageNumberDemo` / `DamageNumberDemo 0` |
+| `DamageNumberDemoClear` | 데모 컨테이너를 제거하고 `cg.DamageNumber.Freeze`를 0으로 설정 | `DamageNumberDemoClear` |
 
 ---
 
@@ -124,9 +164,9 @@
 
 | 명령어 | 설명 | 예시 |
 |--------|------|------|
-| `Exp [Amount]` | 선택된 직원에게 경험치 추가 | `Exp 100` |
+| `Exp [Amount]` | 선택된 해당 직원의 획득 배율로 개인 경험치 추가 | `Exp 100` |
 | `Exp [Amount] [ID]` | 특정 직원(ID)에게 경험치 추가 | `Exp 100 3` |
-| `DistExp [Amount]` | 현재 관리 중인 빌딩 직원들에게 분배 (B등급=1.0x) | `DistExp 50` |
+| `DistExp [Amount]` | 현재 관리 중인 빌딩 직원 각각에게 개인 경험치 적립 (B등급=1.0x) | `DistExp 50` |
 | `DistExp [Amount] [Grade]` | 품질 등급 지정 분배 | `DistExp 100 5` |
 | `ExpStatus` | 전체 직원 경험치/레벨/소속 빌딩 상태 표시 | `ExpStatus` |
 
@@ -171,8 +211,9 @@
 | `StatStatus` | 선택 직원의 6스탯 저장값 + 강화보너스 + 유효값(합산) + 종합 점수 출력 | `StatStatus` |
 | `StatStatus [ID]` | 특정 직원(ID)의 스탯 상태 출력 | `StatStatus 3` |
 | `EmpName [Rarity] [Count]` | 이름 생성기를 Count번 호출해 로그 출력. Rarity: 0 Common · 1 Unusual · 2 Rare · 3 Epic · 4 Legendary · 5 Mythic. 실제 직원 생성/세이브 없음 | `EmpName 5 100` |
+| `Face_Set [표정번호]` | 월드의 모든 Funny 직원 얼굴을 지정 표정으로 고정(상태·반응 표정보다 우선). 번호 = `EWorkerFaceExpression`: 0 기본 · 1 집중 · 2 웃음 · 3 윙크 · 4 화남 · 5 지침 · 6 놀람 · 7 걱정 · 8 잠 · 9 졸림 · 10 허둥 · 11 불끈 · 12 별눈 · 13 곁눈질 · 14 삐침 · 15 어지러움. `-1` = 해제(상태 표정 복귀). 증명사진 리그는 건너뛴다. 호출 뒤 새로 스폰된 직원에는 적용되지 않음 | `Face_Set 9` / `Face_Set -1` |
 
-> `SetStat`/`StatStatus`는 ID 생략 시 **선택된 직원**이 대상(`Exp`와 동일 규칙). 선택된 직원이 없고 ID도 생략하면 경고 로그만 출력. **StatIndex 규약**: `0=업무속도(WorkSpeed) 1=크리티컬 확률(CritChance) 2=침착성(Composure) 3=경험치획득(ExpGain) 4=체력(Stamina) 5=수익보너스(IncomeBonus)` — `EEmployeeStatIndex`/`UEmployeeStatsHelper`와 동일 인덱스. ★ 강화 15회를 반복하지 않고 스탯 1개의 효과만 격리 검증하기 위한 치트(Task 6~10 전제 도구).
+> `SetStat`/`StatStatus`는 ID 생략 시 **선택된 직원**이 대상(`Exp`와 동일 규칙). 선택된 직원이 없고 ID도 생략하면 경고 로그만 출력. **StatIndex 규약**: `0=업무속도(WorkSpeed) 1=크리티컬 확률(CritChance) 2=침착성(Composure) 3=경험치획득(ExpGain) 4=체력(Stamina) 5=크리티컬 성과(CritDamage)` — `EEmployeeStatIndex`/`UEmployeeStatsHelper`와 동일 인덱스. ★ 강화 15회를 반복하지 않고 스탯 1개의 효과만 격리 검증하기 위한 치트(Task 6~10 전제 도구).
 
 > `SetCrit`은 `UOfficeStageProgressManager::GetCriticalChance()`(직원 작업 크리 판정의 단일 소스 — `EmployeeBehaviorComponent`가 매 산출 틱에 읽어 크리 스코어 오브/사운드 트리거)를 오버라이드한다. 기본 크리율(0.003)/Fortune 특성/피버 전부 무시하고 지정 확률을 반환하므로 **트레일러에서 크리가 자주 터진다**. 스테이지 리셋(크리율 0.003 초기화)에 영향받지 않아 프로젝트가 바뀌어도 유지 → `SetCrit -1`로 해제. `UOfficeStageProgressManager`는 월드 서브시스템이라 OfficeMap 세션 한정(맵 재로드 시 리셋). 참고: 직원별 버프/잠재큐브 크리 보너스는 이 값에 **가산**되므로 실제 확률은 지정값 이상이 될 수 있음(트레일러엔 유리).
 
@@ -208,6 +249,15 @@
 | `SetOpTime [Seconds]` | 현재 관리 중인 빌딩의 운영 남은 시간 설정 (0 = 다음 틱에 즉시 완료) | `SetOpTime 0` |
 | `OpStatus` | 진행 중인 모든 운영 상태 표시 (빌딩/품질/시간/수익) | `OpStatus` |
 | `RevenueMax [Amount]` | 모든 빌딩 금고를 건물당 `Amount`원(기본 5,000,000) **절대액**으로 강제 충전 → 돈 버블 전부 표시. 수거는 안 함 | `RevenueMax` / `RevenueMax 10000000` |
+| `SideFillCrew [BuildingIndex] [Count]` | 다른 건물 소속 직원을 그 건물로 **옮긴다**(`AssignEmployeeToBuilding`). 기술 연구소 팀 파워는 소속 전원의 합이라 이걸로 요구치를 넘겨 **충족(그린) 화면**을 만든다. 실행 후 팀 전원·팀 파워·요구치를 로그로 찍는다. ⚠ 원래 건물에서 빠지므로 되돌리려면 반대로 다시 옮길 것 | `SideFillCrew` / `SideFillCrew 2 5` |
+| `SideSetTraining [BuildingIndex] [CourseBest] [Entries]` | 연구(`CourseBest`)·입장권을 세이브에 직접 세운다. 음수는 「그대로」. **최종 연구 화면은 정상 플레이로 못 만든다**(50 과정까지 도전해야 한다) — 검수 전용 통로다. 상한은 `GetCurrentCourse` 가 잡으므로 큰 값을 넣어도 최종 연구에서 멈춘다 | `SideSetTraining -1 50 3` |
+| `SideOpenSkyline` | 스카이라인 전용 풀스크린을 `PushMenuClass` 로 바로 띄운다(메뉴 시트 경로와 같은 스택 — 프롬프트가 아니다). 로비에서 시작하며 사무실 씬·결과 카드는 화면 안 `[개발하기]` 로 간다. 상태는 `SideSetSkyline` 으로 먼저 만들 것 | `SideOpenSkyline` |
+| `SideSetSkyline [BestFloor] [Entries]` | 스카이라인 최고 층·입장권을 세이브에 직접 세운다. 음수는 「그대로」. **보스 게이트 직전(39층)·100층 화면은 정상 플레이로 못 만든다.** 최고 층을 올리면 그 아래 층의 1회성 보상은 「이미 받음」 으로 기록되어, 치트로 올렸다 내려도 같은 층을 두 번 받지 않는다 | `SideSetSkyline 39 2` |
+| `SideOpenFusion` | 콜라보 개발 창을 `PushPromptClass`로 띄운다. 진행·수령 상태는 기존 세이브를 그대로 표시한다 | `SideOpenFusion` |
+| `SideSetFusion [FusionKey] [Level] [RemainingSeconds]` | 해당 콜라보의 레벨과 타이머 설정. 두 숫자의 음수는 유지, 남은 시간 0은 완료 상태다. **수령 시 서버시각 검증은 계속 적용된다.** `FusionKey=None`은 진행 슬롯만 비우며 다른 콜라보 레벨을 바꾸지 않는다. 디버그 변경은 저장된다. 키: `game_platform`, `fintech`, `console`, `smarthome`, `autodrive`, `autosemi`, `smartcar` | `SideSetFusion game_platform 4 0` / `SideSetFusion None` |
+| `SideOpenTrip [BuildingIndex]` | 그 건물의 출장 창(`UI_BusinessTripPanel`)을 띄운다. 인덱스를 생략하면 세이브의 첫 보유 건물. 카드 3장은 자정마다 뽑히고 슬롯 상태는 **세이브가 정한다** — 진행/수령 화면을 보려면 `USideContentSubsystem::Depart`/`ClaimDispatch` 를 원격 파이썬으로 부를 것(둘 다 `BlueprintCallable` 이라 치트가 따로 없다). | `SideOpenTrip` / `SideOpenTrip 2` |
+| `SideSelectTripCard [CardSlot]` | 열려 있는 출장 창에서 `CardSlot` 번째(0-base, 화면 왼쪽부터) 카드를 고른다. **선발 좌석 슬롯과 요구/보유 판정 밴드는 카드가 선택돼야 나오는데, 클릭 말고는 그 상태로 갈 길이 없어 시각 검수가 막혀 있었다(09-26).** 카드의 공개 델리게이트를 그대로 쏘므로 실제 클릭과 **같은 경로**다 — 패널 API 를 새로 열지 않았다. 먼저 `SideOpenTrip` 으로 창을 띄울 것 | `SideSelectTripCard` / `SideSelectTripCard 2` |
+| `SideOpenTraining [BuildingIndex]` | 그 건물의 기술 연구소(`UI_TrainingCenterPanel`)을 띄운다. 인덱스를 생략하면 세이브의 첫 보유 건물. 연구·입장권 **상태는 세이브가 정한다** — 상태를 바꿔 보려면 `USideContentSubsystem::Challenge`/`SweepTraining` 을 원격 파이썬으로 부를 것(둘 다 `BlueprintCallable` 이라 치트가 따로 없다). 건물 이름은 폴백(`건물 N`) — 카드 해석은 허브가 한다 | `SideOpenTraining` / `SideOpenTraining 2` |
 | `ShowOfflineReport [OfflineHours] [bZeroGain] [FakeRows]` | 오프라인 정산 모달을 즉시 띄운다(60초 대기/앱 라이프사이클 흉내 없이). **실제 표시 경로**(`DebugSetPendingOfflineReport`→`TryShowOfflineReport`→Consume→모달) 그대로 태워 회귀 테스트 겸용. **기본 = 실제 지은 건물만** 내역 생성(절반은 금고 초과 손실, 일부는 운영 종료 태그 — 행 상태 확인) + **실제 금고도 같이 채워** [모두 수령] 코인 수거까지 검증. `OfflineHours`≥12면 12h 캡 변주, `bZeroGain`=1이면 적립 0(금고 만석) 변주. **`FakeRows`>0이면** 실제 건물 + 그 개수까지 가짜 인덱스 행 패딩(존재 안 하는 인덱스라 "건물 N" 폴백 — 레이아웃/스크롤 테스트용, 최대 30) | `ShowOfflineReport` / `ShowOfflineReport 14` / `ShowOfflineReport 3 1` / `ShowOfflineReport 3 0 8` |
 
 > `SetOpTime`은 현재 관리 중인 빌딩에 **진행 중인 운영**이 있어야 동작. `ElapsedTime`도 함께 동기화됨.
@@ -268,7 +318,10 @@
 | 명령어 | 설명 | 예시 |
 |--------|------|------|
 | `UnlockSkins [Count]` | 미보유 스킨 중 랜덤 해금 (기본 5개) | `UnlockSkins 10` |
+| `BldDefaultSkins` | 스킨 100인 완성 건물에 종류별 고정 기본 스킨을 적용하고 저장 | `BldDefaultSkins` |
 | `BldLightsOn [bOn]` | 모든 건물 창문 조명을 운영 여부와 무관하게 항상 켬(`1`, 기본) / 원래 정책(운영 중만 점등)으로 복원(`0`) | `BldLightsOn` / `BldLightsOn 0` |
+
+`BldDefaultSkins`는 자기 도시에서 수동으로 1회 실행한다. 완성된 건물 중 스킨 100인 것만 종류별 기본 스킨으로 바꾸고 기존 `ApplySkin(id, true)` 저장 경로를 사용한다. 100 이외의 선택은 보존한다. 전체 저장에 미확정 위치가 섞이지 않도록 건설·재배치가 진행 중이면 명령 전체를 거부한다. 기본값 자체가 100인 종류는 그대로 두며 미등록 종류는 경고 후 건너뛴다. 방문 모드와 `DevMode`의 저장 봉인 중에도 거부한다. 각 변경은 디스크 세이브를 다시 읽어 확인하며 실패 시 해당 건물만100으로 복원하고 중단한다(앞서 저장된 변경은 유지). 로드 시 자동 실행되지 않는다.
 
 > `BldLightsOn`은 창문 발광(`Window_Emissive_Color`)을 운영 상태와 분리한다. 평소엔 `InGameLayer`가 운영 중인 건물만 점등하고 유휴 건물은 끄는데(`SetWindowLightActive(HasActiveOperation)`), 이 치트는 `ABuildingBaseActor`의 전역 강제 플래그를 켜 `SetWindowLightActive(false)` 요청을 무시하게 만들어 **모든 건물을 항상 켠 상태로 고정**한다(off 경로가 그 함수 단일 창구뿐이라 재평가와 무관하게 유지). `BldLightsOn 0`으로 플래그 해제 + 운영 여부 기준 정상 복원. MainMap의 `UEntityManager` 건물 목록 대상. (전역 static 플래그라 PIE 재시작 시에도 유지될 수 있음 — 끄려면 `BldLightsOn 0`.)
 
@@ -436,8 +489,13 @@ Fac_Lines Korea           라인 현황 확인
 |--------|------|------|
 | `CamPreset [Index]` | 오피스 카메라 각도 프리셋 즉시 적용 (FOV 40/30 고정, 피치만 변화). 0=코지(~-38) 1=밸런스(~-45) 2=탑다운(~-53) 3=하드탑다운(~-60) | `CamPreset 2` |
 | `CamBand [InP] [OutP] [InF] [OutF]` | 오피스 카메라 밴드 수동 지정 — 줌인/줌아웃 피치 + FOV (InF/OutF 생략 시 40/30) | `CamBand -44 -58 40 30` |
+| `CamPose` | 현재 footprint/viewport, floor 중심 월드 좌표, Pawn 상대·월드 transform, 줌·arm·socket, 카메라 월드 transform과 HFOV를 `[OfficeCameraCalibration]` 한 줄로 로그. 카메라와 세이브는 변경하지 않는 read-only 캘리브레이션 캡처 | `CamPose` |
 
-> 둘 다 OfficeMap에서만 동작 (possess한 Pawn이 `AOfficeCameraPawn`일 때). 런타임 즉시 반영 — 각도 비교용 임시 도구이며, 확정 값은 `AOfficeCameraPawn` 생성자에 베이크한다. PIE 재시작 시 생성자 기본값으로 리셋됨. 피치는 줌에 연동되므로 표기한 "~각도"는 기본 줌 기준 근사치.
+| `CamInfo` | 현재 카메라가 **실제로 보는 범위**를 한 줄 로그로 출력. `팔길이 + SocketOffset 후퇴 = 카메라 거리`, `hFOV / vFOV`(MaintainYFOV 환산), 피치, **보이는 구역(가로 × 세로 m)**, 줌 범위(팔길이와 카메라 거리 양쪽), viewport 해상도. `APlayerCamera` 계열을 possess 한 상태면 MainMap·WorldMap·OfficeMap 어디서나 동작하는 read-only 측정 | `CamInfo` |
+
+> `CamInfo` 를 쓰는 이유: **팔길이는 카메라 거리가 아니고**(`SocketOffset.X` 만큼 더 뒤), **수직 화각은 `FieldOfView` 가 아니다**(MaintainYFOV 에서 1.778배 좁음). 이 둘 때문에 손계산이 자주 어긋나므로, `Min/MaxZoomDistance` 를 정할 때는 줌을 손으로 움직이며 이 명령으로 찍어 확인한다(카메라 SOT §5.1 · §6.9).
+
+> `CamPreset`/`CamBand`/`CamPose` 세 명령은 possess한 Pawn이 `AOfficeCameraPawn`인 OfficeMap에서만 동작한다. `CamPreset`/`CamBand`는 런타임 각도 비교용 임시 도구이며 확정 값은 `AOfficeCameraPawn` 생성자에 베이크한다. `CamPose`는 추가로 유효한 viewport와 정확히 하나의 `AOfficeInterior`를 요구하며, 상태를 바꾸지 않고 재현에 필요한 상대/참조 프레임을 기록해 이후 캘리브레이션에 사용한다.
 
 ---
 
@@ -445,10 +503,10 @@ Fac_Lines Korea           라인 현황 확인
 
 | 명령어 | 설명 | 예시 |
 |--------|------|------|
-| `Proj_Seed [Count] [Review]` | 현재 티어까지의 프로젝트를 앞에서부터 `Count`개(기본 5) **개발 완료**로 기록하고 출시 기록도 함께 생성. `Review` 0(기본)이면 12~34 랜덤, 값을 주면 그 평점 고정 | `Proj_Seed 12` |
+| `Proj_Seed [Count] [Review]` | 현재 건물의 프로젝트를 앞에서부터 `Count`개(기본 5) **개발 완료**로 기록하고 건물별 출시 기록도 함께 생성. `Review` 0(기본)이면 12~34 랜덤, 값을 주면 그 평점 고정 | `Proj_Seed 12` |
 | `Proj_SetTier [Tier]` | 현재 티어 강제 설정 (1~10) | `Proj_SetTier 3` |
-| `Proj_ClearHistory` | 개발 이력 + 출시 기록 초기화. 도감 마일스톤 지급 기록도 비움 | `Proj_ClearHistory` |
-| `Proj_State` | 산업 / 티어 / 개발이력 수 / 출시기록 수 + 개발한 인덱스 목록 출력 | `Proj_State` |
+| `Proj_ClearHistory` | 현재 건물의 개발 이력 + 출시 기록 초기화. 이 건물의 도감 마일스톤 지급 기록도 비움 | `Proj_ClearHistory` |
+| `Proj_State` | 현재 건물의 산업 / 티어 / 개발이력 수 / 출시기록 수 + 개발한 인덱스 목록 출력 | `Proj_State` |
 
 **용도.** `[이전 프로젝트]` 패널과 포트폴리오(도감)를 **실제 플레이 없이** 검증한다. 그냥 두면 프로젝트를 여러 개 실제로 굴려야 리스트에 뭐가 뜨는지 볼 수 있다.
 
@@ -504,12 +562,29 @@ Proj_State         // 확인
 
 ---
 
+### 개발자 모드
+
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| `DevMode` | 튜토리얼을 그 자리에서 끝내고 미션판 언락 + 자원 `Rich` + HQ 20 을 적용 | `DevMode` |
+
+> **이 세션의 세이브가 봉인된다.** 디스크 쓰기만 막고 인메모리 커밋은 정상 성공시키므로 플레이 감각은 그대로지만, 앱을 끄면 치트도 그 뒤의 진행도 전부 사라진다. 해제 명령은 없다 — 앱 재시작이 유일한 해제다.
+>
+> 국가·티어 해금은 직접 세우는 값이 아니라 `Rich` 시나리오의 MarketCap 이 시총 게이트를 넘겨서 열리는 파생 효과다 (`HQLevelData.RequiredMarketCap` / `CountryInfoTable.RequiredMarketCap`). 안 열리면 `DT_TestResourceScenarios` 의 Rich 행 MarketCap 을 올릴 것.
+>
+> 튜토리얼 종료는 `CompleteActiveMission` 경로를 타지 않는다 — 그 경로는 저장 성공을 커밋 조건으로 삼아서 저장 봉인과 충돌한다(롤백). 대신 미션을 비우고 완료 플래그만 세운다.
+
+---
+
 ### 튜토리얼 / 미션 점프
 
 | 명령어 | 설명 | 예시 |
 |--------|------|------|
-| `SkipToMission [RowName]` | 임의 미션으로 즉시 점프 (선행 상태 시드 + 자원 듬뿍 + 빌딩 체크 포함) | `SkipToMission M3_EnterOffice` |
+| `SkipToMission [RowName]` | 임의 미션으로 즉시 점프 (선행 상태 시드 + 자원 듬뿍 + 빌딩 체크 포함) | `SkipToMission M4_EnterOffice` |
 | `ResetTutorial` | 세이브 슬롯 삭제 — Stop 후 다시 Play 하면 깨끗한 M1부터 | `ResetTutorial` |
+| `CG_PreviewCityOpening` | 현재 도시에서6초 헬기 야경4초·오전 공장2초 페이드 재생. 건너뛰기 가능, 종료 후 공장 구도로 복귀 | `CG_PreviewCityOpening` |
+
+`CG_PreviewCityOpening`은 개발 빌드의 자기 도시에서 패널을 닫은 상태로 실행한다. FullTutorial/M1/최초 열람 조건을 우회해 기존 카메라·자막을 그대로 재생한다. 세이브를 삭제하거나 `CityOpening` 열람 기록을 바꾸지 않고, 종료·건너뛰기로 미션 체인을 재시작하지 않는다. 방문·레벨 전환·다른 오프닝·모달/특수 조작 중에는 경고 후 생략한다. 연출 종료 후 같은 명령으로 다시 확인할 수 있다. 새 C++ 빌드와 에디터 재실행이 필요하며 실제 빌드/재생 검증 상태는 `Tools/CityOpening/README.md`에 기록한다.
 
 > `SkipToMission`의 RowName은 `DT_Mission` 기준. 시작 미션을 드롭다운으로 미리 지정하려면 `Project Settings > Game > CG Dev > 시작 미션`. `ResetTutorial`은 `SkipToMission` 누적/체인 완주로 `CurrentMissionID=None`이 된 세이브 복구용 (자원 시드 없음 — 신규 게임과 동일).
 
@@ -526,10 +601,87 @@ Proj_State         // 확인
 
 **미션 RowName** (`DT_Goal`): `G1_RaiseFloor` / `G2_HQLevel3` / `G3_SecondBuilding` / `G4_AcquireCompany` / `G5_DemolishCompany` / `G11_AcquirePlot` / `G6_BuildOnClearedPlot` / `G7_PlacePainting` / `G8_EquipSkin` / `G9_EnhanceStat` / `G10_EquipTrait`. 없는 이름을 주면 유효 목록과 함께 FAIL 로그가 뜬다.
 
-> 정규 언락 지점은 튜토리얼 체인 마지막 미션 완료다. `UnlockGoalBoard`는 그 지점만 건너뛰며, 언락 직후 전수 재평가가 돌아 **이미 조건을 넘긴 도달형 미션(본사 레벨 / 건물 수)은 곧바로 수령 가능 상태**가 된다. 단발 이벤트형은 실제 행동을 하거나 `CompleteGoal`로 밀어야 하며, `G1_RaiseFloor`은 성공한 빌드업을 5회 누적한다.
+> 정규 언락 지점은 튜토리얼 체인 마지막 미션 완료다. `UnlockGoalBoard`는 그 지점만 건너뛰며, 언락 직후 전수 재평가가 돌아 **이미 조건을 넘긴 도달형 미션(본사 레벨 / 건물 수)은 곧바로 수령 가능 상태**가 된다. 단발 이벤트형은 실제 행동을 하거나 `CompleteGoal`로 밀어야 하며, `G1_RaiseFloor`은 현행 DT 수량만큼 실제 층 상승을 누적하고 수령 후 반복한다.
 > `CompleteGoal`은 충족 래치까지만 — 보상 지급/수령 플로우(토스트 포함)는 보드에서 눌러야 탄다. 선행 미션(`PrereqGoalID`)가 미수령이면 카드가 잠금 상태라 `[수령]`이 안 뜬다 (`G5`는 `G4` 수령 후, `G6`은 `G5` 수령 후).
 > 세 치트 모두 결과를 즉시 저장하므로 PIE Stop 후 재시작해도 상태가 유지된다. `ResetGoals`는 이미 지급된 보상 자원까지 회수하지는 않는다.
 > 미션 목록 코치마크를 다시 보려면 `ResetPanelIntro` → `ResetGoals` → `UnlockGoalBoard` 순. 트래커는 언락 시 새로 생성되면서 안내를 다시 재생한다(안내는 트래커가 접혀 있으면 재생하지 않는다).
+
+---
+
+### LiveOps — 공용 게임 시계 (UGameClockSubsystem)
+
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| `ClockOffset [Seconds]` | 서버 시각에 더하는 디버그 오프셋을 **누적**한다. 하루 넘김 재현 = `86400`, 되돌리기 = 같은 값을 음수로 | `ClockOffset 86400` / `ClockOffset -86400` |
+| `ClockStatus` | 시계 상태 한 줄 덤프 — `valid`(권위 여부) / `synced` / `lastSync` / `now` / KST 하루·주 키 / 다음 롤까지 남은 시간 / 현재 오프셋 | `ClockStatus` |
+
+**게임 하루의 기준은 KST(UTC+9) 자정, 권위는 PlayFab 서버 시간이다.** `UGameClockSubsystem` 이 `OnServerTimeReceived` 를 받아 시각을 붙잡고(이후는 `FPlatformTime` 경과로 외삽), 15초 폴링으로 하루/주 키가 실제로 바뀐 순간에만 `OnDayKeyChanged` / `OnWeekKeyChanged` 를 방송한다. 상점 일일/주간 한도 리셋이 이 키를 본다.
+
+> `valid=0` 은 서버 시간을 한 번도 못 받았거나 마지막 동기가 24시간을 넘긴 상태 — 이때는 로컬 UTC 로 폴백한다(상점 리셋만 허용되는 관대함).
+> `ClockOffset` 은 누적이라 두 번 넣으면 이틀이 간다. `ClockStatus` 의 `offset` 으로 현재 누적치를 확인할 것. Shipping 빌드에서는 오프셋이 무시된다.
+> 오프셋으로 날짜를 넘긴 뒤 상점 패널을 다시 열면 일일 한도가 초기화돼 있다 (`CheckAndPerformResets` 가 패널 오픈/구매 시 키를 대조).
+
+---
+
+### LiveOps — 퀘스트 원장 (UQuestSubsystem)
+
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| `QuestReport [Counter] [Amount]` | 퀘스트 카운터를 강제로 보고한다. `Counter` 는 `EQuestCounter` 이름 그대로(`RevenueCollect`, `ProjectLaunch`, `GachaPull` 등), `Amount` 생략 시 1 | `QuestReport RevenueCollect 5` / `QuestReport ProjectLaunch` |
+| `QuestReset` | 일일/주간/업적 원장을 전부 비우고 현재 하루·주 키로 다시 잡은 뒤 저장한다 | `QuestReset` |
+| `QuestStatus` | 주기별로 활약도(`activity=현재/최대`)와 노출 중인 행을 `QuestID state=… 현재/목표` 로 덤프한다 | `QuestStatus` |
+
+**진행은 `ReportCounter` 단일 버스로만 들어온다.** 증분형 카운터(수익 수집·벽돌·출시·강화·구매·뽑기 등)는 원장에 누적되고, 절대값형(누적 매출·건물 수·직원 수·본사 레벨 등)은 보고와 무관하게 세이브에서 현재값을 읽는다 — 절대값형 행은 `QuestReport` 로 올릴 수 없다.
+
+> `state` 값은 `0=진행중 / 1=수령가능 / 2=수령완료`, `period` 는 `0=일일 / 1=주간 / 2=업적`.
+> 업적은 같은 트랙에서 수령 안 된 가장 낮은 티어 1행만 노출되므로 `QuestStatus` 의 업적 행 수가 DT 행 수보다 적은 것이 정상이다.
+> 하루 넘김 롤오버 확인은 `ClockOffset 86400` 과 함께 — 완료했지만 안 받은 보상은 `LogQuest: expired rewards:` 로 빠져나가 우편함(`MailStatus`)에 시스템 메일로 들어온다.
+
+---
+
+### LiveOps — 출석 (UAttendanceSubsystem)
+
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| `AttendClaim` | 오늘치 출석 보상을 수령한다. 서버 시간이 유효하고 오늘 아직 안 받았을 때만 성공하며, 결과를 `claimed=…` 로 로그한다 | `AttendClaim` |
+| `AttendReset` | 순환 일차·마지막 수령 하루 키·누계를 전부 0 으로 되돌리고 저장한다 | `AttendReset` |
+| `AttendStatus` | `canClaim` / `nextDay`(다음에 받을 칸) / `cycleDay`(마지막으로 받은 칸) / `total`(누적 출석 일수) 를 덤프한다 | `AttendStatus` |
+
+**28일 순환 · 관대형.** 놓친 날은 건너뛰지 않는다 — 며칠 만에 들어와도 다음 칸을 받는다. 28일차를 받으면 다음은 1일차로 돌아가지만 `total` 은 계속 누적된다(누적 출석 이벤트용).
+
+> 다음 날 재현은 `ClockOffset 86400` → `AttendStatus` 로 `canClaim=1` 이 되는지 확인. `canClaim=0` 인데 오늘 안 받았다면 `ClockStatus` 의 `valid` 를 볼 것 — 서버 시간이 유효하지 않으면 수령이 막힌다.
+> 이미 지급된 보상 자원은 `AttendReset` 으로 회수되지 않는다.
+
+---
+
+### LiveOps — 우편함 (UMailboxSubsystem)
+
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| `MailSend [DiamondAmount]` | 테스트 우편 1통(다이아 N + 일반 채용권 5, 만료 7일)을 시스템 메일로 넣는다. 인자 생략 시 100 | `MailSend` / `MailSend 500` |
+| `MailClear` | 우편함을 비우고 글로벌 메일 수신 이력(`ConsumedGlobalMailIds`)까지 지운 뒤 저장한다 | `MailClear` |
+| `MailStatus` | 미수령 통수와 각 메일의 제목/보상 개수/만료 시각을 덤프한다 | `MailStatus` |
+
+**우편함에 남아 있는 것 = 전부 미수령.** 수령하면 즉시 목록에서 사라진다. 상한은 50통이고 초과분은 가장 오래된 것부터 밀려난다. 만료 정리는 우편함을 열 때(`PurgeExpiredNow`)와 세이브 로드 직후에 일어난다.
+
+> 퀘스트 롤오버로 만료된 **완료 미수령** 보상은 자동으로 여기에 들어온다 — `QuestReport …` 로 일일 미션을 완료만 해 두고 `ClockOffset 86400` 을 넣은 뒤 `MailStatus` 로 확인.
+> 글로벌 메일(`TryDeliverGlobalMail`)은 `SourceKey` 당 1회만 들어오므로, 재수신 테스트는 `MailClear` 로 이력을 지운 뒤에 할 것.
+
+---
+
+### LiveOps ― 이벤트/공지 (ULiveOpsSubsystem)
+
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| `LiveOpsRefresh` | PlayFab TitleData(`LiveOps.Events` / `LiveOps.Notices` / `LiveOps.Mails`)를 즉시 다시 읽는다. 10분 스로틀을 무시하는 강제 요청 | `LiveOpsRefresh` |
+| `EventPoints [EventId] [Amount]` | 활성 중인 수집 이벤트의 점수를 가산한다. 인자 생략 시 1 | `EventPoints EV_LaunchRush 5` |
+| `EventStatus` | 활성 이벤트별 유형/점수/마일스톤 상태와 현재 핫타임 배율, 공지 미읽음 수를 덤프한다 | `EventStatus` |
+
+**정의는 DT 가 기본값, TitleData 가 오면 키 단위로 통째 덮는다.** 파싱이나 검증(Id 중복 · Money 보상 · 핫타임 창)에 실패한 페이로드는 경고만 남기고 DT 정의를 유지한다.
+
+> `type` 값은 `0=누적 출석 / 1=수집 / 2=핫타임`. 누적 출석 이벤트의 점수는 저장된 시작 누계와의 차이라 `EventPoints` 로 올라가지 않는다 ― `AttendClaim` 으로 올릴 것.
+> 핫타임 배율은 KST 시각 창이므로 `ClockOffset` 으로 창 안으로 들어간 뒤 `EventStatus` 의 `hotTime` 을 볼 것. 반영은 1분 타이머라 즉시가 아니다.
+> 수령·회수는 서버 시간이 유효할 때만 돌아간다 ― `ClockStatus` 의 `valid` 를 먼저 확인할 것.
 
 ---
 
@@ -574,17 +726,50 @@ Proj_State         // 확인
 
 ---
 
+### 렌더 비용 귀속 (실기기 GPU 격리)
+
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| `CG_HideMesh <부분이름>` | 스태틱메시명·액터명·클래스명에 부분이름이 들어간 프리미티브 컴포넌트를 전부 숨김. 로그에 숨긴 개수 | `CG_HideMesh TimeCycleSky` / `CG_HideMesh IslandTerrain` / `CG_HideMesh Road_Double` |
+| `CG_ShowMesh <부분이름>` | 같은 부분일치로 다시 표시 | `CG_ShowMesh TimeCycleSky` |
+
+> 쇼플래그(`ShowFlag.StaticMeshes` 등)는 종류 단위라 "하늘돔만·바다판만·지형만" 을 못 가른다. 실기기에서 `stat unit` GPU ms 를 보며 하나씩 숨겨 비용을 귀속할 때 쓴다(2026-10-09 A9 최적화에서 추가). 안드로이드에선 `am broadcast -a android.intent.action.RUN -e cmd 'CG_HideMesh X'` 로 로드 후 주입(`CGR_Profiling/sfsweep5.ps1 -PostCmd`).
+
+---
+
+### 레벨 전환 오버레이 (SLevelTransitionOverlay)
+
+| 명령어 | 설명 | 예시 |
+|--------|------|------|
+| `CG_PreviewTransition [Sec] [TipKey]` | 레벨 이동 없이 전환 홀드 화면(블루 패널 + 슬래시 스피너 + 하단 TIP 밴드)을 N초간 띄움 | `CG_PreviewTransition` / `CG_PreviewTransition 10` / `CG_PreviewTransition 10 P_Desk` |
+| `CG_ListTips` | 로드된 `DT_LoadingTip` 행 전체(키/묶음/컨텍스트/가중치/글자수) 출력 | `CG_ListTips` |
+
+> **왜 필요한가**: 전환은 0.35초 와이프 뒤 `OpenLevel` 블로킹 로딩이라 **눈으로 볼 방법이 없다**. `CG_PreviewTransition` 은 `SLevelTransitionOverlay` 의 Holding 외형을 그대로 뷰포트에 붙여 N초간 붙잡아 둔다 (`Sec` 은 0.5~120 클램프, 기본 6초).
+>
+> - 실제 전환 상태(`LevelTransitionState`)와 멤버를 **공유하지 않는다** — `IsLevelTransitionActive()` 가 켜지면 랭킹/오피스 게임모드/건물 패널이 갱신을 멈추므로 미리보기용 별도 멤버를 쓴다.
+> - **입력 차단기를 달지 않는다** — 미리보기에 갇히면 안 된다.
+> - `TipKey` 를 주면 그 팁을 고정 표시(키 목록 = `CG_ListTips`), 안 주면 `Any` 컨텍스트 가중 추첨.
+> - 전환이 이미 진행 중이면 무시하고 경고만 남긴다.
+>
+> `CG_ListTips` 는 CSV 재임포트가 먹었는지와 상한(`FLoadingTipRules::MaxBodyChars` = 40자) 초과 문구를 확인한다. 초과 행은 `OVER` 로 표시되고 인게임에서 2줄로 접힌다. 0행이면 `DT_LoadingTip` 에셋이 없거나 RowStruct 가 `FLoadingTipTable` 이 아니다.
+
+---
+
 ### 시간대 / 낮밤 (ATimeCycleManager)
 
 | 명령어 | 설명 | 예시 |
 |--------|------|------|
 | `Day` | 낮으로 고정 (12:00 세팅 + 사이클 정지 → 창문/차량 라이트 OFF) | `Day` |
 | `Night` | 밤으로 고정 (00:00 세팅 + 사이클 정지 → 창문/차량 라이트 ON) | `Night` |
+| `Dusk` | **석양(노을 정점)으로 고정.** 시각을 상수로 박지 않고 배치된 `ATimeCycleSky` 의 `DuskBlendHours`·`PostSunsetTwilightHours`·`TwilightWarmApex` 와 시계의 `SunSetTime` 에서 **파생**한다 → MainMap 18:00 / WP_Office 19:00 | `Dusk` |
+| `Dawn` | 여명(노을 정점)으로 고정. `Dusk` 의 반대쪽 | `Dawn` |
 | `SetTime [Hour] [Minute]` | 임의 시각으로 고정 (시 0~23, 분 0~59 + 사이클 정지) | `SetTime 18` / `SetTime 6 30` |
 | `TimeResume` | 시간 사이클 재개 (고정 해제 → 다시 시간이 흐름) | `TimeResume` |
 
 > 시간만 세팅하면 `UWindowLightManagerSubsystem`이 매 틱 그 시간을 읽어 `Night_Intensity`(0~1) MPC를 갱신 → 창문 발광/차량 라이트 등 **MPC 기반 룩만** 낮/밤으로 바뀐다 (씬 전체 라이팅/태양 각도는 변경 안 함).
-> 밤/낮 기준은 WindowLightManager 자체 값(**일출 6시 / 일몰 21시**): 완전 낮 = 7~18시, 완전 밤 = 22~5시. `Day`=12시, `Night`=0시는 각 구간의 안전한 중앙값.
+> 밤/낮 경계의 단일 소스는 배치된 `ATimeCycleManager` 의 **`SunRiseTime`/`SunSetTime`** 이다(기본 07:00 / 19:00). 하늘·조명·이벤트가 전부 이 값에서 파생한다. `Day`=12시, `Night`=0시는 어느 설정에서도 안전한 중앙값이고, 전환 구간은 맵마다 달라 상수로 못 적으므로 **`Dusk`/`Dawn` 을 쓸 것**.
+>
+> ⚠ 구 서술("WindowLightManager 자체 값 일출 6시 / 일몰 21시")은 **틀렸다** — 그 사설 멤버는 2026-06-23 단일 소스화에서 삭제됐다. 상세 = `docs/01_Systems/Environment/DAY_NIGHT_CYCLE.md`.
 > 맵에 `ATimeCycleManager`가 배치되어 있어야 동작 (없으면 `[Cheat:Time] TimeCycleManager 없음` 경고). 내부적으로 `SetCurrentTime` + `PauseCycle`(고정) / `StartCycle`(재개).
 
 ---
@@ -728,7 +913,7 @@ MineDebug                  // 자동으로 누적된 양 확인 (8h 캡 내)
 ```
 Night                      // 00:00 고정 → 창문 발광/차량 라이트 ON
 Day                        // 12:00 고정 → OFF
-SetTime 20                 // 황혼 구간 그라데이션 확인
+Dusk                       // 석양(노을 정점) — 맵의 황혼 노브에서 파생
 TimeResume                 // 고정 해제, 다시 시간 흐름
 ```
 
@@ -737,7 +922,7 @@ TimeResume                 // 고정 해제, 다시 시간 흐름
 ```
 TraitTicket 50 -1          // 특성 뽑기권 Normal+Advanced 50장씩 → 가챠 패널 테스트
 SkinTicket 50 -1           // 스킨 뽑기권 50장씩
-SkipToMission M6_FirstDesk // 특정 미션 상태로 점프 (선행 시드 포함)
+SkipToMission M27_AcquireCompany // 특정 미션 상태로 점프 (선행 시드 포함)
 ```
 
 ---

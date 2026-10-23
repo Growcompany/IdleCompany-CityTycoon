@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataTable.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/CompanyType.h"
 #include "CountryDemandTable.generated.h"
 

@@ -44,6 +44,12 @@ public:
         bool bShouldSave = true,
         bool bShouldBroadcast = true);
 
+    // 공장 수확 지급·퀘스트 집계·지연 저장. 비행 착지와 화면 밖 즉시 적립이 공유한다.
+    void CollectFactoryBricks(int32 Amount);
+
+    // 기체별 수령 시각을 저장하고 지급한 Money를 반환한다. 제한 중이거나 지급 불가면 0.
+    int64 CollectAmbientAircraftBonus(FName SourceKey);
+
     // 지정한 양만큼 자원을 소비(-Amount)합니다
     // bShouldSave: true일 때 자동 저장 (기본값: true)
     void SpendResource(EResourceType Type, int64 Amount, bool bShouldSave = true);
@@ -70,8 +76,16 @@ public:
     UFUNCTION(BlueprintCallable, Exec, Category = "Resource|Debug")
     bool GrantTestResources(FName ScenarioRowName);
 
+    /**
+     * 부팅 자동 적용용 ― Diamond 를 건너뛴다(설계서 §6.3 / §7.6 R3).
+     * Diamond 권위는 서버(Firestore)이므로 dev 시나리오가 매 실행 로컬 값을 덮으면 이관 성공/실패를 판별할 수 없다.
+     * 콘솔 치트(`GrantRes`)는 위 오버로드를 그대로 써서 Diamond 도 넣는다(개발 편의).
+     */
+    bool GrantTestResourcesExceptDiamond(FName ScenarioRowName);
+
 private:
     void HandleGameDataLoaded();
+    bool ApplyTestResourceScenario(FName ScenarioRowName, bool bIncludeDiamond);
 
 private:
     // 내부적으로 자원별 값을 저장하는 맵

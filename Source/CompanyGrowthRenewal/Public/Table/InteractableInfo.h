@@ -22,7 +22,7 @@ struct FInteractableInfo : public FTableRowBase
 	FName Name;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generic")
-	EInteractableType InteractableType; // for filtering
+	EInteractableType InteractableType = EInteractableType::None; // for filtering
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Scale")
 	float Scale = 1.0f;

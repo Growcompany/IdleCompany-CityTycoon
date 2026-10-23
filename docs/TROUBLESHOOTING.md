@@ -1,4 +1,8 @@
-# 대표 트러블슈팅
+# 구현·문제 해결 기록
+
+현재 포트폴리오의 대표 사례는 **저사양 모바일 렌더링 최적화**와 **여러 직원 채용 시 화면 멈춤**입니다. 조사 과정·측정 범위·핵심 코드는 [Notion 프로젝트 페이지](https://www.notion.so/2626907ae0ce8030b6edd2bdb5ae4931)에 있으며, 공개 코드의 시작점은 [README의 포트폴리오 코드 안내](../README.md#포트폴리오-코드-안내)에 정리했습니다.
+
+아래는 이전 스냅샷에서 정리한 구현 기록입니다. 당시 진단과 결과를 보존하며 현재 대표 사례의 측정 결과와 합산하지 않습니다.
 
 ## 1. 야간 Flickering·Shimmer
 
@@ -54,7 +58,7 @@ Screen 좌표를 ViewportScale로 나누는 가정을 제거하고, Viewport Loc
 
 메모리상의 현재 포인터 유효성만 검사하지 않고, 직렬화된 로드 객체인지 구분해 런타임 인스턴스를 재생성했습니다. 결과를 특정 에셋의 우연한 수정이 아니라 객체 수명주기 규칙으로 일반화했습니다.
 
-- [직렬화된 MID를 판별해 재생성하는 구현](../Source/CompanyGrowthRenewal/Private/Entity/Officeworker/StickOfficeworker.cpp)
+- [직렬화된 MID를 판별해 재생성한 당시 구현](https://github.com/Growcompany/IdleCompany-CityTycoon/blob/4078b998dab8a2402d07c5cb72af21d98adc5b66/Source/CompanyGrowthRenewal/Private/Entity/Officeworker/StickOfficeworker.cpp)
 
 <a id="android-cooking"></a>
 

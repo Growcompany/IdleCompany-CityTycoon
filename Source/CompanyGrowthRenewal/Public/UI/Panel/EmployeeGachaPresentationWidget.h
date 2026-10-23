@@ -17,6 +17,7 @@ class AGachaCaptureStage;
 class AWorkstationActorBase;
 class UTexture2D;
 class UEmployeeIdCardMiniWidget;
+class UEmployeeManager;
 enum class ECompanyType : uint8;
 struct FGameplayTag;
 
@@ -35,9 +36,10 @@ struct FEmpGachaDustParam
  * 빌드업(슬롯 등급광+카드 티징) → 플래시(사출) → 공개(사원증 착지 펀치, 증명사진=SceneCapture RT 댄스) → 여운(도장/등급 이펙트).
  * 모든 시각 상태는 StageTime 하나에서 stateless 유도 — 탭 스킵 = 시간 점프.
  * SOT: docs/superpowers/specs/2026-07-11-employee-gacha-idcard-reveal-design.md (승인 목업 EmployeeGachaReveal_IDCard_MOCKUP.html)
- * 결과는 [확인]/[닫기]/파괴 시 ConfirmGachaHire 로 풀에 적립(1회). 닫혀도 유실 방지.
+ * 일반 뽑기 결과는 [확인]/[닫기]/파괴 시 ConfirmGachaHire 로 풀에 적립(1회). 닫혀도 유실 방지.
  * 멀티(2~5건)는 SetupPullBatch — 센터=베스트로 같은 세리머니를 태우고, 도장 후 나머지를 좌우로 딜링,
- * 적립은 ConfirmGachaHireBatch 로 전원 일괄(부분 채용 금지).
+ * 일반 일괄 적립은 ConfirmGachaHireBatch 로 전원 일괄(부분 채용 금지).
+ * 오피스 도착은 이미 채용된 결과를 같은 카드로 공개하고 좌석으로 이동시키므로 적립을 수행하지 않는다.
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UEmployeeGachaPresentationWidget : public UCommonActivatableWidget
@@ -52,6 +54,16 @@ public:
 
 	/** 멀티 뽑기 결과 (2건+). 1건이면 내부에서 SetupPull 위임. */
 	void SetupPullBatch(const TArray<FGachaResultData>& Results, EGachaTier Tier, int32 BuildingIndex);
+
+	/** 이미 채용된 결과를 뽑기 순서대로 각자의 책상 위에 공개한다. */
+	void SetupOfficeArrival(const TArray<FGachaResultData>& Results, EGachaTier Tier, int32 BuildingIndex,
+		const TArray<FVector>& SeatTargets);
+	void NotifyOfficeEmployeeArrived(int32 RollIndex);
+	bool IsOfficePortraitReady(int32 RollIndex) const
+	{
+		return OfficePortraitReady.IsValidIndex(RollIndex) && OfficePortraitReady[RollIndex];
+	}
+	bool IsOfficeArrivalFinished() const { return bOfficeArrivalFinished; }
 
 	// 자동 착석 1순위 책상 (채용 진입 책상). SetupPull 전에 설정.
 	void SetPreferredWorkstation(AWorkstationActorBase* Workstation);
@@ -113,6 +125,12 @@ private:
 	// ===== 멀티 뽑기 (2~5건) =====
 	void SpawnSideCards();  // 미니 카드 생성 + StageCanvas 배치 (초기 숨김)
 	void UpdateDealing();   // StageTime 기반 stateless 딜링 (UpdateStaging 에서 호출)
+	void UpdateOfficeArrival(float DeltaTime);
+	UWidget* GetOfficeCardForRoll(int32 RollIndex) const;
+	void RebuildOfficeLandingEffects();
+	void ClearOfficeLandingEffects();
+	void RefreshOfficePortrait(int32 RollIndex);
+	void HandleOfficePortraitUpdated(int32 EmployeeID, int64 Revision);
 	void BankAllResults();  // 캡처 큐 완료 게이트 → ConfirmGachaHireBatch → 집계 토스트
 	bool IsMulti() const { return BatchResults.Num() >= 2; }
 
@@ -132,6 +150,17 @@ private:
 	EGachaTier CurrentTier = EGachaTier::Normal;
 	int32 CurrentBuildingIndex = INDEX_NONE;
 	bool bCurrentBanked = false;
+	bool bOfficeArrival = false;
+	bool bOfficeArrivalFinished = false;
+	float OfficeTime = 0.f;
+	float OfficeNextLandingSoundTime = 0.f;
+	TArray<FVector> OfficeSeatTargets; // 뽑기 순서와 동일
+	TArray<float> OfficeRevealTimes; // 뽑기 순서. 음수는 시작 전
+	// 배정된 직원이 착석하면 앞 카드와 간격을 두고 공개한다.
+	TArray<bool> OfficeRevealRequested;
+	TArray<bool> OfficePortraitReady;
+	UPROPERTY() TArray<TObjectPtr<UImage>> OfficeLandingPulses;
+	bool bOfficeCardsPlaced = false;
 
 	// 멀티 결과 — BatchResults 는 뽑기 순서(사번/뱅킹 순서), DisplayOrder 는 슬롯 C,R1,L1,R2,L2 순 인덱스
 	TArray<FGachaResultData> BatchResults;
@@ -163,6 +192,7 @@ private:
 	UPROPERTY() TObjectPtr<UTexture2D> DustTexture;
 
 	UPROPERTY() URecruitmentManagerSubsystem* RecruitmentManager = nullptr;
+	UPROPERTY() UEmployeeManager* OfficeEmployeeManager = nullptr;
 	UPROPERTY() AGachaCaptureStage* CaptureStage = nullptr;
 	TWeakObjectPtr<AWorkstationActorBase> PreferredWorkstationWeak;
 };

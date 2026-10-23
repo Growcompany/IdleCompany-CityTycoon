@@ -27,10 +27,10 @@ void UCostActionButtonWidget::NativePreConstruct()
 {
 	Super::NativePreConstruct();
 
-	// 에디터에서 설정한 ButtonText 적용 (미설정 시 기본값 "강화")
+	// 재구성 때도 현재 MAX 상태의 라벨을 유지한다.
 	if (BtnText)
 	{
-		BtnText->SetText(ButtonText);
+		BtnText->SetText(bIsMaxLevel ? MaxLevelText : ButtonText);
 
 		// bOverrideTextStyle=true인 인스턴스에서만 폰트/색상/패딩 오버라이드.
 		// false면 WBP에서 잡아둔 기본 스타일을 보존.
@@ -207,6 +207,7 @@ void UCostActionButtonWidget::SetCost(int64 Cost, EResourceType ResourceType, bo
 {
 	CurrentCost = Cost;
 	CurrentResourceType = ResourceType;
+	bCheckCurrentCostAffordability = bCheckAfford;
 
 	// Cast 는 여기서 1회 캐시 (NativeTick 에서 매 프레임 캐스팅 금지)
 	if (!CachedCostWidget)
@@ -237,6 +238,20 @@ void UCostActionButtonWidget::SetCost(int64 Cost, EResourceType ResourceType, bo
 	}
 }
 
+void UCostActionButtonWidget::RefreshAffordability(EResourceType ResourceType, int64 AvailableAmount)
+{
+	if (!bCheckCurrentCostAffordability || ResourceType != CurrentResourceType)
+	{
+		return;
+	}
+
+	const bool bCanAfford = AvailableAmount >= CurrentCost;
+	if (!bAffordInitialized || bCanAfford != bLastCanAfford)
+	{
+		SetCanAfford(bCanAfford);
+	}
+}
+
 void UCostActionButtonWidget::SetCanAfford(bool bCanAfford)
 {
 	const UWorld* AffordWorld = GetWorld();
@@ -264,9 +279,30 @@ void UCostActionButtonWidget::SetCanAfford(bool bCanAfford)
 	UpdateBorderColor();
 }
 
+void UCostActionButtonWidget::SetCostLabel(const FText& Label)
+{
+	if (!CachedCostWidget)
+	{
+		CacheCostWidget();
+	}
+	if (CachedCostWidget)
+	{
+		CachedCostWidget->SetLabelOverride(Label);
+	}
+}
+
+void UCostActionButtonWidget::SetCostVisible(bool bVisible)
+{
+	if (CostWidget)
+	{
+		CostWidget->SetVisibility(bVisible ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	}
+}
+
 void UCostActionButtonWidget::SetMaxLevelState(bool bInIsMaxLevel)
 {
-	if (bIsMaxLevel == bInIsMaxLevel)
+	const bool bStateChanged = bIsMaxLevel != bInIsMaxLevel;
+	if (!bStateChanged && !bIsMaxLevel)
 	{
 		return;
 	}
@@ -282,7 +318,7 @@ void UCostActionButtonWidget::SetMaxLevelState(bool bInIsMaxLevel)
 		BtnText->SetText(bIsMaxLevel ? MaxLevelText : ButtonText);
 	}
 
-	if (bIsMaxLevel)
+	if (bIsMaxLevel && bStateChanged)
 	{
 		AffordPunch = FScalePunchAnimation();
 		SetRenderScale(FVector2D(1.f, 1.f));
@@ -340,7 +376,7 @@ void UCostActionButtonWidget::PlayInsufficientFeedback()
 	const UWorld* FeedbackWorld = GetWorld();
 	const float Now = FeedbackWorld ? FeedbackWorld->GetTimeSeconds() : 0.f;
 
-	// 셰이크·사운드·토스트가 쿨다운을 공유 (Pressed+Clicked 이중 발화, 10Hz 홀드 연타 모두 차단)
+	// 셰이크·토스트가 쿨다운을 공유 (Pressed+Clicked 이중 발화, 10Hz 홀드 연타 모두 차단)
 	if (Now - LastRejectFeedbackTime < RejectFeedbackCooldown)
 	{
 		return;
@@ -358,13 +394,8 @@ void UCostActionButtonWidget::PlayInsufficientFeedback()
 		return;
 	}
 
-	if (USoundManagerSubsystem* SoundMgr = GI->GetSubsystem<USoundManagerSubsystem>())
-	{
-		SoundMgr->PlayUISound(CGUISoundTags::ButtonDisabled);
-	}
-
 	// 부족분 문구 조립은 UIManager 로 옮겼다 — 같은 문구를 다른 거부 경로들과 공유한다.
-	// 위 쿨다운은 셰이크/사운드용이고, 토스트 자체의 중복 억제는 헬퍼가 따로 한다.
+	// 위 쿨다운은 셰이크용이고, 토스트 자체의 중복 억제는 헬퍼가 따로 한다.
 	if (UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>())
 	{
 		UIMgr->NotifyInsufficientResource(CurrentResourceType, CurrentCost);
@@ -373,9 +404,15 @@ void UCostActionButtonWidget::PlayInsufficientFeedback()
 
 void UCostActionButtonWidget::HandleButtonClicked()
 {
+	const bool bPressAccepted = bPressAcceptedThisTap;
+	bPressAcceptedThisTap = false;
 	if (ShouldRejectInput())
 	{
-		PlayInsufficientFeedback();
+		// 누름에서 구매하는 소유자(공장 x1)는 같은 탭의 클릭 때 이미 값이 올라 있다 ― 그건 부족이 아니다
+		if (!bPressAccepted)
+		{
+			PlayInsufficientFeedback();
+		}
 		return;
 	}
 	OnClickedEvent.Broadcast();
@@ -386,9 +423,11 @@ void UCostActionButtonWidget::HandleButtonPressed()
 	// Pressed 를 삼켜야 홀드 타이머 자체가 시작되지 않는다
 	if (ShouldRejectInput())
 	{
+		bPressAcceptedThisTap = false;
 		PlayInsufficientFeedback();
 		return;
 	}
+	bPressAcceptedThisTap = true;
 	OnPressedEvent.Broadcast();
 }
 

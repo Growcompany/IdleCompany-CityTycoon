@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/ResourceType.h"
 #include "UI/Panel/CountryRouterPanelWidget.h"  // ECountryRouterMode
 #include "CountryRouterCardWidget.generated.h"
@@ -28,7 +28,7 @@ class UWidget;
  *   Card->SetTargetTabIndex(1);  // 1=Factory
  *   Card->SetLockState(false);
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UCountryRouterCardWidget : public UUserWidget
 {
 	GENERATED_BODY()

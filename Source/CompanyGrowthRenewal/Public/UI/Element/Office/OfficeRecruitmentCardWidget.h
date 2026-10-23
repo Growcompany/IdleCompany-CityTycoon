@@ -17,7 +17,7 @@ class UBorder;
 /**
  * 채용 카드 위젯 - 주스탯/부스탯 표시 및 상세 뷰 전환
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOfficeRecruitmentCardWidget : public UCardWidgetBase
 {
 	GENERATED_BODY()

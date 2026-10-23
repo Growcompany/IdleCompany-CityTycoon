@@ -2,6 +2,7 @@
 
 #include "UI/Panel/WorldResourcePanelWidget.h"
 #include "UI/Panel/CountryDetailWidget.h"
+#include "Entity/Country/LegacyCountryActor.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/UIBase.h"
 #include "Manager/WorldMapManager.h"
@@ -154,7 +155,7 @@ void UWorldResourcePanelWidget::JumpToCountry(ERawMaterialType Mat)
 	if (TargetCountry == ECountryType::None) return;
 
 	// 카메라 포커스
-	if (ACountryActor* CountryActor = ACountryActor::FindCountryActor(this, TargetCountry))
+	if (ALegacyCountryActor* CountryActor = ALegacyCountryActor::FindCountryActor(this, TargetCountry))
 	{
 		CountryActor->RequestFocus(true);
 	}

@@ -2,6 +2,10 @@
 
 #include "Utils/FWidgetAnimationUtils.h"
 
+#include "Components/Image.h"
+
+bool FMotionGate::bReduced = false;
+
 //-----------------------------------------------------------------------------
 // FWidgetAnimationUtils - Easing 함수들
 //-----------------------------------------------------------------------------
@@ -49,7 +53,9 @@ void FNumberCountUpAnimation::Start(float From, float To, float InDuration)
 	FromValue = From;
 	ToValue = To;
 	Duration = FMath::Max(InDuration, 0.01f);  // 최소 지속 시간 보장
-	ElapsedTime = 0.f;
+	// 연출 감소라도 재생은 한다 — 소비처가 Tick 안에서만 값을 옮기므로 끄면 표시가 그 자리에 언다.
+	// 대신 경과를 끝에 두어 첫 Tick 이 곧바로 ToValue 로 완료한다(중간값이 한 프레임도 안 비친다).
+	ElapsedTime = FMotionGate::IsReduced() ? Duration : 0.f;
 	bIsPlaying = true;
 }
 
@@ -107,7 +113,8 @@ void FScalePunchAnimation::Start(float InPunchScale, float InDuration)
 	PunchScale = InPunchScale;
 	Duration = FMath::Max(InDuration, 0.01f);  // 최소 지속 시간 보장
 	ElapsedTime = 0.f;
-	bIsPlaying = true;
+	// 연출 감소: 재생하지 않으면 Tick 이 곧바로 1.0 을 돌려준다
+	bIsPlaying = !FMotionGate::IsReduced();
 }
 
 float FScalePunchAnimation::Tick(float DeltaTime)
@@ -194,8 +201,30 @@ float FWidgetAnimationUtils::StampInOpacity(float T01, float MaxOpacity)
 	return FMath::Clamp(T01 * 3.f, 0.f, MaxOpacity);
 }
 
+FStampDropPose FWidgetAnimationUtils::StampDrop(float T01, float DropPx, float ExtraTiltDeg, bool bReduced)
+{
+	const float T = FMath::Clamp(T01, 0.f, 1.f);
+	FStampDropPose Pose;
+	if (bReduced)
+	{
+		Pose.Opacity = T;
+		return Pose;
+	}
+	// 남은 거리 = 1 - 이징. 넘치는 구간에서는 음수가 되어 제자리를 살짝 지나 내려앉는다
+	const float Remain = 1.f - EaseOutBack(T);
+	Pose.Offset = FVector2D(0.0, static_cast<double>(-DropPx * Remain));
+	Pose.AngleDeg = -ExtraTiltDeg * Remain;
+	Pose.Opacity = FMath::Clamp(T / 0.7f, 0.f, 1.f);
+	return Pose;
+}
+
 FVector2D FWidgetAnimationUtils::ShakeOffset(float Elapsed, float Duration, float Amp)
 {
+	// 설정 문구가 "화면 흔들림과 움직임 연출을 줄입니다" 다 — 호출처마다가 아니라 여기서 지킨다
+	if (FMotionGate::IsReduced())
+	{
+		return FVector2D::ZeroVector;
+	}
 	if (Duration <= 0.f || Elapsed < 0.f || Elapsed >= Duration)
 	{
 		return FVector2D::ZeroVector;
@@ -203,4 +232,22 @@ FVector2D FWidgetAnimationUtils::ShakeOffset(float Elapsed, float Duration, floa
 	const float K = 1.f - Elapsed / Duration;
 	const float M = Amp * K;
 	return FVector2D(FMath::Sin(Elapsed * 93.f) * M, FMath::Cos(Elapsed * 87.f) * M);
+}
+
+void FWidgetAnimationUtils::DriveSparklePop(UImage* Sparkle, float T01)
+{
+	if (Sparkle == nullptr)
+	{
+		return;
+	}
+	if (T01 < 0.f || T01 >= 1.f)
+	{
+		Sparkle->SetRenderOpacity(0.f);
+		return;
+	}
+	// 사인 아치로 커졌다 사라짐 + 살짝 회전 (HQ 축하 모달과 같은 모션)
+	const float Arch = FMath::Sin(T01 * PI);
+	Sparkle->SetRenderScale(FVector2D(1.15f * Arch, 1.15f * Arch));
+	Sparkle->SetRenderOpacity(FMath::Min(Arch * 1.4f, 1.f));
+	Sparkle->SetRenderTransformAngle(40.f * T01);
 }

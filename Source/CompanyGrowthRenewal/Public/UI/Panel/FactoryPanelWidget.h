@@ -1,4 +1,4 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+﻿// Fill out your copyright notice in the Description page of Project Settings.
 
 #pragma once
 
@@ -11,8 +11,11 @@
 class UButton;
 class UScrollBox;
 class UButtonWidget;
-class UCloseButtonWidget;
+class UIconWithButtonWidget;
+class UCostActionButtonWidget;
+class UPanelHeaderWidget;
 class UCommonTextBlock;
+class UImage;
 class ABrickFactory;
 class UUpgradeSlot;
 enum class EResourceType : uint8;
@@ -33,7 +36,9 @@ protected:
 	UFUNCTION()
 	void OnCloseButtonClicked();
 
-	// 공장 강화/해금 브로드캐스트 수신 — 잠금 표시가 실제 상태와 어긋나면 슬롯을 다시 만든다
+	void HandleRelocateRequested();
+
+	// 공장 강화/해금 브로드캐스트 수신 — 슬롯 구조는 유지하며 표시 상태를 갱신한다
 	UFUNCTION()
 	void HandleFactoryUpgraded(EFactoryUpgradeType UpgradeType);
 
@@ -41,7 +46,7 @@ protected:
 	UButton* BackgroundBtn;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UCloseButtonWidget* UIE_CloseButton;
+	TObjectPtr<UPanelHeaderWidget> PanelHeader;
 
 	// DT 기반 동적 슬롯 컨테이너 (WBP의 CommonHierarchicalScrollBox)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
@@ -51,14 +56,16 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UBulkModeSelectorWidget* BulkModeSelector;
 
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UIconWithButtonWidget* RelocateButton;
+
 private:
-	// DT 기반 슬롯 생성/갱신
+	// DT 순서/클래스가 그대로면 슬롯을 재사용하고, 구조가 바뀌었을 때만 다시 만든다
 	void RebuildUpgradeSlots();
 	void ApplySlotDefinition(UUpgradeSlot* InSlot, const FFactoryUpgradeDefinition& Def);
 	void BindSlotButton(UUpgradeSlot* InSlot, EFactoryUpgradeType Type);
 	void UpdateUpgradeSlot(EFactoryUpgradeType Type, UUpgradeSlot* InSlot);
 	void UpdateAllUpgradeSlots();
-	void UpdateBrickStockSlot();
 
 	// 통합 업그레이드 핸들러 (x1 = Pressed 1회 + 홀드, x10/x50 = 탭당 벌크 1회)
 	void OnUpgradeClicked(EFactoryUpgradeType Type);
@@ -66,8 +73,8 @@ private:
 	// 벌크 1회 구매 (x10/x50 모드의 Pressed 경로 — BuildingManagePanel 미러)
 	void OnBulkUpgrade(EFactoryUpgradeType Type);
 
-	// 현재 모드의 구매 레벨 수 계산 (MaxLevel 잔여/액터 하드 가드 50 클램프). Count=0 이어도 OutTotalCost 는 1레벨 비용
-	int32 ComputeBulkCount(int32 CurrentLevel, int32 MaxLevel, const FFactoryCostCurve& CostCurve,
+	// 현재 모드의 구매 레벨 수 계산 (영구 상한·튜토리얼 허용량·액터 하드 가드 적용).
+	int32 ComputeBulkCount(EFactoryUpgradeType Type, int32 CurrentLevel, int32 MaxLevel, const FFactoryCostCurve& CostCurve,
 		EResourceType CostType, int64& OutTotalCost, int64& OutAvailable) const;
 
 	// 배율 선택기 OnModeChanged 구독 핸들러 (세션 유지, 슬롯 벌크 캡션 갱신)
@@ -79,9 +86,6 @@ private:
 	void OnUpgradeHoldTick();
 
 	void OnUpgradeSuccess(EFactoryUpgradeType UpgradeType);
-
-	// 수집 버튼
-	void OnCollectAutoResourcesClicked();
 
 	// 자동 수집 해금 연출 — 공장이 들고 있는 pending 플래그를 소비했을 때만 1회
 	void TryPlayAutoUnlockCelebration();
@@ -98,8 +102,10 @@ private:
 
 	// Hold 상태
 	FTimerHandle UpgradeHoldTimerHandle;
+	bool bCloseRequested = false;
 	// 홀드 시작 전 StopUpgradeHold(펀치 억제 해제)가 먼저 불릴 수 있어 초기값 필요
 	EFactoryUpgradeType CurrentHoldUpgradeType = EFactoryUpgradeType::HoldProductionSpeed;
+	FName HoldMissionID = NAME_None;
 	float HoldInitialDelay = 0.3f;
 	float HoldRepeatInterval = 0.1f;
 
@@ -110,11 +116,14 @@ private:
 	void SaveFactoryData();
 
 public:
-	// 미션 강화 넛지 잔상 타겟 — 첫 강화 슬롯 (DT SortOrder 순이라 결정적)
-	UWidget* GetUpgradeNudgeTarget() const;
-
-	// 미션 강화 넛지 잔상 타겟 — 아래(둘째) 강화 슬롯 (튜토리얼 M1 NudgeUpgrade2)
-	UWidget* GetSecondUpgradeNudgeTarget() const;
+	// 튜토리얼이 흐름 밖에 열린 공장 패널을 닫게 할 때 짚는 헤더 [닫기]
+	UWidget* GetCloseButtonWidget() const;
+	// M1 인부 추가 구매 버튼. 슬롯 순서와 관계없이 타입으로 찾는다.
+	UWidget* GetLaborerUpgradeTarget() const;
+	UWidget* GetFactoryExpansionUpgradeTarget() const;
+	// 튜토리얼 M8 — 작업속도·생산능력 강화 버튼
+	UWidget* GetUpgradeTarget(EFactoryUpgradeType Type) const;
+	UWidget* GetFirstAffordableUpgradeTarget() const;
 
 	void RequestClose();
 

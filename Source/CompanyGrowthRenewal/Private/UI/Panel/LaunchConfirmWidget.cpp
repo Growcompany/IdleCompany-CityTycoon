@@ -1,14 +1,15 @@
 #include "UI/Panel/LaunchConfirmWidget.h"
+#include "UI/UIBase.h"
 #include "CommonTextBlock.h"
+#include "UI/Element/Common/QualityGradeMedalUtils.h"
 #include "UI/Element/Common/ConfirmCancelWidget.h"
 #include "UI/Element/Common/StatRowWidget.h"
 #include "UI/Element/Common/DisciplineBarWidget.h"
 #include "UI/Element/Office/ReviewCardWidget.h"
-#include "UI/Element/Cards/IconCardWidget.h"
+#include "UI/Element/Cards/ItemCardSlotWidget.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
 #include "UI/Element/Common/ResourceWidget.h"
 #include "Manager/OfficeStageProgressManager.h"
-#include "Manager/EmployeeManager.h"
 #include "Manager/ResourceItemManager.h"
 #include "Manager/ProjectOperationManager.h"
 #include "Manager/TableManagerSubsystem.h"
@@ -16,32 +17,159 @@
 #include "Manager/MissionManagerSubsystem.h"
 #include "Manager/LaunchReactionSubsystem.h"
 #include "Table/ProjectDataTable.h"
+#include "Table/ResourceInfo.h"
+#include "Table/ShopItemTable.h"
+#include "Utils/LaunchRewardRevealMath.h"
 #include "Core/CGGameInstance.h"
 #include "Enum/QualityGrade.h"
 #include "Enum/ProjectMode.h"
-#include "Data/EmployeePotentialData.h"
-#include "UI/PitchBoardText.h"
 #include "Components/WidgetSwitcher.h"
 #include "Components/Image.h"
 #include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
+#include "Components/VerticalBoxSlot.h"
+#include "Components/SizeBox.h"
+#include "Components/ScrollBox.h"
 #include "Components/VerticalBox.h"
+#include "Components/Border.h"
+#include "Components/OverlaySlot.h"
+#include "Components/CanvasPanelSlot.h"
+#include "Components/TextBlock.h"
+#include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "CommonButtonBase.h"
+#include "CommonBorder.h"
+#include "Global/GlobalUtilFunctions.h"
+#include "Manager/SettingsManagerSubsystem.h"
+#include "Utils/FWidgetAnimationUtils.h"
 
 namespace
 {
+	FText FormatEarnedExperience(float Amount)
+	{
+		FNumberFormattingOptions NumberOptions;
+		NumberOptions.SetMinimumFractionalDigits(0);
+		NumberOptions.SetMaximumFractionalDigits(Amount < 0.01f ? 6 : 2);
+		return FText::Format(
+			NSLOCTEXT("LaunchConfirm", "EarnedExperience", "직원 경험치 +{0}"),
+			FText::AsNumber(static_cast<double>(Amount), &NumberOptions));
+	}
+
 	// 리빌 펀치 진폭 — S등급만 상향 (클라이맥스 강조)
-	constexpr float RevealPopScale = 1.6f;
-	constexpr float RevealPopScaleGrand = 1.9f;
+	constexpr float RevealPopScale = 1.16f;
+	constexpr float RevealPopScaleGrand = 1.24f;
 
 	// 슬라이드인 시작 오프셋 (좌 → 우)
 	constexpr float RevealSlideOffsetX = -46.0f;
 
-	// 총액 카운트업 지속 시간
-	constexpr float ReviewCountUpDuration = 0.6f;
-
 	// 사운드 스팸 게이트 — 이 간격 안에 겹치는 리빌 사운드는 버린다
 	constexpr float RevealSoundMinInterval = 0.09f;
+
+	constexpr float LaunchCelebrationDuration = 1.08f;
+	constexpr float LaunchCelebrationFlareAttack = .08f;
+	constexpr float LaunchCelebrationFlareExpand = .25f;
+	constexpr float LaunchCelebrationSparkDuration = .26f;
+	constexpr float LaunchCelebrationSparkPeriod = .28f;
+	constexpr int32 LaunchCelebrationSparkBursts = 3;
+	constexpr float LaunchCelebrationSparkStarts[2] = { .12f, .22f };
+	// 등급 도장: 칼끝 빛이 제목에 꽂힌 뒤 떨어지기 시작한다
+	constexpr float LaunchGradeStampDelay = .30f;
+	constexpr float LaunchStampSquashTime = .035f;
+	constexpr float LaunchStampSettleTime = .12f;
+	constexpr float LaunchGradeRecoilDuration = .22f;
+	// 착지 뒤 눌림·정착·표지 반동이 모두 끝나는 시각
+	constexpr float LaunchStampSettleEnd = .32f;
+	const FVector2D LaunchStampFallOffset(-68.f, -180.f);
+
+	// 칼끝 빛
+	constexpr float StrikeThrustTravel = .12f;
+	constexpr float StrikeDuration = .45f;
+	constexpr float StrikeImpactDuration = .32f;
+	constexpr int32 StrikeImpactShardCount = 8;
+	constexpr int32 StrikeThrustCount = 12;
+	constexpr int32 StrikeBurstCount = 8;
+	// 수직 성분을 눌러 제목 둘레에 납작한 타원으로 꽂히게 한다
+	constexpr float StrikeVerticalSquash = .62f;
+	constexpr float StrikeThrustAngles[StrikeThrustCount] = { -168.f, -142.f, -118.f, -62.f, -38.f, -14.f, 14.f, 38.f, 62.f, 118.f, 142.f, 166.f };
+	constexpr float StrikeBurstAngles[StrikeBurstCount] = { -160.f, -110.f, -70.f, -20.f, 20.f, 70.f, 110.f, 160.f };
+	// T_UI_FX_Blade 에서 흰 심이 차지하는 높이 비율 — 나머지는 금색 번짐
+	constexpr float StrikeBladeCoreFraction = .36f;
+
+	// 예상 총수익 곱셈: 0 → 기본 수익(0.28초) → 도장 착지 + 0.03초에 배율을 곱해 총액까지(0.36초)
+	constexpr float LaunchRevenueBaseCountTime = .28f;
+	constexpr float LaunchMultiplyDelay = .03f;
+	constexpr float LaunchRevenueMultiplyCountTime = .36f;
+	// 금빛·칩·줄 강조가 모두 사라지는 시각(곱하는 순간 기준)
+	constexpr float LaunchRevenueMultiplyEnd = 1.1f;
+	const FLinearColor LaunchMultiplyGold(1.f, .672f, .195f);      // #FFD67A
+	const FLinearColor LaunchRowGlowColor(1.f, .62f, .165f, .26f);  // #FFCF71 @26%
+
+	// 분야 바 차오름
+	constexpr float LaunchBarRevealStart = .10f;
+	constexpr float LaunchBarRevealStagger = .08f;
+	constexpr float LaunchBarRevealTime = .42f;
+	constexpr float LaunchBarFlashTime = .25f;
+
+	float StrikeEaseOutCubic(float T)
+	{
+		return 1.f - FMath::Pow(1.f - FMath::Clamp(T, 0.f, 1.f), 3.f);
+	}
+
+	void HideStrikeLayer(const TWeakObjectPtr<UImage>& Layer)
+	{
+		if (UImage* Image = Layer.Get())
+		{
+			Image->SetRenderOpacity(0.f);
+			Image->SetRenderTransform(FWidgetTransform(FVector2D::ZeroVector, FVector2D(1.f, 1.f), FVector2D::ZeroVector, 0.f));
+		}
+	}
+
+	// 칼끝: Tip 이 뾰족한 끝. 이미지 피벗(1,0.5)·캔버스 정렬(1,0.5) 계약이라 끝을 축으로 회전·축소된다.
+	void DriveStrikeBlade(UImage* Blade, const FVector2D& Tip, float AngleRadians, float Length, float CoreThickness, float Alpha)
+	{
+		const UCanvasPanelSlot* BladeSlot = Blade ? Cast<UCanvasPanelSlot>(Blade->Slot) : nullptr;
+		if (!BladeSlot || BladeSlot->GetSize().X < 1.f || BladeSlot->GetSize().Y < 1.f) { return; }
+		const FVector2D Base = BladeSlot->GetSize();
+		Blade->SetRenderTransform(FWidgetTransform(Tip,
+			FVector2D(Length / Base.X, CoreThickness / StrikeBladeCoreFraction / Base.Y), FVector2D::ZeroVector,
+			FMath::RadiansToDegrees(AngleRadians)));
+		Blade->SetRenderOpacity(FMath::Clamp(Alpha, 0.f, 1.f));
+	}
+
+	void DriveStrikeGlow(UImage* Glow, const FVector2D& Center, float ScaleX, float ScaleY, float Alpha)
+	{
+		if (!Glow) { return; }
+		Glow->SetRenderTransform(FWidgetTransform(Center, FVector2D(ScaleX, ScaleY), FVector2D::ZeroVector, 0.f));
+		Glow->SetRenderOpacity(FMath::Clamp(Alpha, 0.f, 1.f));
+	}
+
+	// 번쩍임 = 부드러운 원광 + 바깥으로 뻗는 칼끝 네 개(가로가 더 길다)
+	void DriveStrikeFlash(const TArray<TWeakObjectPtr<UImage>>& Blades, UImage* Glow, const FVector2D& Center,
+		float Phase, float FromSize, float ToSize, float Rotation, float Intensity)
+	{
+		const bool bLive = Phase >= 0.f && Phase <= 1.f;
+		const float Size = FMath::Lerp(FromSize, ToSize, StrikeEaseOutCubic(Phase));
+		const float Alpha = bLive ? (Phase < .15f ? Phase / .15f : FMath::Square(1.f - (Phase - .15f) / .85f)) * Intensity : 0.f;
+		if (Glow)
+		{
+			const UCanvasPanelSlot* GlowSlot = Cast<UCanvasPanelSlot>(Glow->Slot);
+			const float GlowBase = GlowSlot ? FMath::Max(1.f, GlowSlot->GetSize().X) : Size;
+			DriveStrikeGlow(Glow, Center, Size / GlowBase, Size / GlowBase, Alpha * .6f);
+		}
+		for (int32 Index = 0; Index < Blades.Num(); ++Index)
+		{
+			const float Angle = Rotation + Index * UE_HALF_PI;
+			const float Length = Size * (Index % 2 == 0 ? .78f : .4f);
+			DriveStrikeBlade(Blades[Index].Get(), Center + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Length,
+				Angle, Length, Size * .075f, Alpha);
+		}
+	}
+
+}
+
+ULaunchConfirmWidget::ULaunchConfirmWidget()
+{
+	bIsBackHandler = true;
 }
 
 void ULaunchConfirmWidget::NativePreConstruct()
@@ -58,6 +186,11 @@ void ULaunchConfirmWidget::NativePreConstruct()
 void ULaunchConfirmWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	UpdateLaunchCelebration(-1.f);
+	CollectStrikeLayers();
+	ResetStrikeFx();
+	if (LaunchMulChip) { LaunchMulChip->SetRenderOpacity(0.f); }
+	HideStrikeLayer(LaunchMulStreak);
 
 	if (ConfirmCancelWidget)
 	{
@@ -78,29 +211,21 @@ void ULaunchConfirmWidget::NativeConstruct()
 		CloseButton->OnClicked().AddUObject(this, &ULaunchConfirmWidget::OnCloseBtnClicked);
 	}
 
-	// 출시 confirm 팝업 등장 = 프로젝트 출시 멘트 — ChestOpen 톤. 실패 화면엔 축하 사운드를 내지 않는다.
-	UOfficeStageProgressManager* StageMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
-	const bool bBlocked = StageMgr && StageMgr->IsLaunchBlocked();
-	if (!bBlocked)
-	{
-		if (UGameInstance* GI = GetGameInstance())
-		{
-			if (USoundManagerSubsystem* SoundMgr = GI->GetSubsystem<USoundManagerSubsystem>())
-			{
-				SoundMgr->PlaySound(FName("Event_Launch"));
-			}
-		}
-	}
-
-	// M10 미션 — 출시 확인 모달 등록 ([출시] 버튼 하이라이트용)
-	if (UMissionManagerSubsystem* M = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
-	{
-		M->RegisterLaunchConfirm(this);
-	}
 }
 
 void ULaunchConfirmWidget::NativeDestruct()
 {
+	ResetResultEntry();
+	SkipRevealQueue();
+	UpdateLaunchCelebration(-1.f);
+	ResetStrikeFx();
+	RevealQueue.Reset();
+	if (ConfirmCancelWidget)
+	{
+		ConfirmCancelWidget->OnConfirm.RemoveAll(this);
+		ConfirmCancelWidget->OnCancel.RemoveAll(this);
+	}
+	if (CloseButton) CloseButton->OnClicked().RemoveAll(this);
 	if (UMissionManagerSubsystem* M = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
 	{
 		M->UnregisterLaunchConfirm(this);
@@ -108,13 +233,288 @@ void ULaunchConfirmWidget::NativeDestruct()
 	Super::NativeDestruct();
 }
 
+void ULaunchConfirmWidget::BeginResultEntry()
+{
+	ResetResultEntry();
+	if (!ConfirmCancelWidget || USettingsManagerSubsystem::IsReduceMotion(this)) return;
+	UWidget* Surface = ConfirmCancelWidget->GetWidgetFromName(TEXT("ModalFrame"));
+	if (!Surface) Surface = ConfirmCancelWidget->GetWidgetFromName(TEXT("SizeBox_128"));
+	if (!Surface) return;
+	EntrySurface = Surface;
+	EntryBaseTransform = Surface->GetRenderTransform();
+	EntryBaseOpacity = Surface->GetRenderOpacity();
+	EntryElapsed = 0.f;
+	FWidgetTransform Transform = EntryBaseTransform;
+	Transform.Translation.Y += 24.f;
+	Surface->SetRenderTransform(Transform);
+	Surface->SetRenderOpacity(0.f);
+}
+
+void ULaunchConfirmWidget::ResetResultEntry()
+{
+	if (UWidget* Surface = EntrySurface.Get())
+	{
+		Surface->SetRenderTransform(EntryBaseTransform);
+		Surface->SetRenderOpacity(EntryBaseOpacity);
+	}
+	EntrySurface.Reset();
+	EntryElapsed = .2f;
+}
+
+void ULaunchConfirmWidget::NativeOnDeactivated()
+{
+	ResetResultEntry();
+	SkipRevealQueue();
+	UpdateLaunchCelebration(-1.f);
+	ResetStrikeFx();
+	RevealQueue.Reset();
+	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr)
+	{
+		MissionMgr->UnregisterLaunchConfirm(this);
+	}
+	Super::NativeOnDeactivated();
+}
+
 UWidget* ULaunchConfirmWidget::GetConfirmButtonWidget() const
 {
 	return ConfirmCancelWidget ? ConfirmCancelWidget->GetConfirmButtonWidget() : nullptr;
 }
 
+UWidget* ULaunchConfirmWidget::GetDiscardButtonWidget() const
+{
+	return bFailurePhase && ConfirmCancelWidget ? ConfirmCancelWidget->GetCancelButtonWidget() : nullptr;
+}
+
+bool ULaunchConfirmWidget::NativeOnHandleBackAction()
+{
+	if (!CGBackNav::IsTopWindow(*this))
+	{
+		return false;
+	}
+	OnDialogCancelled();
+	return true;
+}
+
+UWidget* ULaunchConfirmWidget::NativeGetDesiredFocusTarget() const
+{
+	return !bFailurePhase && GetConfirmButtonWidget() ? GetConfirmButtonWidget() : Super::NativeGetDesiredFocusTarget();
+}
+
+void ULaunchConfirmWidget::SetManufacturingHidden(UWidget* Widget)
+{
+	if (!Widget) return;
+	ManufacturingHiddenWidgets.Emplace(TWeakObjectPtr<UWidget>(Widget), Widget->GetVisibility());
+	Widget->SetVisibility(ESlateVisibility::Collapsed);
+}
+
+void ULaunchConfirmWidget::CaptureManufacturingBox(USizeBox* Box)
+{
+	if (!Box) return;
+	FManufacturingBoxSize Saved;
+	Saved.Box = Box;
+	Saved.bWidthOverride = Box->IsWidthOverride();
+	Saved.Width = Box->GetWidthOverride();
+	Saved.bHeightOverride = Box->IsHeightOverride();
+	Saved.Height = Box->GetHeightOverride();
+	ManufacturingBoxSizes.Add(Saved);
+}
+
+void ULaunchConfirmWidget::ApplyManufacturingResultLayout()
+{
+	USizeBox* ProjectBox = Cast<USizeBox>(GetWidgetFromName(TEXT("LaunchProjectWidth")));
+	USizeBox* ResultBox = Cast<USizeBox>(GetWidgetFromName(TEXT("Col1Box")));
+	UHorizontalBoxSlot* ProjectSlot = ProjectBox ? Cast<UHorizontalBoxSlot>(ProjectBox->Slot) : nullptr;
+	if (!ProjectBox || !ResultBox || !ProjectSlot)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LaunchConfirm] Manufacturing result layout needs LaunchProjectWidth and Col1Box."));
+		return;
+	}
+	CaptureManufacturingBox(ProjectBox);
+	CaptureManufacturingBox(ResultBox);
+	ManufacturingProjectSlot = ProjectSlot;
+	ManufacturingProjectPadding = ProjectSlot->GetPadding();
+	ManufacturingProjectSlotValue = ProjectSlot->GetSize().Value;
+	bManufacturingProjectSlotFill = ProjectSlot->GetSize().SizeRule == ESlateSizeRule::Fill;
+	ManufacturingProjectSlotAlignment = static_cast<uint8>(ProjectSlot->GetHorizontalAlignment());
+
+	ProjectBox->SetWidthOverride(800.f);
+	ResultBox->ClearHeightOverride();
+	ProjectSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	ProjectSlot->SetPadding(FMargin(0.f));
+	ProjectSlot->SetHorizontalAlignment(HAlign_Center);
+
+	for (UWidget* TextHost : { GetWidgetFromName(TEXT("LaunchNameMax")), static_cast<UWidget*>(Text_ManufacturingResearchHint) })
+	{
+		if (UVerticalBoxSlot* TextSlot = TextHost ? Cast<UVerticalBoxSlot>(TextHost->Slot) : nullptr)
+		{
+			ManufacturingTextSlotAlignments.Emplace(TWeakObjectPtr<UVerticalBoxSlot>(TextSlot),
+				static_cast<uint8>(TextSlot->GetHorizontalAlignment()));
+			TextSlot->SetHorizontalAlignment(TextHost == Text_ManufacturingResearchHint ? HAlign_Fill : HAlign_Center);
+		}
+	}
+}
+
+void ULaunchConfirmWidget::RestoreManufacturingResultLayout()
+{
+	for (const FManufacturingBoxSize& Saved : ManufacturingBoxSizes)
+	{
+		if (USizeBox* Box = Saved.Box.Get())
+		{
+			if (Saved.bWidthOverride) Box->SetWidthOverride(Saved.Width);
+			else Box->ClearWidthOverride();
+			if (Saved.bHeightOverride) Box->SetHeightOverride(Saved.Height);
+			else Box->ClearHeightOverride();
+		}
+	}
+	ManufacturingBoxSizes.Reset();
+	if (UHorizontalBoxSlot* ProjectSlot = ManufacturingProjectSlot.Get())
+	{
+		FSlateChildSize OriginalSize(bManufacturingProjectSlotFill ? ESlateSizeRule::Fill : ESlateSizeRule::Automatic);
+		OriginalSize.Value = ManufacturingProjectSlotValue;
+		ProjectSlot->SetSize(OriginalSize);
+		ProjectSlot->SetPadding(ManufacturingProjectPadding);
+		ProjectSlot->SetHorizontalAlignment(static_cast<EHorizontalAlignment>(ManufacturingProjectSlotAlignment));
+	}
+	ManufacturingProjectSlot.Reset();
+	for (const TPair<TWeakObjectPtr<UVerticalBoxSlot>, uint8>& Saved : ManufacturingTextSlotAlignments)
+	{
+		if (UVerticalBoxSlot* TextSlot = Saved.Key.Get())
+		{
+			TextSlot->SetHorizontalAlignment(static_cast<EHorizontalAlignment>(Saved.Value));
+		}
+	}
+	ManufacturingTextSlotAlignments.Reset();
+}
+
+void ULaunchConfirmWidget::RestoreManufacturingResultVisuals()
+{
+	RestoreManufacturingResultLayout();
+	for (const TPair<TWeakObjectPtr<UWidget>, ESlateVisibility>& Saved : ManufacturingHiddenWidgets)
+	{
+		if (UWidget* Widget = Saved.Key.Get()) Widget->SetVisibility(Saved.Value);
+	}
+	ManufacturingHiddenWidgets.Reset();
+	if (bHasOriginalLaunchCompletionTitle && Text_LaunchCompletionTitle)
+	{
+		Text_LaunchCompletionTitle->SetText(OriginalLaunchCompletionTitle);
+	}
+	bHasOriginalLaunchCompletionTitle = false;
+	if (Text_ManufacturingResearchHint) Text_ManufacturingResearchHint->SetVisibility(ESlateVisibility::Collapsed);
+	bManufacturingResearchResult = false;
+}
+
+void ULaunchConfirmWidget::SetManufacturingResearchResult(ECompanyType CompanyType, int32 ProjectIndex)
+{
+	SkipRevealQueue();
+	RestoreManufacturingResultVisuals();
+	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr)
+	{
+		MissionMgr->UnregisterLaunchConfirm(this);
+	}
+	bManufacturingResearchResult = true;
+	bManufacturingResultAnswered = false;
+	bFailurePhase = false;
+	RevealQueue.Reset();
+	RevealBars.Reset();
+	RevealBarStarts.Reset();
+	RevenueCountStartAt = -1.f;
+	UpdateLaunchCelebration(-1.f);
+	ResetStrikeFx();
+	if (LaunchResultScroll) LaunchResultScroll->ScrollToStart();
+	if (ContentSwitcher) ContentSwitcher->SetActiveWidgetIndex(0);
+	if (ConfirmCancelWidget)
+	{
+		ConfirmCancelWidget->RestoreDefaultTexts();
+		ConfirmCancelWidget->SetConfirmOnly(false);
+		ConfirmCancelWidget->SetCancelOnly(false);
+		ConfirmCancelWidget->SetTitle(NSLOCTEXT("LaunchConfirm", "ManufacturingResearchResult", "제품 개발 결과"));
+		ConfirmCancelWidget->SetConfirmButtonText(NSLOCTEXT("LaunchConfirm", "ManufacturingQuantityAction", "수량 확보하기"));
+		ConfirmCancelWidget->SetCancelButtonText(NSLOCTEXT("LaunchConfirm", "ManufacturingDismiss", "닫기"));
+	}
+	SetConfirmInteractionEnabled(true);
+	if (CloseButton) CloseButton->SetVisibility(ESlateVisibility::Visible);
+
+	UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	bool bFound = false;
+	const FProjectData Product = TableMgr ? TableMgr->GetProjectData(CompanyType, ProjectIndex, bFound) : FProjectData();
+	if (!bFound) UE_LOG(LogTemp, Warning, TEXT("[LaunchConfirm] Manufacturing product row missing: CompanyType=%d ProjectIndex=%d"), static_cast<int32>(CompanyType), ProjectIndex);
+	if (Text_ProjectName) Text_ProjectName->SetText(bFound ? Product.ProjectName : FText::GetEmpty());
+	if (Image_ProjectCover)
+	{
+		UTexture2D* Icon = bFound && !Product.Icon.IsNull() ? Product.Icon.LoadSynchronous() : nullptr;
+		Image_ProjectCover->SetBrushFromTexture(Icon, true);
+		Image_ProjectCover->SetVisibility(Icon ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (Text_ManufacturingResearchHint)
+	{
+		Text_ManufacturingResearchHint->SetText(NSLOCTEXT("LaunchConfirm", "ManufacturingQuantityHint", "이제 이 제품의 생산 수량을 확보할 수 있습니다"));
+		Text_ManufacturingResearchHint->SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LaunchConfirm] UI_LaunchConfirmPanel needs Text_ManufacturingResearchHint for the manufacturing result."));
+	}
+
+	if (Text_LaunchCompletionTitle)
+	{
+		OriginalLaunchCompletionTitle = Text_LaunchCompletionTitle->GetText();
+		bHasOriginalLaunchCompletionTitle = true;
+		Text_LaunchCompletionTitle->SetText(NSLOCTEXT("LaunchConfirm", "ManufacturingResearchSuccess", "제품 개발 성공!"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LaunchConfirm] UI_LaunchConfirmPanel needs Text_LaunchCompletionTitle for the manufacturing result."));
+	}
+	SetManufacturingHidden(GetWidgetFromName(TEXT("LaunchGradeColumn")));
+	SetManufacturingHidden(LaunchGradeStamp);
+	SetManufacturingHidden(Text_Experience);
+	SetManufacturingHidden(GetWidgetFromName(TEXT("StepWell")));
+	SetManufacturingHidden(GetWidgetFromName(TEXT("LaunchFinanceWidth")));
+	SetManufacturingHidden(GetWidgetFromName(TEXT("LaunchFinanceColumn")));
+	SetManufacturingHidden(GetWidgetFromName(TEXT("LaunchIncomeHost")));
+	SetManufacturingHidden(GetWidgetFromName(TEXT("LaunchLootHost")));
+	SetManufacturingHidden(LaunchLootPanel);
+	SetManufacturingHidden(GetWidgetFromName(TEXT("LaunchReviewIdentityRow")));
+	ApplyManufacturingResultLayout();
+
+	BeginResultEntry();
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (USoundManagerSubsystem* SoundMgr = GI->GetSubsystem<USoundManagerSubsystem>()) SoundMgr->PlaySound(FName("Event_Launch"));
+	}
+	RevealClock = 0.f;
+	RevealEndTime = LaunchCelebrationDuration;
+	LastRevealSoundClock = -10.f;
+	QueueReveal(LaunchCompletionHeader, 0.f, true);
+	QueueReveal(LaunchCoverSurface, .12f, true);
+	QueueReveal(Text_ProjectName, .28f, false, FName("Event_ScoreSweep"));
+	QueueReveal(Text_ManufacturingResearchHint, .38f);
+	bRevealActive = RevealQueue.Num() > 0 || LaunchFlare || LaunchSpark1 || LaunchSpark2;
+	if (USettingsManagerSubsystem::IsReduceMotion(this)) SkipRevealQueue();
+}
+
 void ULaunchConfirmWidget::SetPreviewData(const FStageProgressData& StageData, int32 ProjectNumber)
 {
+	SkipRevealQueue();
+	RestoreManufacturingResultVisuals();
+	bManufacturingResultAnswered = false;
+	// 풀 재진입이나 성공→실패 전환 시 이전 리빌 시계와 장식을 먼저 비운다.
+	bRevealActive = false;
+	RevealQueue.Reset();
+	RevealBars.Reset();
+	RevealBarStarts.Reset();
+	RevenueCountStartAt = -1.f;
+	UpdateLaunchCelebration(-1.f);
+	ResetStrikeFx();
+	if (LaunchResultScroll) { LaunchResultScroll->ScrollToStart(); }
+	const FWidgetTransform IdentityTransform(FVector2D::ZeroVector, FVector2D(1.f, 1.f), FVector2D::ZeroVector, 0.f);
+	for (UWidget* CalcRow : { static_cast<UWidget*>(RevRow_Multiplier), static_cast<UWidget*>(RevRow_Duration), static_cast<UWidget*>(RevRow_BaseRevenue) })
+	{
+		if (!CalcRow) { continue; }
+		CalcRow->SetRenderOpacity(1.f);
+		CalcRow->SetRenderTransform(IdentityTransform);
+	}
+	BeginResultEntry();
 	UGameInstance* GI = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
 
 	// 프로젝트 이름
@@ -123,35 +523,31 @@ void ULaunchConfirmWidget::SetPreviewData(const FStageProgressData& StageData, i
 		Text_ProjectName->SetText(FText::FromString(StageData.ProjectName));
 	}
 
-	// 프로젝트 이미지 카드 — 커버는 이미지 전용 (이름은 히어로 카드 Text_ProjectName 이 표시)
-	if (UI_ProjectImageCard)
+	if (Image_ProjectCover)
 	{
-		UI_ProjectImageCard->SetTextVisible(false);
-	}
-	if (UI_ProjectImageCard && GI)
-	{
-		UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-		if (TableMgr)
+		UTexture2D* IconTexture = nullptr;
+		if (UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr)
 		{
 			bool bSuccess = false;
-			FProjectData ProjectData = (StageData.CompanyType != ECompanyType::None)
+			const FProjectData ProjectData = (StageData.CompanyType != ECompanyType::None)
 				? TableMgr->GetProjectData(StageData.CompanyType, ProjectNumber, bSuccess)
 				: TableMgr->ResolveProjectData(ProjectNumber, bSuccess);
-			if (bSuccess)
+			if (bSuccess && !ProjectData.Icon.IsNull())
 			{
-				UTexture2D* IconTexture = nullptr;
-				if (!ProjectData.Icon.IsNull())
-				{
-					IconTexture = ProjectData.Icon.LoadSynchronous();
-				}
-				UI_ProjectImageCard->SetIcon(IconTexture);
+				IconTexture = ProjectData.Icon.LoadSynchronous();
 			}
 		}
+		Image_ProjectCover->SetBrushFromTexture(IconTexture, true);
+		Image_ProjectCover->SetVisibility(IconTexture ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	}
 
-	// 품질 점수/등급 계산
-	float QualityScore = StageData.CalculateQualityScore();
-	EQualityGrade Grade = StageData.CalculateQualityGrade();
+	// 운영 시작과 같은 건물·품질·수익 조건으로 결과 화면을 채운다.
+	UProjectOperationManager* OpMgr = GI ? GI->GetSubsystem<UProjectOperationManager>() : nullptr;
+	const UCGGameInstance* ManagedGI = UCGGameInstance::GetInstance();
+	const int32 BuildingID = ManagedGI ? ManagedGI->GetCurrentManagedBuildingIndex() : INDEX_NONE;
+	const FOperationLaunchForecast Forecast = OpMgr
+		? OpMgr->GetLaunchForecast(StageData, BuildingID) : FOperationLaunchForecast();
+	const EQualityGrade Grade = OpMgr ? Forecast.EffectiveGrade : StageData.CalculateQualityGrade();
 
 	const FString GradeLetter = QualityGradeToAlphabetString(Grade);
 	if (Text_QualityGrade)
@@ -159,12 +555,7 @@ void ULaunchConfirmWidget::SetPreviewData(const FStageProgressData& StageData, i
 		Text_QualityGrade->SetText(FText::FromString(GradeLetter));
 	}
 	ApplyGradeStampColor(GradeLetterToColor(GradeLetter));
-
-	if (Text_QualityScore)
-	{
-		// 배율 표기(×) — 이 값은 0.5~2.0 이라 "점수 / 만점" 형태로 쓰면 1.0 초과 시 분모를 넘어 거짓이 된다.
-		Text_QualityScore->SetText(FText::FromString(FString::Printf(TEXT("×%.2f"), QualityScore)));
-	}
+	ApplyGradeMedal(StageData.CompanyType, Grade);
 
 	// 분야별 성과 — 축 고정 6칸(EProductionDiscipline 슬롯 순서). 비활성 분야는 빈 트랙으로
 	// "요구 없음"을 보여 픽칭 카드 DevPlate와 실루엣이 이어진다.
@@ -189,7 +580,7 @@ void ULaunchConfirmWidget::SetPreviewData(const FStageProgressData& StageData, i
 			{
 				// 채움색 = 직능 슬롯 위치색 (orb·플로팅 텍스트와 단일 출처 GetStepColor)
 				DiscBars[SlotIdx]->SetInfo(Name, Found->AcquiredScore, Found->TargetScore,
-					UDisciplineBarWidget::GetLightWellSlotFill(SlotIdx));
+					UGlobalUtilFunctions::GetStepColor(SlotIdx + 1));
 			}
 			else
 			{
@@ -200,14 +591,7 @@ void ULaunchConfirmWidget::SetPreviewData(const FStageProgressData& StageData, i
 
 	{
 		// 자체개발/제조업: 운영 정보 표시
-		UProjectOperationManager* OpMgr = GI ? GI->GetSubsystem<UProjectOperationManager>() : nullptr;
-		UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
-		// 착수(StartOperation)와 같은 함수 — 곡선만 읽으면 강화/특성 배율이 빠져 실제 운영시간과 갈린다
-		UCGGameInstance* OpTimeGI = UCGGameInstance::GetInstance();
-		const float OperationSeconds = OpMgr
-			? OpMgr->ComputeEffectiveOperationTime(StageData.CalculateQualityGrade(), StageData.ProjectNumber,
-				OpTimeGI ? OpTimeGI->GetCurrentManagedBuildingIndex() : INDEX_NONE)
-			: 0.0f;
+		const float OperationSeconds = Forecast.OperationSeconds;
 
 		if (Text_OperationTime)
 		{
@@ -233,56 +617,33 @@ void ULaunchConfirmWidget::SetPreviewData(const FStageProgressData& StageData, i
 			Text_OperationTime->SetText(FText::FromString(TimeStr));
 		}
 
-		// 총수익은 피치 카드 추정(EstimatePitchEconomy)과 같은 항으로 잰다 — 산업 피크 배율 × 품질 배율 × 감쇠 적분.
-		float LCPeakMult = 1.0f, LCHalf = 0.5f, LCVol = 0.0f;
-		if (OpMgr)
+		// 곱셈 연출은 실제 운영 피크에서 품질 배율만 제외한 전망값을 시작점으로 쓴다.
+		PendingBaseRevenue = static_cast<int64>(Forecast.BaseTotalRevenue);
+		if (Text_BaseRevenue)
 		{
-			OpMgr->GetIndustryCurveKnobs(StageData.CompanyType, LCPeakMult, LCHalf, LCVol);
+			Text_BaseRevenue->SetText(FText::AsNumber(PendingBaseRevenue));
 		}
-		float LCLeverage = 1.0f;
-		if (TableMgr)
+		FNumberFormattingOptions MultiplierOpts;
+		MultiplierOpts.SetMinimumFractionalDigits(0);
+		MultiplierOpts.SetMaximumFractionalDigits(2);
+		PendingMultiplierText = FText::Format(NSLOCTEXT("LaunchConfirm", "QualityMultiplier", "×{0}"),
+			FText::AsNumber(Forecast.QualityMultiplier, &MultiplierOpts));
+		if (Text_QualityMultiplier) { Text_QualityMultiplier->SetText(PendingMultiplierText); }
+		if (LaunchMulChip) { LaunchMulChip->SetText(PendingMultiplierText); }
+		if (Text_QualityMultiplierLabel)
 		{
-			bool bProfOK = false;
-			const FIndustryProfileRow Prof = TableMgr->GetIndustryProfile(StageData.CompanyType, bProfOK);
-			if (bProfOK) { LCLeverage = Prof.ReviewLeverage; }
-		}
-		// 안정성(3번째 인자)을 빼면 결과 화면만 특성을 무시해 카드·운영과 갈린다.
-		// 빌딩 출처도 착수·추정과 같은 게터여야 한다 — 이 위젯엔 빌딩 컨텍스트가 없어 GameInstance 에서 직접 읽는다.
-		int32 LCBuildingIndex = INDEX_NONE;
-		if (UCGGameInstance* LCGI = UCGGameInstance::GetInstance())
-		{
-			LCBuildingIndex = LCGI->GetCurrentManagedBuildingIndex();
-		}
-		const float LCStability = (OpMgr && LCBuildingIndex != INDEX_NONE)
-			? OpMgr->GetRevenueStabilityFrac(LCBuildingIndex) : 0.0f;
-		const float QualityMult = UProjectOperationManager::ComputeQualityRevenueMult(Grade, LCLeverage, LCStability);
-		// 기준 레이트는 ProjectOperationManager 가 단일 소유 — 여기서 산식을 베끼면 결과 화면만 옛 스케일로 남는다
-		// (실제로 그렇게 뒤처져 있던 자리다). 표기=실지급 계약이 이 위젯에서 깨지면 가장 늦게 발견된다.
-		const float BaseRevenue = OpMgr ? OpMgr->CalculateBaseRevenueForProjectNumber(ProjectNumber) : 0.0f;
-		// 트렌드 매칭은 결과 화면이 표시하지 않는다 — 중립 1.0 (추정부 호출자들도 동일).
-		const float LCTrendMult = 1.0f;
-		const float RevenuePerSecond = UProjectOperationManager::ComputePeakRevenuePerSec(
-			BaseRevenue, LCPeakMult, LCTrendMult, QualityMult);
-
-		if (Text_RevenuePerSecond)
-		{
-			FNumberFormattingOptions Opts;
-			Opts.SetUseGrouping(true);
-			// Min 0 = 정수면 소수점을 달지 않는다 ("15.0원/초" 의 .0 은 정보가 없다)
-			Opts.SetMaximumFractionalDigits(1);
-			Opts.SetMinimumFractionalDigits(0);
-			Text_RevenuePerSecond->SetText(FText::FromString(FText::AsNumber(RevenuePerSecond, &Opts).ToString() + TEXT("원/초")));
+			Text_QualityMultiplierLabel->SetText(FText::Format(
+				NSLOCTEXT("LaunchConfirm", "QualityMultiplierLabel", "품질 배율 ({0})"), FText::FromString(GradeLetter)));
 		}
 
-		PendingTotalRevenue = static_cast<int64>(UProjectOperationManager::ComputeLaunchRevenue(
-			BaseRevenue, LCPeakMult, LCTrendMult, QualityMult, OperationSeconds, LCHalf));
+		PendingTotalRevenue = static_cast<int64>(Forecast.TotalRevenue);
 		if (Text_TotalRevenue)
 		{
 			Text_TotalRevenue->SetText(FText::AsNumber(PendingTotalRevenue));
 		}
 	}
 
-	// 미리보기 페이지(0) 고정 — 출시 확정 뒤의 보상 리빌은 호스트가 별도 위젯으로 띄운다.
+	// 작품 정보와 출시 전리품을 같은 결과 페이지에서 보여준다.
 	if (ContentSwitcher)
 	{
 		ContentSwitcher->SetActiveWidgetIndex(0);
@@ -312,6 +673,27 @@ void ULaunchConfirmWidget::SetPreviewData(const FStageProgressData& StageData, i
 	// 수준 미달 = 출시 경로를 아예 열지 않는다 — 미리보기를 건너뛰고 실패 페이지로 직행
 	UOfficeStageProgressManager* StageMgr = GetWorld() ? GetWorld()->GetSubsystem<UOfficeStageProgressManager>() : nullptr;
 	bFailurePhase = StageMgr && StageMgr->IsLaunchBlocked();
+	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr)
+	{
+		MissionMgr->RegisterLaunchConfirm(this);
+	}
+	if (!bFailurePhase)
+	{
+		if (USoundManagerSubsystem* SoundMgr = GI ? GI->GetSubsystem<USoundManagerSubsystem>() : nullptr)
+		{
+			SoundMgr->PlaySound(FName("Event_Launch"));
+		}
+	}
+	if (Text_Experience)
+	{
+		const float Earned = StageData.EarnedExperience;
+		Text_Experience->SetVisibility(!bFailurePhase && FMath::IsFinite(Earned) && Earned > 0.0f
+			? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		if (!bFailurePhase && FMath::IsFinite(Earned) && Earned > 0.0f)
+		{
+			Text_Experience->SetText(FormatEarnedExperience(Earned));
+		}
+	}
 	if (bFailurePhase)
 	{
 		if (ContentSwitcher)
@@ -322,8 +704,491 @@ void ULaunchConfirmWidget::SetPreviewData(const FStageProgressData& StageData, i
 	}
 	else
 	{
+		if (ConfirmCancelWidget) { ConfirmCancelWidget->SetConfirmOnly(true); }
+		if (CloseButton) { CloseButton->SetVisibility(ESlateVisibility::Collapsed); }
+		FillLaunchLootSection(StageData);
 		QueueRevenueReveal(PendingTotalRevenue);
 	}
+}
+
+void ULaunchConfirmWidget::FillLaunchLootSection(const FStageProgressData& StageData)
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	if (!LaunchLootRow) { return; }
+	LaunchLootRow->ClearChildren();
+	const bool bHasExperience = Text_Experience && Text_Experience->IsVisible();
+	if (LaunchLootPanel)
+	{
+		LaunchLootPanel->SetVisibility(bHasExperience
+			? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (StageData.PendingLaunchLoot.IsEmpty()) { return; }
+	const TSubclassOf<UUserWidget> CardClass = TableMgr ? TableMgr->GetWidgetClass(EWidgetType::ItemCardQtyInside) : nullptr;
+	if (!TableMgr || !CardClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LaunchConfirm] ItemCardQtyInside is not registered"));
+		return;
+	}
+	for (const FMissionReward& Reward : LaunchRewardRevealMath::BuildRevealOrder(StageData.PendingLaunchLoot))
+	{
+		UItemCardSlotWidget* Card = CreateWidget<UItemCardSlotWidget>(this, CardClass);
+		if (!Card) { continue; }
+		bool bIconFound = false;
+		UObject* Icon = nullptr;
+		FText Quantity, Name, Description;
+		if (Reward.ItemType != EItemType::None)
+		{
+			Icon = TableMgr->GetItemIconResource(Reward.ItemType, bIconFound);
+			FShopItemTable ItemRow;
+			if (TableMgr->GetShopItemByItemType(Reward.ItemType, ItemRow)) { Name = ItemRow.DisplayName; }
+			Quantity = FText::Format(NSLOCTEXT("LaunchConfirm", "LootQuantity", "x{0}"), FText::AsNumber(Reward.ItemAmount));
+		}
+		else
+		{
+			const FResourceInfo ResourceInfo = TableMgr->GetResourceInfo(Reward.ResourceType, bIconFound);
+			Icon = bIconFound && !ResourceInfo.Icon.IsNull() ? ResourceInfo.Icon.LoadSynchronous() : nullptr;
+			Name = ResourceInfo.DisplayName;
+			Description = ResourceInfo.Description;
+			Quantity = UGlobalUtilFunctions::AbbreviateNumber(Reward.Amount);
+		}
+		if (!bIconFound || !Icon) { UE_LOG(LogTemp, Warning, TEXT("[LaunchConfirm] Missing launch reward icon")); }
+		Card->SetIconResource(Icon);
+		Card->SetLabel(Quantity);
+		if (LaunchLootCardStyle && Card->GetCardWidget())
+		{
+			Card->GetCardWidget()->SetStyle(LaunchLootCardStyle);
+		}
+		Card->SetQuantityBackgroundStyle(LaunchLootQuantityStyle);
+		Card->SetLabelFontSize(LaunchLootLabelFontSize);
+		Card->SetTooltipInfo(Name, Description, Icon);
+		Card->SetRenderTransformPivot(FVector2D(.5f, .5f));
+		const bool bFirstCard = LaunchLootRow->GetChildrenCount() == 0;
+		if (UHorizontalBoxSlot* CardSlot = LaunchLootRow->AddChildToHorizontalBox(Card))
+		{
+			CardSlot->SetPadding(FMargin(bFirstCard ? 0.f : 20.f, 0.f, 0.f, 0.f));
+			CardSlot->SetVerticalAlignment(VAlign_Center);
+		}
+	}
+	if (LaunchLootPanel && LaunchLootRow->GetChildrenCount() > 0)
+	{
+		LaunchLootPanel->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	}
+}
+
+void ULaunchConfirmWidget::UpdateLaunchCelebration(float Time)
+{
+	const FWidgetTransform Identity(FVector2D::ZeroVector, FVector2D(1.f, 1.f), FVector2D::ZeroVector, 0.f);
+	if (Time < 0.f || Time >= LaunchCelebrationDuration)
+	{
+		for (UImage* Effect : { LaunchFlare, LaunchSpark1, LaunchSpark2 })
+		{
+			if (!Effect) { continue; }
+			Effect->SetRenderOpacity(0.f);
+			Effect->SetRenderTransform(Identity);
+		}
+		return;
+	}
+
+	if (LaunchFlare)
+	{
+		const float Expand = FWidgetAnimationUtils::EaseOutQuad(FMath::Clamp(Time / LaunchCelebrationFlareExpand, 0.f, 1.f));
+		const float Height = FWidgetAnimationUtils::EaseOutQuad(FMath::Clamp(Time / LaunchCelebrationFlareAttack, 0.f, 1.f));
+		const float Fade = FMath::Clamp((LaunchCelebrationDuration - Time) /
+			(LaunchCelebrationDuration - LaunchCelebrationFlareExpand), 0.f, 1.f);
+		FWidgetTransform FlareTransform = Identity;
+		FlareTransform.Scale = FVector2D(FMath::Lerp(.08f, 1.25f, Expand),
+			FMath::Lerp(.12f, 1.f, Height) * FMath::Lerp(.12f, 1.f, Fade));
+		FlareTransform.Translation = FVector2D(FMath::Lerp(-35.f, 35.f, Time / LaunchCelebrationDuration),
+			FMath::Lerp(5.f, -5.f, Expand));
+		LaunchFlare->SetRenderTransform(FlareTransform);
+		LaunchFlare->SetRenderOpacity(.85f * FMath::Min(Time / LaunchCelebrationFlareAttack, 1.f) * Fade);
+	}
+	UImage* Sparkles[] = { LaunchSpark1, LaunchSpark2 };
+	for (int32 Index = 0; Index < UE_ARRAY_COUNT(Sparkles); ++Index)
+	{
+		if (!Sparkles[Index]) { continue; }
+		const float LocalTime = Time - LaunchCelebrationSparkStarts[Index];
+		const int32 BurstIndex = FMath::FloorToInt(LocalTime / LaunchCelebrationSparkPeriod);
+		const float BurstTime = LocalTime - BurstIndex * LaunchCelebrationSparkPeriod;
+		if (LocalTime < 0.f || BurstIndex >= LaunchCelebrationSparkBursts || BurstTime >= LaunchCelebrationSparkDuration)
+		{
+			Sparkles[Index]->SetRenderOpacity(0.f);
+			Sparkles[Index]->SetRenderTransform(Identity);
+			continue;
+		}
+		const float Phase = FMath::Clamp(BurstTime / LaunchCelebrationSparkDuration, 0.f, 1.f);
+		const float Drift = FWidgetAnimationUtils::EaseOutQuad(Phase);
+		const float Direction = Index == 0 ? 1.f : -1.f;
+		FWidgetAnimationUtils::DriveSparklePop(Sparkles[Index], Phase);
+		FWidgetTransform SparkTransform = Sparkles[Index]->GetRenderTransform();
+		SparkTransform.Scale *= BurstIndex == 0 ? 1.25f : .9f;
+		SparkTransform.Translation = FVector2D(Direction * (BurstIndex * 80.f + Drift * 12.f),
+			(BurstIndex == 1 ? 14.f : -6.f) - Drift * 18.f);
+		SparkTransform.Angle *= Direction;
+		Sparkles[Index]->SetRenderTransform(SparkTransform);
+	}
+}
+
+void ULaunchConfirmWidget::BeginGradeStamp()
+{
+	ResetGradeStamp();
+	if (!LaunchGradeStamp || !LaunchCoverSurface || !LaunchGradeStamp->IsVisible()
+		|| USettingsManagerSubsystem::IsReduceMotion(this))
+	{
+		return;
+	}
+	GradeStampBaseTransform = LaunchGradeStamp->GetRenderTransform();
+	GradeCoverBaseTransform = LaunchCoverSurface->GetRenderTransform();
+	GradeStampBaseOpacity = LaunchGradeStamp->GetRenderOpacity();
+	GradeStampElapsed = 0.f;
+	bGradeStampActive = true;
+	LaunchGradeStamp->SetRenderOpacity(0.f);
+}
+
+void ULaunchConfirmWidget::ResetGradeStamp()
+{
+	if (bGradeStampActive)
+	{
+		if (LaunchGradeStamp)
+		{
+			LaunchGradeStamp->SetRenderTransform(GradeStampBaseTransform);
+			LaunchGradeStamp->SetRenderOpacity(GradeStampBaseOpacity);
+		}
+		if (LaunchCoverSurface) { LaunchCoverSurface->SetRenderTransform(GradeCoverBaseTransform); }
+	}
+	bGradeStampActive = false;
+	GradeStampElapsed = 0.f;
+}
+
+void ULaunchConfirmWidget::TickGradeStamp(float DeltaTime)
+{
+	if (!bGradeStampActive) { return; }
+	if (!LaunchGradeStamp || !LaunchCoverSurface || USettingsManagerSubsystem::IsReduceMotion(this))
+	{
+		ResetGradeStamp();
+		return;
+	}
+
+	const float Fall = StrikeFx.StampFallTime;
+	const float PreviousMotion = GradeStampElapsed - LaunchGradeStampDelay;
+	GradeStampElapsed += FMath::Max(0.f, DeltaTime);
+	const float MotionTime = GradeStampElapsed - LaunchGradeStampDelay;
+	if (MotionTime < 0.f) { return; }
+	const float SinceContact = MotionTime - Fall;
+	if (PreviousMotion < Fall && SinceContact >= 0.f)
+	{
+		PlayRevealSound(FName("Event_LootPop"), .9f, true);
+		// 착지 순간 배지 중심에서 충격을 터뜨린다. 배지는 이때 저작 위치에 있다.
+		if (LaunchStampFx)
+		{
+			const FGeometry& FxGeometry = LaunchStampFx->GetCachedGeometry();
+			const FGeometry& StampGeometry = LaunchGradeStamp->GetCachedGeometry();
+			if (FxGeometry.GetLocalSize().X >= 1.f && StampGeometry.GetLocalSize().X >= 1.f)
+			{
+				ImpactCenter = FxGeometry.AbsoluteToLocal(StampGeometry.LocalToAbsolute(StampGeometry.GetLocalSize() * .5f));
+				ImpactTime = 0.f;
+			}
+		}
+	}
+	if (SinceContact >= LaunchStampSettleEnd)
+	{
+		ResetGradeStamp();
+		return;
+	}
+
+	// 위에서 크게 떨어지며 가속 → 착지에서 살짝 눌렸다 정착. 0.14초 낙하 동안만 배율이 1을 넘는다.
+	float Scale, Angle;
+	FVector2D Offset = FVector2D::ZeroVector;
+	float Opacity = 1.f;
+	if (SinceContact < 0.f)
+	{
+		const float Phase = MotionTime / Fall;
+		const float Accel = Phase * Phase;
+		Scale = FMath::Lerp(StrikeFx.StampStartScale, 1.f, Accel);
+		Angle = FMath::Lerp(-20.f, -3.f, FWidgetAnimationUtils::EaseOutQuad(Phase));
+		Offset = FMath::Lerp(LaunchStampFallOffset, FVector2D::ZeroVector, Accel);
+		Opacity = FMath::Clamp(Phase / .25f, 0.f, 1.f);
+	}
+	else
+	{
+		Scale = SinceContact < LaunchStampSquashTime
+			? FMath::Lerp(1.f, .92f, SinceContact / LaunchStampSquashTime)
+			: FMath::Lerp(.92f, 1.f, StrikeEaseOutCubic((SinceContact - LaunchStampSquashTime) / LaunchStampSettleTime));
+		Angle = FMath::Lerp(-3.f, 0.f, StrikeEaseOutCubic(SinceContact / LaunchStampSettleTime));
+	}
+	FWidgetTransform StampTransform = GradeStampBaseTransform;
+	StampTransform.Scale *= Scale;
+	StampTransform.Angle += Angle;
+	StampTransform.Translation += Offset;
+	LaunchGradeStamp->SetRenderTransform(StampTransform);
+	LaunchGradeStamp->SetRenderOpacity(GradeStampBaseOpacity * Opacity);
+
+	// 표지 묶음이 도장에 눌렸다 튀어 오른다
+	FWidgetTransform CoverTransform = GradeCoverBaseTransform;
+	if (SinceContact >= 0.f && SinceContact < LaunchGradeRecoilDuration)
+	{
+		const float Recoil = SinceContact / LaunchGradeRecoilDuration;
+		CoverTransform.Translation.Y += Recoil < .25f ? FMath::Lerp(0.f, 12.f, Recoil / .25f)
+			: Recoil < .6f ? FMath::Lerp(12.f, -4.f, (Recoil - .25f) / .35f)
+			: FMath::Lerp(-4.f, 0.f, (Recoil - .6f) / .4f);
+		CoverTransform.Translation.X += FMath::Sin(SinceContact * 90.f) * 4.4f * (1.f - Recoil);
+	}
+	LaunchCoverSurface->SetRenderTransform(CoverTransform);
+}
+
+void ULaunchConfirmWidget::CollectStrikeLayers()
+{
+	auto Gather = [this](const TCHAR* Prefix, int32 Count, TArray<TWeakObjectPtr<UImage>>& Out)
+	{
+		Out.Reset();
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			if (UImage* Layer = Cast<UImage>(GetWidgetFromName(FName(*FString::Printf(TEXT("%s%02d"), Prefix, Index)))))
+			{
+				Out.Add(Layer);
+			}
+		}
+	};
+	Gather(TEXT("LaunchThrust"), StrikeThrustCount, ThrustBlades);
+	Gather(TEXT("LaunchBurst"), StrikeBurstCount, BurstBlades);
+	Gather(TEXT("LaunchTitleFlash"), 4, TitleFlashBlades);
+	Gather(TEXT("LaunchImpactShard"), StrikeImpactShardCount, ImpactShards);
+	Gather(TEXT("LaunchImpactFlash"), 4, ImpactFlashBlades);
+	TitleGlow = Cast<UImage>(GetWidgetFromName(TEXT("LaunchTitleGlow")));
+	ImpactRing = Cast<UImage>(GetWidgetFromName(TEXT("LaunchImpactRing")));
+	ImpactGlow = Cast<UImage>(GetWidgetFromName(TEXT("LaunchImpactGlow")));
+	if (LaunchBackdropFx && ThrustBlades.Num() != StrikeThrustCount)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[LaunchConfirm] Strike FX canvas has %d/%d thrust blades"), ThrustBlades.Num(), StrikeThrustCount);
+	}
+}
+
+void ULaunchConfirmWidget::ResetStrikeFx()
+{
+	StrikeTime = -1.f;
+	ImpactTime = -1.f;
+	for (const TArray<TWeakObjectPtr<UImage>>* Group : { &ThrustBlades, &BurstBlades, &TitleFlashBlades, &ImpactShards, &ImpactFlashBlades })
+	{
+		for (const TWeakObjectPtr<UImage>& Layer : *Group) { HideStrikeLayer(Layer); }
+	}
+	HideStrikeLayer(TitleGlow);
+	HideStrikeLayer(ImpactRing);
+	HideStrikeLayer(ImpactGlow);
+}
+
+void ULaunchConfirmWidget::TickStrikeFx(float DeltaTime)
+{
+	if (StrikeTime < 0.f || !LaunchBackdropFx || !LaunchCompletionHeader) { return; }
+	if (USettingsManagerSubsystem::IsReduceMotion(this))
+	{
+		ResetStrikeFx();
+		return;
+	}
+	// 첫 레이아웃 전에는 제목 위치가 0이다 — 시계를 세우고 다음 프레임에 시작한다
+	const FGeometry& StageGeometry = LaunchBackdropFx->GetCachedGeometry();
+	const FGeometry& TitleGeometry = LaunchCompletionHeader->GetCachedGeometry();
+	if (StageGeometry.GetLocalSize().X < 1.f || TitleGeometry.GetLocalSize().X < 1.f) { return; }
+	const FVector2D Center = StageGeometry.AbsoluteToLocal(
+		TitleGeometry.LocalToAbsolute(TitleGeometry.GetLocalSize() * .5f));
+
+	StrikeTime += FMath::Max(0.f, DeltaTime);
+	const float Time = StrikeTime;
+	const float Intensity = StrikeFx.Intensity;
+
+	// 칼끝 여러 줄이 바깥에서 제목으로 가속하며 꽂히고, 닿으면 짧아지며 사라진다
+	for (int32 Index = 0; Index < ThrustBlades.Num(); ++Index)
+	{
+		const float Radians = FMath::DegreesToRadians(StrikeThrustAngles[Index]);
+		const FVector2D Direction(FMath::Cos(Radians), FMath::Sin(Radians) * StrikeVerticalSquash);
+		const float Phase = (Time - .012f * (Index % 4)) / StrikeThrustTravel;
+		if (Phase < 0.f)
+		{
+			DriveStrikeBlade(ThrustBlades[Index].Get(), Center, 0.f, 1.f, 1.f, 0.f);
+			continue;
+		}
+		const float After = (Phase - 1.f) / .7f;
+		const float Radius = Phase < 1.f ? FMath::Lerp(1800.f, 340.f, Phase * Phase)
+			: FMath::Lerp(340.f, 280.f, FWidgetAnimationUtils::EaseOutQuad(FMath::Clamp(After, 0.f, 1.f)));
+		const float Alpha = Phase < 1.f ? FMath::Clamp(Phase * 3.f, 0.f, 1.f) : 1.f - FMath::Clamp(After, 0.f, 1.f);
+		const float Length = Phase < 1.f ? 760.f
+			: FMath::Lerp(760.f, 120.f, FWidgetAnimationUtils::EaseOutQuad(FMath::Clamp(After, 0.f, 1.f)));
+		DriveStrikeBlade(ThrustBlades[Index].Get(), Center + Direction * Radius,
+			FMath::Atan2(-Direction.Y, -Direction.X), Length, 26.f, Alpha * Intensity);
+	}
+
+	DriveStrikeFlash(TitleFlashBlades, TitleGlow.Get(), Center, (Time - StrikeThrustTravel) / .22f, 300.f, 640.f, 0.f, Intensity);
+
+	// 닿는 순간 짧은 칼끝이 바깥으로 튀어 나간다
+	for (int32 Index = 0; Index < BurstBlades.Num(); ++Index)
+	{
+		const float Radians = FMath::DegreesToRadians(StrikeBurstAngles[Index]);
+		const FVector2D Direction(FMath::Cos(Radians), FMath::Sin(Radians) * StrikeVerticalSquash);
+		const float Phase = (Time - StrikeThrustTravel - Index * .006f) / .2f;
+		const bool bLive = Phase >= 0.f && Phase <= 1.f;
+		const float Clamped = FMath::Clamp(Phase, 0.f, 1.f);
+		DriveStrikeBlade(BurstBlades[Index].Get(), Center + Direction * FMath::Lerp(180.f, 600.f, StrikeEaseOutCubic(Clamped)),
+			FMath::Atan2(Direction.Y, Direction.X), FMath::Lerp(240.f, 60.f, Clamped), 16.f, bLive ? (1.f - Clamped) * Intensity : 0.f);
+	}
+
+	if (Time >= StrikeDuration)
+	{
+		// 제목 쪽 층만 거둔다 — 도장 충격은 자기 시계로 따로 끝난다
+		for (const TArray<TWeakObjectPtr<UImage>>* Group : { &ThrustBlades, &BurstBlades, &TitleFlashBlades })
+		{
+			for (const TWeakObjectPtr<UImage>& Layer : *Group) { HideStrikeLayer(Layer); }
+		}
+		HideStrikeLayer(TitleGlow);
+		StrikeTime = -1.f;
+	}
+}
+
+void ULaunchConfirmWidget::TickImpactFx(float DeltaTime)
+{
+	if (ImpactTime < 0.f || !LaunchStampFx) { return; }
+	ImpactTime += FMath::Max(0.f, DeltaTime);
+	const float Phase = ImpactTime / StrikeImpactDuration;
+	const float Intensity = StrikeFx.Intensity;
+	if (Phase >= 1.f || USettingsManagerSubsystem::IsReduceMotion(this))
+	{
+		for (const TArray<TWeakObjectPtr<UImage>>* Group : { &ImpactShards, &ImpactFlashBlades })
+		{
+			for (const TWeakObjectPtr<UImage>& Layer : *Group) { HideStrikeLayer(Layer); }
+		}
+		HideStrikeLayer(ImpactRing);
+		HideStrikeLayer(ImpactGlow);
+		ImpactTime = -1.f;
+		return;
+	}
+	const float Spread = StrikeEaseOutCubic(Phase);
+	if (UImage* Ring = ImpactRing.Get())
+	{
+		const UCanvasPanelSlot* RingSlot = Cast<UCanvasPanelSlot>(Ring->Slot);
+		const float MaxRadius = RingSlot ? RingSlot->GetSize().X * .5f : 172.f;
+		const float Radius = FMath::Lerp(60.f, 172.f, Spread);
+		DriveStrikeGlow(Ring, ImpactCenter, Radius / MaxRadius, Radius * .9f / MaxRadius, (1.f - Phase) * .9f * Intensity);
+	}
+	for (int32 Index = 0; Index < ImpactShards.Num(); ++Index)
+	{
+		const float Radians = Index * UE_TWO_PI / StrikeImpactShardCount + .3f;
+		const FVector2D Direction(FMath::Cos(Radians), FMath::Sin(Radians) * .9f);
+		DriveStrikeBlade(ImpactShards[Index].Get(), ImpactCenter + Direction * FMath::Lerp(68.f, 184.f, Spread),
+			FMath::Atan2(Direction.Y, Direction.X), FMath::Lerp(80.f, 20.f, Phase), 12.f, (1.f - Phase) * .95f * Intensity);
+	}
+	DriveStrikeFlash(ImpactFlashBlades, ImpactGlow.Get(), ImpactCenter, Phase, 140.f, 260.f, UE_PI * .25f, Intensity);
+}
+
+void ULaunchConfirmWidget::DriveMultiplyFx(float SinceMultiply)
+{
+	const float Since = SinceMultiply;
+	auto Glow = [](UBorder* Row, float Amount)
+	{
+		if (!Row) { return; }
+		FLinearColor Color = LaunchRowGlowColor;
+		Color.A *= FMath::Clamp(Amount, 0.f, 1.f);
+		Row->SetBrushColor(Color);
+	};
+	// 1단계 동안 기본 수익 줄, 곱하는 순간부터 배율 줄이 빛난다
+	Glow(RevRowGlow_Base, RevealClock >= RevenueCountStartAt ? (Since < 0.f ? 1.f : 1.f - Since / .12f) : 0.f);
+	Glow(RevRowGlow_Multiplier, Since >= 0.f ? (Since < .5f ? 1.f : 1.f - (Since - .5f) / .4f) : 0.f);
+
+	if (Text_TotalRevenue && bTotalColorCaptured)
+	{
+		const float Gold = Since < 0.f ? 0.f : Since < .45f ? 1.f : 1.f - FMath::Clamp((Since - .45f) / .5f, 0.f, 1.f);
+		const FLinearColor Base = TotalRevenueBaseColor.IsColorSpecified() ? TotalRevenueBaseColor.GetSpecifiedColor() : FLinearColor::White;
+		Text_TotalRevenue->SetColorAndOpacity(Gold > 0.f ? FSlateColor(FMath::Lerp(Base, LaunchMultiplyGold, Gold)) : TotalRevenueBaseColor);
+		const float Pop = Since >= LaunchMultiplyDelay && Since < LaunchMultiplyDelay + .2f
+			? FMath::Lerp(.93f, 1.f, StrikeEaseOutCubic((Since - LaunchMultiplyDelay) / .2f)) : 1.f;
+		Text_TotalRevenue->SetRenderScale(FVector2D(Pop, Pop));
+	}
+
+	if (!LaunchFrontFx || !Text_TotalRevenue) { return; }
+	const FGeometry& FxGeometry = LaunchFrontFx->GetCachedGeometry();
+	const FGeometry& TotalGeometry = Text_TotalRevenue->GetCachedGeometry();
+	if (FxGeometry.GetLocalSize().X < 1.f || TotalGeometry.GetLocalSize().X < 1.f) { return; }
+	// 칩은 총액 글자의 오른쪽 위 모서리에 걸친다
+	const FVector2D ChipAt = FxGeometry.AbsoluteToLocal(
+		TotalGeometry.LocalToAbsolute(FVector2D(TotalGeometry.GetLocalSize().X, 0.f))) + FVector2D(18.f, 6.f);
+	if (LaunchMulChip)
+	{
+		const float Appear = Since - LaunchMultiplyDelay;
+		const float Alpha = Appear < 0.f ? 0.f : Appear < .05f ? Appear / .05f : 1.f - FMath::Clamp((Since - .75f) / .35f, 0.f, 1.f);
+		const float Scale = FMath::Lerp(.92f, 1.f, StrikeEaseOutCubic(Appear / .12f));
+		LaunchMulChip->SetRenderTransform(FWidgetTransform(ChipAt, FVector2D(Scale, Scale), FVector2D::ZeroVector, 0.f));
+		LaunchMulChip->SetRenderOpacity(Alpha);
+	}
+	// 도장에서 칩으로 칼끝 한 줄이 쏘아져 간다
+	if (LaunchMulStreak && LaunchGradeStamp && Since >= 0.f && Since < .2f)
+	{
+		const FGeometry& StampGeometry = LaunchGradeStamp->GetCachedGeometry();
+		const FVector2D From = FxGeometry.AbsoluteToLocal(StampGeometry.LocalToAbsolute(StampGeometry.GetLocalSize() * .5f));
+		const FVector2D Delta = ChipAt - From;
+		const float Distance = Delta.Size();
+		if (Distance > 1.f)
+		{
+			const FVector2D Direction = Delta / Distance;
+			const float Head = Distance * StrikeEaseOutCubic(Since / .07f);
+			const float Alpha = Since < .07f ? 1.f : 1.f - (Since - .07f) / .13f;
+			DriveStrikeBlade(LaunchMulStreak, From + Direction * Head, FMath::Atan2(Direction.Y, Direction.X),
+				FMath::Min(Head, Distance * .6f), 22.f, Alpha * StrikeFx.Intensity);
+		}
+	}
+	else if (LaunchMulStreak)
+	{
+		HideStrikeLayer(LaunchMulStreak);
+	}
+}
+
+void ULaunchConfirmWidget::FinishRevenueFx()
+{
+	for (UBorder* Row : { RevRowGlow_Base, RevRowGlow_Multiplier })
+	{
+		if (!Row) { continue; }
+		FLinearColor Color = LaunchRowGlowColor;
+		Color.A = 0.f;
+		Row->SetBrushColor(Color);
+	}
+	if (Text_TotalRevenue && bTotalColorCaptured)
+	{
+		Text_TotalRevenue->SetColorAndOpacity(TotalRevenueBaseColor);
+		Text_TotalRevenue->SetRenderScale(FVector2D(1.f, 1.f));
+	}
+	if (LaunchMulChip) { LaunchMulChip->SetRenderOpacity(0.f); }
+	HideStrikeLayer(LaunchMulStreak);
+	for (const TWeakObjectPtr<UDisciplineBarWidget>& Bar : RevealBars)
+	{
+		if (UDisciplineBarWidget* DiscBar = Bar.Get())
+		{
+			DiscBar->SetRevealProgress(1.f);
+			DiscBar->SetFillFlash(0.f);
+		}
+	}
+}
+
+bool ULaunchConfirmWidget::TickRevealBars(float Clock)
+{
+	bool bBusy = false;
+	for (int32 Index = 0; Index < RevealBars.Num(); ++Index)
+	{
+		UDisciplineBarWidget* DiscBar = RevealBars[Index].Get();
+		if (!DiscBar) { continue; }
+		const float Start = RevealBarStarts[Index];
+		const float Phase = (Clock - Start) / LaunchBarRevealTime;
+		DiscBar->SetRevealProgress(StrikeEaseOutCubic(Phase));
+		float Flash = 0.f;
+		const float Ratio = DiscBar->GetAchievedRatio();
+		if (Ratio >= 1.f)
+		{
+			// ease-out cubic 이 1/Ratio 에 닿는 시각 = 표시값이 100%를 넘는 순간
+			const float Cross = Start + LaunchBarRevealTime * (1.f - FMath::Pow(1.f - 1.f / Ratio, 1.f / 3.f));
+			const float SinceCross = Clock - Cross;
+			Flash = SinceCross >= 0.f ? 1.f - FMath::Clamp(SinceCross / LaunchBarFlashTime, 0.f, 1.f) : 0.f;
+			bBusy |= SinceCross < LaunchBarFlashTime;
+		}
+		DiscBar->SetFillFlash(Flash);
+		bBusy |= Phase < 1.f;
+	}
+	return bBusy;
 }
 
 void ULaunchConfirmWidget::QueueRevenueReveal(int64 TotalRevenue)
@@ -335,19 +1200,25 @@ void ULaunchConfirmWidget::QueueRevenueReveal(int64 TotalRevenue)
 	RevenueCountStartAt = -1.0f;
 	RevealEndTime = 0.0f;
 	LastRevealSoundClock = -10.0f;
-
-	// 계산 순서대로 = 읽는 순서대로. 배율이 먼저 와야 "무엇에 곱해지는지"가 성립한다.
-	float StartAt = 0.12f;
-	UWidget* CalcRows[3] = { RevRow_Multiplier, RevRow_Duration, RevRow_PerSecond };
-	for (UWidget* Row : CalcRows)
+	UpdateLaunchCelebration(-1.f);
+	BeginGradeStamp();
+	ResetStrikeFx();
+	StrikeTime = LaunchBackdropFx && !USettingsManagerSubsystem::IsReduceMotion(this) ? 0.f : -1.f;
+	QueueReveal(LaunchCompletionHeader, 0.f, true);
+	if (LaunchLootRow)
 	{
-		if (!Row) { continue; }
-		QueueReveal(Row, StartAt, false, FName("Event_ScoreSweep"), false, 0.0f, 0.7f);
-		StartAt += 0.11f;
+		const TArray<float> CardTimes = LaunchRewardRevealMath::StampRunTimes(
+			LaunchLootRow->GetChildrenCount(), .62f, .12f, .9f, .10f);
+		for (int32 Index = 0; Index < CardTimes.Num(); ++Index)
+		{
+			QueueReveal(LaunchLootRow->GetChildAt(Index), CardTimes[Index], true, FName("Event_LootPop"),
+				false, 0.f, .65f, true);
+		}
 	}
+	RevealEndTime = FMath::Max(RevealEndTime, LaunchCelebrationDuration);
 
-	// 총액 — 행들이 다 들어온 뒤 잠깐 뜸을 들이고 굴린다
-	StartAt += 0.10f;
+	// 요약 총액은 상세 계산 행과 독립적으로 먼저 드러난다.
+	const float StartAt = 0.12f;
 	if (RevTotalBlock)
 	{
 		QueueReveal(RevTotalBlock, StartAt, false, FName("Event_ScoreSweep"));
@@ -355,17 +1226,40 @@ void ULaunchConfirmWidget::QueueRevenueReveal(int64 TotalRevenue)
 	if (Text_TotalRevenue && TotalRevenue > 0)
 	{
 		RevenueCountTarget = TotalRevenue;
+		RevenueBaseTarget = PendingBaseRevenue;
 		RevenueCountStartAt = StartAt;
+		RevenueMultiplyAt = LaunchGradeStampDelay + StrikeFx.StampFallTime;
+		if (!bTotalColorCaptured)
+		{
+			TotalRevenueBaseColor = Text_TotalRevenue->GetColorAndOpacity();
+			bTotalColorCaptured = true;
+		}
 		Text_TotalRevenue->SetText(FText::AsNumber(static_cast<int64>(0)));
-		RevealEndTime = FMath::Max(RevealEndTime, StartAt + ReviewCountUpDuration);
+		RevealEndTime = FMath::Max(RevealEndTime, RevenueMultiplyAt + LaunchRevenueMultiplyEnd);
+	}
+	RevealBars.Reset();
+	RevealBarStarts.Reset();
+	for (UDisciplineBarWidget* DiscBar : { DiscBar1, DiscBar2, DiscBar3, DiscBar4, DiscBar5, DiscBar6 })
+	{
+		if (!DiscBar || !DiscBar->IsActiveDiscipline()) { continue; }
+		RevealBarStarts.Add(LaunchBarRevealStart + LaunchBarRevealStagger * RevealBars.Num());
+		RevealBars.Add(DiscBar);
+		DiscBar->SetRevealProgress(0.f);
+		DiscBar->SetFillFlash(0.f);
+	}
+	if (RevealBarStarts.Num() > 0)
+	{
+		RevealEndTime = FMath::Max(RevealEndTime, RevealBarStarts.Last() + LaunchBarRevealTime + LaunchBarFlashTime);
 	}
 
 	// 확인 버튼은 잠그지 않는다 — 여기 숫자는 못 보고 눌러도 손해가 없고,
 	// 매 프로젝트마다 반복되는 화면이라 대기를 강제하면 금방 성가셔진다. 탭하면 즉시 완료된다.
 
-	// QueueReveal 이 행들을 opacity 0 으로 눕혀놨으므로, 이 줄이 없으면 NativeTick 이 조기반환해 영영 안 깨운다.
+	// QueueReveal 이 총액 블록을 opacity 0 으로 눕혀놨으므로, 이 줄이 없으면 NativeTick 이 조기반환해 영영 안 깨운다.
 	// 카운트업 대상(Text_TotalRevenue)은 큐에 안 들어가므로 별도 조건 — RevTotalBlock 미배치 시에도 총액은 굴러야 한다.
-	bRevealActive = RevealQueue.Num() > 0 || RevenueCountStartAt >= 0.0f;
+	bRevealActive = RevealQueue.Num() > 0 || RevenueCountStartAt >= 0.0f || RevealBars.Num() > 0
+		|| LaunchFlare || LaunchSpark1 || LaunchSpark2;
+	if (USettingsManagerSubsystem::IsReduceMotion(this)) SkipRevealQueue();
 }
 
 void ULaunchConfirmWidget::FillFailureSection(const FStageProgressData& StageData)
@@ -391,6 +1285,8 @@ void ULaunchConfirmWidget::FillFailureSection(const FStageProgressData& StageDat
 			FailRows[RowIdx]->SetCurrentProgress(S.AcquiredScore, S.TargetScore);
 			FailRows[RowIdx]->SetStatInfo(DisciplineName, FString::Printf(TEXT("%d / %d"),
 				FMath::FloorToInt(S.AcquiredScore), FMath::CeilToInt(S.MinimumScore)));
+			// SetStatIcon 이 IconTexture 까지 갱신해서 늦은 ApplyIconProperties 가 도로 접지 않는다
+			FailRows[RowIdx]->SetStatIcon(UGlobalUtilFunctions::GetDisciplineIcon(S.DisciplineSlot));
 			++RowIdx;
 		}
 	}
@@ -467,47 +1363,18 @@ void ULaunchConfirmWidget::FillFailureSection(const FStageProgressData& StageDat
 		ConfirmCancelWidget->SetCancelOnly(!bRetryLeft || !bCanAfford);
 	}
 
-	// 경험치는 게이트 판정보다 먼저 지급된다 — 실패해도 팀은 자랐다는 걸 이 줄만 말해준다
+	// 실패·추가 개발에도 현재 프로젝트에서 실제 적립한 총량을 보여 준다.
 	if (Text_FailXp)
 	{
-		UCGGameInstance* XpGI = UCGGameInstance::GetInstance();
-		UEmployeeManager* XpEmpMgr = XpGI ? XpGI->GetSubsystem<UEmployeeManager>() : nullptr;
-		const float RoundExp = StageMgr ? StageMgr->GetLastRoundEmployeeExp() : 0.0f;
-		if (RoundExp <= 0.0f)
+		const float Earned = StageData.EarnedExperience;
+		if (!FMath::IsFinite(Earned) || Earned <= 0.0f)
 		{
 			// 지급이 없었으면 성장을 말할 근거가 없다 — "+0" 을 남기느니 줄을 접는다
 			Text_FailXp->SetVisibility(ESlateVisibility::Collapsed);
 		}
 		else
 		{
-			// 헤드라인은 건물이 뿌린 팀 공통 기준량, 「N판」은 그 직원이 실제로 받는 양(스탯·큐브 배율 포함)으로 센다
-			FString XpLine = FString::Printf(TEXT("경험치 +%d"), FMath::RoundToInt(RoundExp));
-			if (XpGI && XpEmpMgr)
-			{
-				// 레벨업에 가장 가까운 직원 1명 — "N판이면 레벨업"이 실패를 성장으로 읽게 한다
-				int32 BestRounds = MAX_int32;
-				int32 BestLevel = 0;
-				FString BestName;
-				const TArray<FEmployeeInstance> Roster = XpEmpMgr->GetEmployeesInBuilding(XpGI->GetCurrentManagedBuildingIndex());
-				for (const FEmployeeInstance& Employee : Roster)
-				{
-					const float PerRound = RoundExp * XpEmpMgr->GetExpGainMultiplier(Employee)
-						* UEmployeePotentialHelper::AggregateModifiers(Employee.PotentialAbility).ExpMult;
-					const int32 Rounds = PitchBoardText::ComputeRoundsToLevelUp(
-						Employee.Experience, static_cast<float>(XpEmpMgr->GetMaxExperienceForLevel(Employee.Level)), PerRound);
-					if (Rounds < BestRounds)
-					{
-						BestRounds = Rounds;
-						BestLevel = Employee.Level;
-						BestName = Employee.EmployeeName;
-					}
-				}
-				if (BestRounds != MAX_int32)
-				{
-					XpLine += FString::Printf(TEXT(" · %s Lv%d까지 %d판"), *BestName, BestLevel + 1, BestRounds);
-				}
-			}
-			Text_FailXp->SetText(FText::FromString(XpLine));
+			Text_FailXp->SetText(FormatEarnedExperience(Earned));
 			Text_FailXp->SetVisibility(ESlateVisibility::HitTestInvisible);
 		}
 	}
@@ -551,6 +1418,16 @@ void ULaunchConfirmWidget::UpdateStampMaterialSize()
 	}
 }
 
+void ULaunchConfirmWidget::ApplyGradeMedal(ECompanyType CompanyType, EQualityGrade Grade)
+{
+	CGQualityGradeMedal::Apply(GetGameInstance(), CompanyType, Grade, LetterPlate, Text_QualityGrade);
+	if (LaunchGradeStamp)
+	{
+		LaunchGradeStamp->SetVisibility(LetterPlate && LetterPlate->GetVisibility() != ESlateVisibility::Collapsed
+			? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+}
+
 void ULaunchConfirmWidget::ApplyGradeStampColor(const FLinearColor& GradeColor)
 {
 	// 스탬프는 SDF 머티리얼 3층이라 SetBrushColor 가 아니라 MID 파라미터로 색이 들어간다.
@@ -576,14 +1453,6 @@ void ULaunchConfirmWidget::ApplyGradeStampColor(const FLinearColor& GradeColor)
 		}
 	}
 
-	// 컬러 면 위 라벨은 그 색 계열 진한 섀이드로 아웃라인 (UI_STYLE_CATALOG 마감 §6)
-	if (Text_QualityGrade)
-	{
-		FSlateFontInfo Font = Text_QualityGrade->GetFont();
-		Font.OutlineSettings.OutlineSize = 2;
-		Font.OutlineSettings.OutlineColor = Deep;   // FLinearColor 필드 — sRGB 왕복 변환 불필요
-		Text_QualityGrade->SetFont(Font);
-	}
 }
 
 void ULaunchConfirmWidget::QueueReveal(UWidget* Widget, float StartAt, bool bPop, FName SoundKey,
@@ -641,6 +1510,8 @@ void ULaunchConfirmWidget::SetConfirmInteractionEnabled(bool bEnable)
 
 void ULaunchConfirmWidget::SkipRevealQueue()
 {
+	ResetGradeStamp();
+	ResetStrikeFx();
 	if (!bRevealActive) { return; }
 
 	for (FRevealItem& Item : RevealQueue)
@@ -665,7 +1536,9 @@ void ULaunchConfirmWidget::SkipRevealQueue()
 		Text_TotalRevenue->SetText(FText::AsNumber(RevenueCountTarget));
 	}
 
+	FinishRevenueFx();
 	RevealClock = RevealEndTime;
+	UpdateLaunchCelebration(-1.f);
 	bRevealActive = false;
 	SetConfirmInteractionEnabled(true);
 }
@@ -673,7 +1546,7 @@ void ULaunchConfirmWidget::SkipRevealQueue()
 FReply ULaunchConfirmWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
 	// 리빌 중 탭 = 스킵 (최종 상태로 시간 점프)
-	if (bRevealActive)
+	if (bRevealActive || bGradeStampActive || StrikeTime >= 0.f)
 	{
 		SkipRevealQueue();
 		return FReply::Handled();
@@ -684,12 +1557,29 @@ FReply ULaunchConfirmWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry
 void ULaunchConfirmWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+	if (EntryElapsed < .2f)
+	{
+		EntryElapsed = USettingsManagerSubsystem::IsReduceMotion(this) ? .2f : FMath::Min(.2f, EntryElapsed + InDeltaTime);
+		if (UWidget* Surface = EntrySurface.Get())
+		{
+			const float Ease = 1.f - FMath::Pow(1.f - EntryElapsed / .2f, 3.f);
+			FWidgetTransform Transform = EntryBaseTransform;
+			Transform.Translation.Y += 24.f * (1.f - Ease);
+			Surface->SetRenderTransform(Transform);
+			Surface->SetRenderOpacity(EntryBaseOpacity * Ease);
+		}
+	}
+	if (bRevealActive && USettingsManagerSubsystem::IsReduceMotion(this)) SkipRevealQueue();
+	TickGradeStamp(InDeltaTime);
+	TickStrikeFx(InDeltaTime);
+	TickImpactFx(InDeltaTime);
 
 	// ⚠ 아래 리빌 조기반환보다 앞에 — 미리보기 페이지(리빌 비활성)에서도 스탬프 크기는 맞아야 한다
 	UpdateStampMaterialSize();
 
 	if (!bRevealActive) { return; }
 	RevealClock += InDeltaTime;
+	UpdateLaunchCelebration(RevealClock);
 
 	bool bAllDone = true;
 	for (FRevealItem& Item : RevealQueue)
@@ -723,17 +1613,29 @@ void ULaunchConfirmWidget::NativeTick(const FGeometry& MyGeometry, float InDelta
 		if (Clamped < 1.0f) { bAllDone = false; }
 	}
 
-	// 수익 총액 카운트업 — 등장 시점부터 0 → 목표
+	// 예상 총수익: 0 → 기본 수익, 도장 착지에 배율을 곱해 → 총액
 	if (Text_TotalRevenue && RevenueCountStartAt >= 0.0f && RevenueCountTarget > 0)
 	{
-		const float P = FMath::Clamp((RevealClock - RevenueCountStartAt) / ReviewCountUpDuration, 0.0f, 1.0f);
-		Text_TotalRevenue->SetText(FText::AsNumber(
-			static_cast<int64>(FMath::RoundToDouble(P * static_cast<double>(RevenueCountTarget)))));
-		if (P < 1.0f) { bAllDone = false; }
+		const float Since = RevealClock - RevenueMultiplyAt;
+		const double Base = static_cast<double>(RevenueBaseTarget);
+		const double Value = Since < 0.0f
+			? Base * StrikeEaseOutCubic((RevealClock - RevenueCountStartAt) / LaunchRevenueBaseCountTime)
+			: Base + (static_cast<double>(RevenueCountTarget) - Base)
+				* StrikeEaseOutCubic((Since - LaunchMultiplyDelay) / LaunchRevenueMultiplyCountTime);
+		Text_TotalRevenue->SetText(FText::AsNumber(static_cast<int64>(FMath::RoundToDouble(Value))));
+		DriveMultiplyFx(Since);
+		if (Since < LaunchRevenueMultiplyEnd) { bAllDone = false; }
+	}
+	if (TickRevealBars(RevealClock)) { bAllDone = false; }
+	if (RevealClock < LaunchCelebrationDuration && (LaunchFlare || LaunchSpark1 || LaunchSpark2))
+	{
+		bAllDone = false;
 	}
 
 	if (bAllDone)
 	{
+		FinishRevenueFx();
+		UpdateLaunchCelebration(-1.f);
 		bRevealActive = false;
 		SetConfirmInteractionEnabled(true);
 	}
@@ -741,6 +1643,14 @@ void ULaunchConfirmWidget::NativeTick(const FGeometry& MyGeometry, float InDelta
 
 void ULaunchConfirmWidget::OnDialogConfirmed()
 {
+	if (bManufacturingResearchResult)
+	{
+		if (bManufacturingResultAnswered) return;
+		bManufacturingResultAnswered = true;
+		DeactivateWidget();
+		OnManufacturingResearchResultClosed.Broadcast(true);
+		return;
+	}
 	// 실패 페이지에서는 확인 = [추가 개발]. 개발이 재개되므로 모달은 닫는다.
 	// ⚠ 닫기 먼저, broadcast 나중 — 핸들러가 다음 모달을 push 할 때 이 위젯이 스택 top 이어야 잔류/부활이 없다.
 	DeactivateWidget();
@@ -749,18 +1659,25 @@ void ULaunchConfirmWidget::OnDialogConfirmed()
 		OnLaunchRetryRequested.Broadcast();
 		return;
 	}
-	// [출시하기] = 커밋. 보상 리빌은 호스트(OfficeMainWidget)가 닫힌 자리에 push 한다.
+	// [출시하기] = 공개한 보상 지급과 운영 전환을 한 번에 확정한다.
 	OnLaunchConfirmed.Broadcast();
 }
 
 void ULaunchConfirmWidget::OnDialogCancelled()
 {
+	if (bManufacturingResearchResult)
+	{
+		if (bManufacturingResultAnswered) return;
+		bManufacturingResultAnswered = true;
+		DeactivateWidget();
+		OnManufacturingResearchResultClosed.Broadcast(false);
+		return;
+	}
 	OnLaunchCancelled.Broadcast();
 	DeactivateWidget();
 }
 
 void ULaunchConfirmWidget::OnCloseBtnClicked()
 {
-	OnLaunchCancelled.Broadcast();
-	DeactivateWidget();
+	OnDialogCancelled();
 }

@@ -16,8 +16,22 @@
 #include "Enum/BuildingTraitTarget.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
-#include "Manager/KeystoneAuraSubsystem.h"
 #include "Kismet/GameplayStatics.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Data/CloudEconomyData.h"
+#include "Dom/JsonObject.h"
+#include "Utils/GachaBatchMath.h"
+
+namespace
+{
+	// 서버 카탈로그 reason — consumeRules.json / spendRules.json 과 바이트 단위로 같아야 한다(다르면 400)
+	const FName ConsumeReason_TraitPull(TEXT("trait.pull"));
+	const FName SpendReason_TraitSlotUnlock(TEXT("trait.slotUnlock"));
+
+	// 중복 클릭 차단 키 — 스킨(gacha.skin.*)·채용(gacha.recruit.*)과 겹치지 않는 도메인 접두사
+	const FName ActionKey_TraitNormal(TEXT("gacha.trait.normal"));
+	const FName ActionKey_TraitAdvanced(TEXT("gacha.trait.advanced"));
+}
 
 void UBuildingTraitManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -642,10 +656,7 @@ bool UBuildingTraitManagerSubsystem::CanExecuteGachaPull(bool bAdvanced) const
 {
 	UItemInventoryManager* IIM = GetItemInventoryManager();
 	if (!IIM) return false;
-	const EItemType TicketType = bAdvanced
-		? EItemType::BuildingTraitTicketAdvanced
-		: EItemType::BuildingTraitTicketNormal;
-	return IIM->HasItem(TicketType, 1);
+	return IIM->HasItem(GetTicketType(bAdvanced), 1);
 }
 
 int32 UBuildingTraitManagerSubsystem::GetPullsSinceEpic(bool bAdvanced) const
@@ -803,12 +814,23 @@ bool UBuildingTraitManagerSubsystem::ExecuteGachaPull(bool bAdvanced, FBuildingT
 	if (!CanExecuteGachaPull(bAdvanced)) return false;
 
 	UItemInventoryManager* IIM = GetItemInventoryManager();
+	// 티켓 리터럴과 SpendItem 은 이 본문에 남긴다 — export_catalog.py 가 consumeRules.json 의 items/maxPerOp 를 여기서 파싱한다
 	const EItemType TicketType = bAdvanced
 		? EItemType::BuildingTraitTicketAdvanced
 		: EItemType::BuildingTraitTicketNormal;
 	if (!IIM->SpendItem(TicketType, 1, false)) return false;
 
-	// 천장 스냅샷 — PickRandom 실패 시 롤백용
+	// 로컬 차감 경로라 등급 풀이 비면 티켓을 되돌릴 수 있다(서버 경로는 되돌리지 않는다)
+	if (!ApplyLocalPullEffect(bAdvanced, /*bRefundTicketOnPoolEmpty=*/true, OutResult)) return false;
+
+	SaveGameData();
+	return true;
+}
+
+bool UBuildingTraitManagerSubsystem::ApplyLocalPullEffect(bool bAdvanced, bool bRefundTicketOnPoolEmpty,
+	FBuildingTraitGachaResult& OutResult)
+{
+	// 천장 스냅샷 — 등급 롤이 카운터를 먼저 올리므로 PickRandom 실패 시 원복해야 한다
 	FBuildingTraitPityData& PityRef = bAdvanced ? Inventory.GachaData.AdvancedPity : Inventory.GachaData.NormalPity;
 	const FBuildingTraitPityData PitySnapshot = PityRef;
 
@@ -818,13 +840,22 @@ bool UBuildingTraitManagerSubsystem::ExecuteGachaPull(bool bAdvanced, FBuildingT
 	const FName ResultID = PickRandomTraitOfRarity(Rarity);
 	if (ResultID.IsNone())
 	{
+		UE_LOG(LogTemp, Error, TEXT("[BuildingTraitManager] 등급 %d 의 특성 풀이 비어있음 — 롤백"), static_cast<int32>(Rarity));
 		PityRef = PitySnapshot;
-		IIM->AddItem(TicketType, 1, false);
+		// 서버가 소모한 티켓은 클라가 되돌리지 않는다 — 다음 /player/state 가 지우는 유령 수량이고 소모품 자체 지급이다
+		if (bRefundTicketOnPoolEmpty)
+		{
+			if (UItemInventoryManager* IIM = GetItemInventoryManager())
+			{
+				IIM->AddItem(GetTicketType(bAdvanced), 1, false);
+			}
+		}
 		return false;
 	}
 
 	GrantTrait(ResultID, 1, false);
 	Inventory.GachaData.TotalPullsAllTime++;
+	// 특성 마일리지는 로컬 권위 — 서버 wallet.mileage 는 채용 풀이고 이 풀은 특성 상자만 교환한다
 	AddMileagePoints(1);
 
 	OutResult.ResultTraitID = ResultID;
@@ -833,7 +864,6 @@ bool UBuildingTraitManagerSubsystem::ExecuteGachaPull(bool bAdvanced, FBuildingT
 	OutResult.bFromMileageBox = false;
 
 	OnTraitGachaCompleted.Broadcast(OutResult);
-	SaveGameData();
 	return true;
 }
 
@@ -849,6 +879,263 @@ bool UBuildingTraitManagerSubsystem::ExecuteGachaPullMulti(bool bAdvanced, int32
 		OutResults.Add(R);
 	}
 	return OutResults.Num() > 0;
+}
+
+// ===== 서버 권위 뽑기 + 슬롯 해금 =====
+
+UCloudEconomySubsystem* UBuildingTraitManagerSubsystem::GetCloudEconomy() const
+{
+	UGameInstance* GI = GetGameInstance();
+	return GI ? GI->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+}
+
+EItemType UBuildingTraitManagerSubsystem::GetTicketType(bool bAdvanced)
+{
+	return bAdvanced
+		? EItemType::BuildingTraitTicketAdvanced
+		: EItemType::BuildingTraitTicketNormal;
+}
+
+FName UBuildingTraitManagerSubsystem::GetPullConsumeReason()
+{
+	return ConsumeReason_TraitPull;
+}
+
+FName UBuildingTraitManagerSubsystem::GetSlotUnlockSpendReason()
+{
+	return SpendReason_TraitSlotUnlock;
+}
+
+FName UBuildingTraitManagerSubsystem::GachaActionKey(bool bAdvanced)
+{
+	return bAdvanced ? ActionKey_TraitAdvanced : ActionKey_TraitNormal;
+}
+
+FName UBuildingTraitManagerSubsystem::SlotUnlockActionKey(int32 BuildingIndex, int32 SlotIndex)
+{
+	return FName(*FString::Printf(TEXT("trait.slotUnlock.%d.%d"), BuildingIndex, SlotIndex));
+}
+
+int32 UBuildingTraitManagerSubsystem::ResolveRollCount(int32 Requested, int32 ServerAmount)
+{
+	return FMath::Clamp(ServerAmount, 0, FMath::Max(0, Requested));
+}
+
+bool UBuildingTraitManagerSubsystem::ShouldSkipLocalEffect(bool bReplayed)
+{
+	return bReplayed;
+}
+
+void UBuildingTraitManagerSubsystem::RequestGachaPull(bool bAdvanced, int32 RequestedCount, FOnTraitPullDone Done)
+{
+	// 허용 밖의 수를 줄여 보내면 고른 수와 다른 수가 소모된다 ― pending 을 잡기 전에 거절한다
+	if (!GachaBatchMath::IsAllowedPullCount(RequestedCount))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingTraitManager] 특성 뽑기 거절 - 1/10/30 회만 허용. Requested=%d Advanced=%d"),
+			RequestedCount, bAdvanced ? 1 : 0);
+		Done.ExecuteIfBound(false, TArray<FBuildingTraitGachaResult>());
+		return;
+	}
+
+	const FName ActionKey = GachaActionKey(bAdvanced);
+
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BuildingTraitManager] 특성 뽑기 실패 - CloudEconomySubsystem 없음. Advanced=%d"),
+			bAdvanced ? 1 : 0);
+		Done.ExecuteIfBound(false, TArray<FBuildingTraitGachaResult>());
+		return;
+	}
+
+	// 중복 클릭 — 내가 잡은 pending 이 아니므로 풀지 않는다
+	if (!Cloud->BeginPendingAction(ActionKey))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BuildingTraitManager] 특성 뽑기 요청 중복 - 진행 중. Advanced=%d"), bAdvanced ? 1 : 0);
+		Done.ExecuteIfBound(false, TArray<FBuildingTraitGachaResult>());
+		return;
+	}
+
+	// 로컬 캐시로 가능 판정만 — 차감은 서버가 한다. 다이아 폴백이 없어 티켓이 없으면 요청 자체를 보내지 않는다
+	UItemInventoryManager* IIM = GetItemInventoryManager();
+	if (!IIM || !IIM->HasItem(GetTicketType(bAdvanced), RequestedCount))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BuildingTraitManager] 특성 뽑기 미전송 - 티켓 부족(로컬 캐시). Count=%d"), RequestedCount);
+		FinishServerPull(bAdvanced, /*bOk=*/false, /*Rolls=*/0, /*bReplayed=*/false, ActionKey, Done);
+		return;
+	}
+
+	SendConsumeThenRoll(bAdvanced, RequestedCount, ActionKey, Done);
+}
+
+void UBuildingTraitManagerSubsystem::SendConsumeThenRoll(bool bAdvanced, int32 RequestedCount, FName ActionKey,
+	FOnTraitPullDone Done)
+{
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		FinishServerPull(bAdvanced, /*bOk=*/false, /*Rolls=*/0, /*bReplayed=*/false, ActionKey, Done);
+		return;
+	}
+
+	const FName ItemName = FCloudEconomyData::ItemTypeToName(GetTicketType(bAdvanced));
+
+	// 응답 전에 서브시스템이 내려가면 CreateLambda 는 죽은 this 를 만진다
+	Cloud->RequestConsume(GetPullConsumeReason(), ItemName, RequestedCount,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, bAdvanced, RequestedCount, ActionKey, Done](const FCloudOpResult& OpResult)
+	{
+		if (!OpResult.bOk)
+		{
+			// 특성도 티켓 전용이라 폴백 경로가 없다 — 실패는 그대로 실패다
+			UE_LOG(LogTemp, Warning, TEXT("[BuildingTraitManager] trait.pull 실패 - Code=%s Http=%d"),
+				*OpResult.Code.ToString(), OpResult.HttpStatus);
+			FinishServerPull(bAdvanced, /*bOk=*/false, /*Rolls=*/0, OpResult.bReplayed, ActionKey, Done);
+			return;
+		}
+
+		// 요청값이 아니라 서버가 인정한 수량만큼 돌린다
+		int32 ServerAmount = 0;
+		if (OpResult.Result.IsValid())
+		{
+			OpResult.Result->TryGetNumberField(TEXT("amount"), ServerAmount);
+		}
+
+		FinishServerPull(bAdvanced, /*bOk=*/true, ResolveRollCount(RequestedCount, ServerAmount),
+			OpResult.bReplayed, ActionKey, Done);
+	}));
+}
+
+void UBuildingTraitManagerSubsystem::FinishServerPull(bool bAdvanced, bool bOk, int32 Rolls, bool bReplayed,
+	FName ActionKey, FOnTraitPullDone Done)
+{
+	TArray<FBuildingTraitGachaResult> Results;
+
+	if (bOk && !ShouldSkipLocalEffect(bReplayed) && Rolls > 0)
+	{
+		Results.Reserve(Rolls);
+		for (int32 i = 0; i < Rolls; ++i)
+		{
+			FBuildingTraitGachaResult Rolled;
+			if (!ApplyLocalPullEffect(bAdvanced, /*bRefundTicketOnPoolEmpty=*/false, Rolled))
+			{
+				// 등급 풀 공백(DT 오류)은 되돌릴 티켓이 없다 — 남은 굴림을 포기하고 크게 남긴다
+				UE_LOG(LogTemp, Error, TEXT("[BuildingTraitManager] 서버 뽑기 %d/%d 에서 로컬 등급 풀이 비어 중단"), i + 1, Rolls);
+				break;
+			}
+			Results.Add(Rolled);
+		}
+
+		SaveGameData();
+	}
+
+	if (UCloudEconomySubsystem* Cloud = GetCloudEconomy())
+	{
+		Cloud->EndPendingAction(ActionKey);
+	}
+
+	Done.ExecuteIfBound(bOk, Results);
+}
+
+void UBuildingTraitManagerSubsystem::RequestUnlockSlotWithDiamond(int32 BuildingIndex, int32 SlotIndex,
+	FOnTraitSlotUnlockDone Done)
+{
+	RequestUnlockSlotWithDiamond(BuildingIndex, SlotIndex, FOnCloudEconomyOpDone::CreateLambda(
+		[Done](bool bOk, FName) { Done.ExecuteIfBound(bOk); }));
+}
+
+void UBuildingTraitManagerSubsystem::RequestUnlockSlotWithDiamond(int32 BuildingIndex, int32 SlotIndex,
+	FOnCloudEconomyOpDone Done)
+{
+	const FName ActionKey = SlotUnlockActionKey(BuildingIndex, SlotIndex);
+
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BuildingTraitManager] 슬롯 해금 실패 - CloudEconomySubsystem 없음. Building=%d Slot=%d"),
+			BuildingIndex, SlotIndex);
+		Done.ExecuteIfBound(false, CloudErr::Internal);
+		return;
+	}
+
+	// 중복 클릭 — 내가 잡은 pending 이 아니므로 풀지 않는다
+	if (!Cloud->BeginPendingAction(ActionKey))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BuildingTraitManager] 슬롯 해금 중복 - 진행 중. Building=%d Slot=%d"), BuildingIndex, SlotIndex);
+		Done.ExecuteIfBound(false, NAME_None);
+		return;
+	}
+
+	// 로컬 캐시로 가능 판정만 — 차감은 서버가 한다
+	const int32 Cost = GetDiamondCostForSlot(SlotIndex);
+	UResourceItemManager* ResMgr = GetResourceManager();
+	const bool bHasDiamond = Cost > 0 && ResMgr && ResMgr->HasResource(EResourceType::Diamond, Cost);
+	const bool bLocallyPossible =
+		SlotIndex >= 0 && SlotIndex < FBuildingTraitSlotData::MaxBuildingTraitSlots
+		&& !IsSlotUnlocked(BuildingIndex, SlotIndex)
+		&& bHasDiamond;
+
+	if (!bLocallyPossible)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BuildingTraitManager] 슬롯 해금 미전송 - 로컬 판정 실패. Building=%d Slot=%d Cost=%d"),
+			BuildingIndex, SlotIndex, Cost);
+		// 잔액 부족만 "보석이 부족합니다" — 이미 열린 슬롯·잘못된 인덱스는 부족이 아니다
+		FinishSlotUnlock(BuildingIndex, SlotIndex, /*bOk=*/false,
+			bHasDiamond ? NAME_None : CloudErr::InsufficientFunds, ActionKey, Done);
+		return;
+	}
+
+	// 영수증 감사용 — 어느 건물의 몇 번 슬롯이었는지는 금액만으로 복원할 수 없다
+	FCloudMeta Meta;
+	Meta.Add(TEXT("buildingIndex"), FCloudMetaValue::FromInt(BuildingIndex));
+	Meta.Add(TEXT("slotIndex"), FCloudMetaValue::FromInt(SlotIndex));
+
+	Cloud->RequestSpend(CloudCurrency::Diamond, Cost, GetSlotUnlockSpendReason(), Meta,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, BuildingIndex, SlotIndex, ActionKey, Done](const FCloudOpResult& OpResult)
+	{
+		if (!OpResult.bOk)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BuildingTraitManager] trait.slotUnlock 실패 - Code=%s Http=%d"),
+				*OpResult.Code.ToString(), OpResult.HttpStatus);
+		}
+
+		// 마스크 set 은 멱등이라 bReplayed 를 보지 않는다 — 앱이 죽어 로컬 적용을 놓쳤으면 재시도가 복구한다
+		FinishSlotUnlock(BuildingIndex, SlotIndex, OpResult.bOk, OpResult.Code, ActionKey, Done);
+	}));
+}
+
+void UBuildingTraitManagerSubsystem::FinishSlotUnlock(int32 BuildingIndex, int32 SlotIndex, bool bOk,
+	FName FailureCode, FName ActionKey, FOnCloudEconomyOpDone Done)
+{
+	bool bApplied = false;
+
+	if (bOk)
+	{
+		if (FBuildingTraitSlotData* SlotData = GetOrCreateSlotData(BuildingIndex))
+		{
+			SlotData->DiamondUnlockedSlotMask |= (1 << SlotIndex);
+			bApplied = true;
+
+			OnTraitSlotUnlocked.Broadcast(BuildingIndex, SlotIndex);
+			SaveGameData();
+		}
+		else
+		{
+			// 다이아는 이미 나갔는데 로컬 슬롯 데이터를 못 만든 상태 — 조용히 넘기면 플레이어가 재화만 잃는다
+			UE_LOG(LogTemp, Error, TEXT("[BuildingTraitManager] 슬롯 해금 응답은 성공인데 슬롯 데이터 생성 실패. Building=%d Slot=%d"),
+				BuildingIndex, SlotIndex);
+			// 서버는 성공했는데 로컬이 못 따라갔다 — "부족" 이 아니라 내부 오류다
+			FailureCode = CloudErr::Internal;
+		}
+	}
+
+	if (UCloudEconomySubsystem* Cloud = GetCloudEconomy())
+	{
+		Cloud->EndPendingAction(ActionKey);
+	}
+
+	Done.ExecuteIfBound(bApplied, bApplied ? NAME_None : FailureCode);
 }
 
 void UBuildingTraitManagerSubsystem::AddMileagePoints(int32 Amount)
@@ -1005,26 +1292,13 @@ float UBuildingTraitManagerSubsystem::GetAggregatedTraitPercent(int32 BuildingIn
 
 	float Sum = GetRawTraitPercent(BuildingIndex, Target);
 
-	// 두 메타축(오라/증폭) 자신을 구할 때는 여기서 끝낸다 — 서로를 곱하면 무한 재귀 + 밸런스 폭주.
-	if (Target == EBuildingTraitTarget::AuraPower || Target == EBuildingTraitTarget::MetaAmplify)
+	// 메타축(증폭) 자신을 구할 때는 여기서 끝낸다 — 자신을 곱하면 무한 재귀 + 밸런스 폭주.
+	if (Target == EBuildingTraitTarget::MetaAmplify)
 	{
 		return Sum;
 	}
 
-	// 3) 키스톤 오라 기여 (영향권 내 이웃 빌딩에 가산). 파트너십(AuraPower)이 이 기여분만 증폭한다.
-	if (UWorld* AuraWorld = GetGameInstance() ? GetGameInstance()->GetWorld() : nullptr)
-	{
-		if (UKeystoneAuraSubsystem* AuraSys = AuraWorld->GetSubsystem<UKeystoneAuraSubsystem>())
-		{
-			const float AuraPct = AuraSys->GetAuraPercent(BuildingIndex, Target);
-			if (!FMath::IsNearlyZero(AuraPct))
-			{
-				Sum += AuraPct * (1.0f + GetRawTraitPercent(BuildingIndex, EBuildingTraitTarget::AuraPower) / 100.0f);
-			}
-		}
-	}
-
-	// 4) 마인드셋 메타 증폭 — 합산 후 곱(개별 효과에 각각 곱하면 마인드셋 몰빵이 압도적으로 우월해진다)
+	// 3) 마인드셋 메타 증폭 — 합산 후 곱(개별 효과에 각각 곱하면 마인드셋 몰빵이 압도적으로 우월해진다)
 	const float Meta = GetRawTraitPercent(BuildingIndex, EBuildingTraitTarget::MetaAmplify);
 	if (!FMath::IsNearlyZero(Meta))
 	{

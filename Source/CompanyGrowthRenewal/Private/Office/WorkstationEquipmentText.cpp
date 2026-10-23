@@ -125,6 +125,7 @@ FWorkstationEquipDelta BuildWorkstationEquipDelta(
 	const TArray<EWorkstationEquipItem> NextItems    = GetWorkstationEquipItems(*NextRow);
 	const TArray<EWorkstationEquipItem> AddedItems   = SubtractItems(NextItems, CurrentItems);
 	const TArray<EWorkstationEquipItem> RemovedItems = SubtractItems(CurrentItems, NextItems);
+	Delta.RemovedItemNames = JoinItemNames(RemovedItems);
 
 	if (AddedItems.Num() == 0)
 	{

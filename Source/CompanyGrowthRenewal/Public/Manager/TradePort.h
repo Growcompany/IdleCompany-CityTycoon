@@ -7,7 +7,7 @@
 #include "Data/WorldMapTypes.h"
 #include "Enum/CompanyType.h"
 #include "Enum/QualityGrade.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "TradePort.generated.h"
 
 /**
@@ -54,7 +54,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "TradePort")
 	FSellResult PreviewSell(ECountryType Port, ECompanyType Company, int32 ProjectIndex, int64 RequestedQty) const;
 
-	/** 제품별 기본 단가 (MVP: ProjectIndex 기반 간단한 곡선) */
+	/** 제품별 기본 판매가 (DT_Recipe.BaseSalePrice). 유효한 레시피가 없으면 0. */
 	UFUNCTION(BlueprintPure, Category = "TradePort")
 	int64 GetBasePrice(ECompanyType Company, int32 ProjectIndex) const;
 
@@ -82,9 +82,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "TradePort")
 	float GetMarketCapBias(ECountryType Port) const;
 
+	/** `/wallet/credit` source ― creditRules.json 과 바이트 단위로 같아야 한다 */
+	static FName GetDiamondCreditSource();
+
+	/**
+	 * 지급 claimKey ― 주문 1건은 한 번만 완전 충족된다.
+	 * OrderId 는 NextOrderId 단조 증가 + 세이브 영속이라 재사용되지 않는다(TradeOrderManager).
+	 */
+	static FString OrderClaimKey(int32 OrderId);
+
 private:
 	/** 등급별 보상 배율 wrapper (QualityGrade.h GetQualityGradeRevenueMultiplier 래핑) */
 	float GetGradeMultiplier(EQualityGrade Grade) const;
+
+	/**
+	 * VIP 주문 완전 충족 보너스 지급 요청(fire-and-forget).
+	 * 지갑은 응답이 콜백 전에 적용하므로 로컬 StoreResource 를 하지 않는다 ― 하면 이중 계상이다.
+	 * `trade.diamond` 는 캡 초과를 거절하지 않고 클램프하므로 실제 지급액은 result.credited 다.
+	 */
+	void RequestDiamondBonusCredit(int32 OrderId, int32 Amount);
 
 	/** 내부 계산 공통 헬퍼. bApply=true면 실제 자원/재고 변동, false면 미리보기만. */
 	FSellResult ComputeSell(ECountryType Port, ECompanyType Company, int32 ProjectIndex, int64 RequestedQty, bool bApply);

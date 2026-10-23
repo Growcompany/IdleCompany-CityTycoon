@@ -384,19 +384,43 @@ ABuildingBaseActor* UEntityManager::GetBuildingByIndex(int32 InBuildingIndex)
 TArray<ABuildingBaseActor*> UEntityManager::GetBuildingsOnPlot(FName PlotId) const
 {
 	TArray<ABuildingBaseActor*> Result;
+	GetBuildingsOnPlot(PlotId, Result);
+	return Result;
+}
+
+void UEntityManager::GetBuildingsOnPlot(FName PlotId, TArray<ABuildingBaseActor*>& OutBuildings) const
+{
+	// 드래그·후보 탐색은 프레임당 수십 번 부른다 — 호출부가 버퍼를 재사용해 힙 할당을 없앨 수 있게 한다.
+	OutBuildings.Reset();
 	if (PlotId.IsNone())
 	{
-		return Result;
+		return;
 	}
 
 	for (ABuildingBaseActor* Building : Buildings)
 	{
 		if (Building && Building->GetOwningPlotId() == PlotId)
 		{
-			Result.Add(Building);
+			OutBuildings.Add(Building);
 		}
 	}
-	return Result;
+}
+
+int32 UEntityManager::CountBuildingsOnPlot(FName PlotId) const
+{
+	if (PlotId.IsNone())
+	{
+		return 0;
+	}
+	int32 Count = 0;
+	for (ABuildingBaseActor* Building : Buildings)
+	{
+		if (Building && Building->GetOwningPlotId() == PlotId)
+		{
+			++Count;
+		}
+	}
+	return Count;
 }
 
 bool UEntityManager::HasFreeCapacityOnPlot(FName PlotId, int32 Capacity) const

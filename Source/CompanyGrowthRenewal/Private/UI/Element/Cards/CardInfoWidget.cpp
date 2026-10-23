@@ -4,6 +4,12 @@
 
 #include "CommonTextBlock.h"
 #include "Components/Image.h"
+#include "Components/ScaleBox.h"
+#include "Engine/World.h"
+#include "Fonts/FontMeasure.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Rendering/SlateRenderer.h"
+#include "TimerManager.h"
 #include "Table/BuildableCardTable.h"
 #include "Table/EmployeeCardTable.h"
 #include "Table/WorkstationCardTable.h"
@@ -75,6 +81,7 @@ void UCardInfoWidget::SetWorkstationInfo(const FWorkstationCardTable& workstatio
 	}
 
 	BuildEntityName->SetText(workstationInfo.DisplayName);
+	QueueNameFitCheck();
 
 	if (UIE_Resource)
 	{
@@ -84,13 +91,15 @@ void UCardInfoWidget::SetWorkstationInfo(const FWorkstationCardTable& workstatio
 
 void UCardInfoWidget::SetDecorationInfo(const FDecorationCardTable& decorationInfo)
 {
-	// 색은 UIE_CardInfo1 브러시 소유 (SetWorkstationInfo 와 동일)
+	// 정보판과 비용 칩 스타일은 카드의 WBP가 소유한다.
 	if (!BuildEntityName)
 	{
 		return;
 	}
 
-	BuildEntityName->SetText(FText::FromName(decorationInfo.Name));
+	BuildEntityName->SetText(decorationInfo.DisplayName);
+	BuildEntityName->SetVisibility(decorationInfo.DisplayName.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
+	QueueNameFitCheck();
 
 	// 가격 표시
 	if (UIE_Resource)
@@ -100,6 +109,43 @@ void UCardInfoWidget::SetDecorationInfo(const FDecorationCardTable& decorationIn
 			resourceWidget->SetResourceType(EResourceType::Money);
 			resourceWidget->SetValue(decorationInfo.Price);
 		}
+		// 무료 장식(바닥 등)에 「0」 가격표를 달지 않는다 ― 자리는 남겨 카드 높이를 맞추고, 재사용 카드면 되살린다
+		if (decorationInfo.Price <= 0)
+		{
+			UIE_Resource->SetVisibility(ESlateVisibility::Hidden);
+		}
+		else if (UIE_Resource->GetVisibility() == ESlateVisibility::Hidden)
+		{
+			UIE_Resource->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		}
+	}
+}
+
+void UCardInfoWidget::QueueNameFitCheck()
+{
+	// 목록 항목은 값을 받을 때 아직 배치 전일 수 있어 칸 폭을 다음 틱에 읽는다
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimerForNextTick(FTimerDelegate::CreateUObject(this, &UCardInfoWidget::WarnIfNameShrinksTooSmall));
+	}
+}
+
+void UCardInfoWidget::WarnIfNameShrinksTooSmall()
+{
+	// 화면은 늘 칸에 맞춘다 ― 하한 아래로 줄 만큼 긴 표시명은 데이터를 줄이라는 신호만 남긴다
+	const UScaleBox* NameFit = BuildEntityName ? Cast<UScaleBox>(BuildEntityName->GetParent()) : nullptr;
+	const float Room = NameFit ? NameFit->GetCachedGeometry().GetLocalSize().X : 0.f;
+	if (Room <= 0.f || BuildEntityName->GetText().IsEmpty() || !FSlateApplication::IsInitialized())
+	{
+		return;
+	}
+	const FSlateFontInfo Font = BuildEntityName->GetFont();
+	const float Need = FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(BuildEntityName->GetText(), Font).X;
+	const float Shown = Need > Room ? Font.Size * Room / Need : Font.Size;
+	if (Shown < MinShownNameSize)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CardInfo] '%s' shrinks to %.1f (< %.0f) in %.0fpx name box - shorten DisplayName"),
+			*BuildEntityName->GetText().ToString(), Shown, MinShownNameSize, Room);
 	}
 }
 

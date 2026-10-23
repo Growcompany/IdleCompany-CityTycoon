@@ -13,7 +13,7 @@ class UCommonTextBlock;
  * 특성 탭 세트 보너스 요약 칩 1개. 활성(그린)/진행중(뮤트)은 WBP 소유 배경 2장의 가시성 토글.
  * 패널(SetBonusBand)이 CalculateSetBonuses 결과대로 런타임 생성.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UTraitSetChipWidget : public UCommonUserWidget
 {
 	GENERATED_BODY()

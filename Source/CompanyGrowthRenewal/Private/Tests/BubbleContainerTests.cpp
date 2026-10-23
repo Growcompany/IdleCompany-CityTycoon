@@ -58,7 +58,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FCGRBubbleContainerLatestDesiredStateTest::RunTest(const FString& Parameters)
 {
 	const auto ReappearCurrent = ResolveDisappearingBubbleTransition(
-		EBubbleType::VaultFull, EBubbleType::VaultFull);
+		EBubbleType::ReportPending, EBubbleType::ReportPending);
 	TestEqual(
 		TEXT("A -> None -> A reappears current type"),
 		ReappearCurrent.NextAnimState,
@@ -72,7 +72,7 @@ bool FCGRBubbleContainerLatestDesiredStateTest::RunTest(const FString& Parameter
 		ReappearCurrent.bResetAnimElapsed);
 
 	const auto ClearReplacement = ResolveDisappearingBubbleTransition(
-		EBubbleType::VaultFull, EBubbleType::None);
+		EBubbleType::ReportPending, EBubbleType::None);
 	TestEqual(
 		TEXT("A -> B -> None keeps removal active"),
 		ClearReplacement.NextAnimState,
@@ -86,7 +86,7 @@ bool FCGRBubbleContainerLatestDesiredStateTest::RunTest(const FString& Parameter
 		ClearReplacement.bResetAnimElapsed);
 
 	const auto ReplaceWithLatest = ResolveDisappearingBubbleTransition(
-		EBubbleType::VaultFull, EBubbleType::NoProject);
+		EBubbleType::ReportPending, EBubbleType::NoProject);
 	TestEqual(
 		TEXT("A -> B -> C keeps disappearance active"),
 		ReplaceWithLatest.NextAnimState,

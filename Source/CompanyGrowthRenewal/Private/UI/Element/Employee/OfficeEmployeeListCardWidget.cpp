@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Element/Employee/OfficeEmployeeListCardWidget.h"
+#include "Global/CGDevSettings.h"
 #include "Data/EntityCardData.h"
 #include "Manager/EmployeeManager.h"
 #include "Manager/TableManagerSubsystem.h"
@@ -21,6 +22,14 @@ void UOfficeEmployeeListCardWidget::NativeConstruct()
 
 	// 버튼 클릭 이벤트 바인딩
 	OnClicked().AddUObject(this, &UOfficeEmployeeListCardWidget::OnButtonClicked);
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		EmployeeManager = GI->GetSubsystem<UEmployeeManager>();
+		if (EmployeeManager)
+		{
+			EmployeeManager->OnEmployeeExperienceChanged.AddUObject(this, &ThisClass::HandleEmployeeExperienceChanged);
+		}
+	}
 
 	// 선택 테두리 초기 숨김
 	if (SelectionBorder)
@@ -40,6 +49,10 @@ void UOfficeEmployeeListCardWidget::NativeDestruct()
 	Super::NativeDestruct();
 
 	OnClicked().RemoveAll(this);
+	if (EmployeeManager)
+	{
+		EmployeeManager->OnEmployeeExperienceChanged.RemoveAll(this);
+	}
 }
 
 void UOfficeEmployeeListCardWidget::NativeOnListItemObjectSet(UObject* ListItemObject)
@@ -205,7 +218,7 @@ void UOfficeEmployeeListCardWidget::LoadPortraitImage(int32 EmployeeID)
 	BasePath = FPaths::ProjectSavedDir();
 #endif
 
-	FString FilePath = BasePath / TEXT("Portraits") / (FString::FromInt(EmployeeID) + TEXT(".png"));
+	FString FilePath = BasePath / UCGDevSettings::GetPortraitFolderName() / (FString::FromInt(EmployeeID) + TEXT(".png"));
 
 	// 파일 존재 확인
 	if (!FPaths::FileExists(FilePath))
@@ -319,7 +332,6 @@ void UOfficeEmployeeListCardWidget::UpdateLevelUpIndicator()
 		return;
 	}
 
-	// EmployeeManager에서 필요 경험치 확인
 	UGameInstance* GI = GetWorld()->GetGameInstance();
 	if (!GI)
 	{
@@ -327,16 +339,14 @@ void UOfficeEmployeeListCardWidget::UpdateLevelUpIndicator()
 		return;
 	}
 
-	UEmployeeManager* EmployeeManager = GI->GetSubsystem<UEmployeeManager>();
-	if (!EmployeeManager)
+	UEmployeeManager* Manager = GI->GetSubsystem<UEmployeeManager>();
+	if (!Manager)
 	{
 		LevelUpImage->SetVisibility(ESlateVisibility::Collapsed);
 		return;
 	}
 
-	// 현재 레벨의 최대 경험치 확인
-	int32 MaxExp = EmployeeManager->GetMaxExperienceForLevel(EmployeeData.Level);
-	bool bCanLevelUp = (EmployeeData.Experience >= static_cast<float>(MaxExp));
+	const bool bCanLevelUp = Manager->CanLevelUpEmployee(EmployeeData.EmployeeID);
 
 	if (bCanLevelUp)
 	{
@@ -358,4 +368,9 @@ void UOfficeEmployeeListCardWidget::UpdateLevelUpIndicator()
 			StopAnimation(LevelUpFloatAnim);
 		}
 	}
+}
+
+void UOfficeEmployeeListCardWidget::HandleEmployeeExperienceChanged(int32 EmployeeID)
+{
+	if (EmployeeID == EmployeeData.EmployeeID) UpdateLevelUpIndicator();
 }

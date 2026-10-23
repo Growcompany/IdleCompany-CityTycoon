@@ -63,7 +63,7 @@ public:
 	void PlayPlacementLandSequence();
 
 	// 건물 완성/업그레이드 시 VFX 재생
-	// SpawnHeight: VFX 스폰 높이 (0 = 건물 바닥, finalHeight = 새로 추가된 층 아래)
+	// SpawnHeight: Body 컴포넌트 로컬의 새 층 하단 높이. 0이면 Base 메시의 바닥 중심.
 	void PlayBuildCompleteVFX(float SpawnHeight = 0.0f);
 
 	// BoxCollider 높이 재계산
@@ -118,11 +118,16 @@ public:
 	// (산업은 건설 시점에 베이크되므로 None 분기 없음)
 	void OpenBuildingUI(AMainMapPlayerController* MainPC);
 
-	// 창문 조명 토글 (프로젝트 유무에 따라 호출)
+	// 창문 점등 비율 전환 (프로젝트 유무에 따라 호출). 발광색은 양쪽 상태 모두 켜 둔 채 켜지는 창문 수만 바뀐다.
 	void SetWindowLightActive(bool bActive);
+	// 건물 고유 조명색. 외부 표시용 복사본에만 사용한다.
+	FLinearColor GetWindowLightSourceColor() const { return Window_Emissive_Color; }
 
-	// [치트] 전역 강제 점등 — true 면 SetWindowLightActive(false) 요청을 무시하고 모든 건물 창문을 항상 켠 상태로 유지.
-	// (조명 off 경로가 SetWindowLightActive 단일 창구뿐이라, 여기서 클램프하면 운영 여부/버블 재평가와 무관하게 고정된다.)
+	float GetIdleWindowLightDensity() const { return IdleWindowLightDensity; }
+	float GetActiveWindowLightDensity() const { return ActiveWindowLightDensity; }
+
+	// [치트] 전역 강제 점등 — true 면 SetWindowLightActive(false) 요청을 무시하고 모든 건물을 진행중 비율로 유지.
+	// (비율 전환 경로가 SetWindowLightActive 단일 창구뿐이라, 여기서 클램프하면 운영 여부/버블 재평가와 무관하게 고정된다.)
 	static void SetForceWindowLightsOn(bool bForce) { bForceWindowLightsOn = bForce; }
 	static bool IsForceWindowLightsOn() { return bForceWindowLightsOn; }
 
@@ -148,8 +153,19 @@ public:
 	// TopModule위치만 계산해주는 함수
 	float CalculateTopModuleHeight() const;
 
-	// 건물 전체 높이 계산 (Top Module 높이 포함)
+	// 반복 Body의 맨 위 일반층 바닥 높이(cm, 액터 로컬). 유효하지 않으면 출력값을 보존한다.
+	bool TryGetOfficeFloorHeight(float& OutLocalHeightCm) const;
+
+	// 건물 전체 높이 (Top Module 포함) — **로컬(메시) 단위**. 모듈 적층이 GetLocalBounds 기준이라 표시 배수가 안 들어 있다.
+	// 옥상 비콘처럼 스케일된 컴포넌트 안에 배치하는 용도. 월드 Z 에 더할 거면 아래 World 버전을 쓸 것.
 	float GetTotalBuildingHeight() const;
+
+	// 액터 원점에서 본체 메시 월드 바운드 상단까지의 높이. 컴포넌트와 액터의 실제 변환을 모두 반영한다.
+	// 카메라 프레이밍과 말풍선 앵커는 GetActorLocation().Z 에 이 값을 더해 꼭대기를 구한다.
+	float GetTotalBuildingHeightWorld() const;
+
+	// DT_Building 의 MeshScale 로 설정한 메시 컴포넌트 상대 배수. 액터의 월드 스케일은 별도다.
+	float GetMeshScale() const { return AppliedMeshScale; }
 
 	// 버블/UI 앵커용 월드 위치 (메시 수평 중심 + 건물 꼭대기)
 	FVector GetBubbleAnchorPosition() const;
@@ -194,31 +210,18 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Building|Beacon")
 	UInstancedStaticMeshComponent* BeaconISM;
 
-	// 키스톤 모뉴먼트 영향권 반투명 돔(엔진 Sphere 의 위쪽 반구만 보임 — 아래 반구는 불투명 지면에 가림). 비-모뉴먼트는 항상 숨김.
-	UPROPERTY(VisibleAnywhere, Category = "Building|Keystone")
-	UStaticMeshComponent* KeystoneDomeMesh = nullptr;
-
-	// 키스톤 영향권 멤버일 때 건물을 감싸는 파란 Candrop 박스(엔진 Cube + M_Placeable_BuffBlue). 건물 메시는 안 건드림. 기본 숨김.
-	UPROPERTY(VisibleAnywhere, Category = "Building|Keystone")
-	UStaticMeshComponent* AuraBoxSMC = nullptr;
-
-	// AuraBoxSMC 의 동적 머티리얼 — 건물 높이에 맞춰 FadeHeight 주입(건물마다 일관된 페이드). 1회 생성 후 재사용.
-	UPROPERTY()
-	UMaterialInstanceDynamic* AuraBoxMID = nullptr;
-
-	// 가림 고스트용 골조 박스(엔진 Cube + M_BuildingGhost). AuraBoxSMC 와 동시 활성될 수 있어 별도 인스턴스.
+	// 가림 고스트용 골조 박스(엔진 Cube + M_BuildingGhost). 카메라 포커스 가림 처리(FocusOcclusionHandler) 전용.
 	UPROPERTY(VisibleAnywhere, Category = "Building|Ghost")
 	UStaticMeshComponent* GhostBoxSMC = nullptr;
+
+	// 외장 메시의 실제 바닥 윤곽을 따라가는 모바일 지면 접촉 음영.
+	UPROPERTY(VisibleAnywhere, Category = "Building|Visual")
+	UStaticMeshComponent* GroundContactSMC = nullptr;
 
 	UPROPERTY()
 	UMaterialInstanceDynamic* GhostBoxMID = nullptr;
 
 	bool bOccluderGhosted = false;
-
-	// 고스트 복원 시 되살릴 상태의 출처. 스냅샷이 아니라 출처를 들고 재계산해야
-	// 고스트 중 낮/밤이 바뀌어도 복원이 틀리지 않는다.
-	bool bAuraHighlightOn = false;
-	bool bKeystoneRingOn = false;
 
 	// 이 높이(cm) 미만 건물은 비콘 미점등(인스턴스 0).
 	// **0 = 게이팅 OFF(모든 건물 점등) — 2026-07-23 사용자 육안 확인으로 정식 채택.**
@@ -302,11 +305,19 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Window Light")
 	FLinearColor Window_Emissive_Color;
 
+	// 프로젝트 없는 평시의 점등 비율. 머티리얼이 액터 위치로 ±0.05 를 더해 건물마다 흔든다(10~20%).
+	UPROPERTY(EditDefaultsOnly, Category = "Window Light", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float IdleWindowLightDensity = 0.15f;
+
+	// 프로젝트 진행 중의 점등 비율 (25~35%)
+	UPROPERTY(EditDefaultsOnly, Category = "Window Light", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ActiveWindowLightDensity = 0.30f;
+
 	// 창문 색상 초기화 (랜덤 선택)
 	void InitializeWindowLightColor();
 
-	// 창문 색상을 머티리얼에 적용
-	void ApplyWindowLightColor();
+	// 창문 발광색 + 점등 비율을 머티리얼에 적용
+	void ApplyWindowLightState();
 
 	// 프로젝트 유무에 따른 창문 조명 활성/비활성
 	bool bWindowLightActive = true;
@@ -322,9 +333,7 @@ protected:
 
 	// day/night 전환 시 옥상 비콘 ISM 가시성만 토글(낮=숨김=렌더0, 밤=표시) — 인스턴스는 보존.
 	UFUNCTION()
-	void HandleSunRise();
-	UFUNCTION()
-	void HandleSunSet();
+	void HandleVisualTimeChanged();
 	void ApplyNightVisibility(bool bNight);
 
 	TWeakObjectPtr<ATimeCycleManager> CachedTimeCycle;
@@ -357,6 +366,10 @@ private:
 	bool bIsFloating = false;
 	float OriginalZ = 0.0f;
 	float FloatingHeight = 0.0f;
+
+	// ConstructVisuals 가 DT_Building 의 MeshScale 로 확정한 표시 배수. 액터 스케일이 아니라 메시 컴포넌트에
+	// 걸린다. 본체의 월드 높이는 이 캐시 대신 실제 컴포넌트 바운드로 구한다.
+	float AppliedMeshScale = 1.0f;
 	float FloatingAlpha = 0.0f;
 	FTimerHandle FloatingTimerHandle;
 	bool bFloatingUp = true;
@@ -368,6 +381,9 @@ private:
 	// 통짜 floating(배치용)과 별개 채널: "층이 하나 쌓였다"가 읽히려면 새 층만 움직여야 함
 	void StartNewFloorRiseAnimation();
 	void UpdateNewFloorRiseAnimation();
+	void ShowPendingFloorRecruitTicketNotification();
+	// 지급은 즉시 완료하고, 연속 증축의 실제 지급량만 마지막 층 연출 종료까지 합산한다.
+	int32 PendingFloorRecruitTicketCount = 0;
 	FTimerHandle NewFloorRiseTimerHandle;
 	float NewFloorRiseElapsed = 0.0f;   // 경과 시간(초)
 	float NewFloorRiseDrop = 0.0f;      // 시작 낙차(cm) — 층 높이 기반
@@ -380,12 +396,6 @@ private:
 	UPROPERTY()
 	TMap<EBuildingEnhancementType, int32> EnhancementLevels;
 
-	// ========== 키스톤 모뉴먼트(특수빌딩) ==========
-
-	// 키스톤 모뉴먼트 여부(ConstructVisuals 시 FBuildingData에서 캐시).
-	UPROPERTY()
-	bool bIsKeystoneMonument = false;
-
 	// footprint 칸수(가로x세로). ConstructVisuals 시 FBuildingData에서 캐시 — 증축 비용이 매 홀드(10Hz) 참조한다.
 	// 0 = 아직 캐시 안 됨(센티널). 1 을 기본값으로 두면 "1x1 건물"과 "캐시 실패"가 구분되지 않아
 	// 3x3 이 1/9 가격에 증축되는 걸 아무도 못 잡는다 — 가격은 fail-open 하면 안 되는 축이다.
@@ -393,32 +403,22 @@ private:
 	int32 CachedFootprintCells = 0;
 
 public:
-	// 증축 비용 배수의 단일 출처 — 표시(패널)와 청구(액터)가 반드시 같은 값을 써야 한다.
-	// 캐시가 비어 있으면 DT 를 직접 조회하고, 그마저 실패하면 Warning 을 남긴다.
+	// 칸수(가로×세로). 캐시가 비어 있으면 DT 를 직접 조회하고, 그마저 실패하면 Warning 을 남긴다.
 	int32 GetFootprintCells() const;
 
-	// ========== 키스톤 모뉴먼트(특수빌딩) ==========
-
-	bool IsKeystoneMonument() const { return bIsKeystoneMonument; }
-	// 모뉴먼트 레벨은 층수 강화(BuildingFloor)에서 파생 — 층을 올리면 영향권/패시브가 함께 성장
-	int32 GetMonumentLevel() const { return 1 + GetEnhancementLevel(EBuildingEnhancementType::BuildingFloor); }
-	// 현재 레벨 기준 영향권(돔) 반경(cm). 비-모뉴먼트/글로벌은 0. UpdateKeystoneRing 의 반경식과 동일.
-	float GetKeystoneAuraRadiusCm() const;
-	// 현재 레벨 기준 자체 패시브 산출(/tick). FBuildingData.KeystoneAura에서 산출.
-	int64 GetMonumentPassiveOutput() const;
-
-	// 영향권 시각화: 모뉴먼트면 반경에 맞춰 바닥 링 표시, 아니면 숨김
-	void UpdateKeystoneRing();
-
-	// 영향권 링 표시 토글 — 관리 패널이 열려 선택된 모뉴먼트일 때만 보이게
-	void SetKeystoneRingVisible(bool bVisible);
+	// 증축 비용 배수의 단일 출처(기본 건설비, 벽돌, 누진 전) — 표시(패널)와 청구(액터)가 반드시 같은 값을 써야 한다.
+	int64 GetBaseBuildCostBricks() const;
 
 	// 건물 본체 메시(MainMesh + Body/Top/TopEmpty ISM)의 월드 바운드 합산.
-	// 고스트 박스/아우라 박스가 자기 바운드로 부풀지 않도록 박스 컴포넌트는 제외한다.
+	// 고스트 박스가 자기 바운드로 부풀지 않도록 박스 컴포넌트는 제외한다.
 	FBox GetBuildingWorldBounds() const;
 
-	// 이 빌딩이 받는 버프(키스톤 영향권 멤버) 표시: 건물을 감싸는 파란 Candrop 박스(M_Placeable_BuffBlue) 토글. 건물 본체는 안 건드림.
-	void SetAuraHighlight(bool bOn);
+	// DT의 논리 칸수와 공통 건물 칸 크기로 정한 점유 반경(cm).
+	// false는 회전 전 크기, true는 현재 Yaw를 적용한 월드 XY AABB다.
+	FVector2D GetPlacementFootprintHalfExtent(bool bWorldAxes = true) const;
+
+	// 오프피벗 메시의 실제 XY 중심을 배치 중심으로 사용한다. Z는 액터 원점을 유지한다.
+	FVector GetPlacementFootprintCenter() const;
 
 	// 가림 고스트 — 본체 메시를 숨기고 반투명 골조 박스로 대체한다(카메라 포커스 가림 해소).
 	void SetOccluderGhost(bool bOn);
@@ -439,7 +439,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Building Enhancement")
 	bool UpgradeEnhancement(EBuildingEnhancementType EnhancementType, int32 Count = 1);
 
-	// 실제 구매 권위 판정. 튜토리얼 중에는 빌드업만, 완료 후에는 빌딩 티어/키스톤 규칙을 적용한다.
+	// 실제 구매 권위 판정. 튜토리얼 중에는 빌드업만, 완료 후에는 빌딩 티어 규칙을 적용한다.
 	UFUNCTION(BlueprintPure, Category = "Building Enhancement")
 	bool IsEnhancementPurchaseAllowed(EBuildingEnhancementType EnhancementType) const;
 

@@ -114,9 +114,9 @@ void UEntityCardWidgetBase::OnIconLoaded(FSoftObjectPath LoadedPath)
 
 	if (UTexture2D* Tex = Cast<UTexture2D>(LoadedObj))
 	{
-		if (UImage* Image = GetEntityImage())
+		if (UIE_EntityCardFrame)
 		{
-			Image->SetBrushFromTexture(Tex);
+			UIE_EntityCardFrame->SetEntityImage(Tex);
 		}
 	}
 }

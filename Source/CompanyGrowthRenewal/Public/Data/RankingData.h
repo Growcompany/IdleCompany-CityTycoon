@@ -59,6 +59,11 @@ struct FCitySnapshotBuilding
 {
 	GENERATED_BODY()
 
+	// 건물에 실제 적립/지급된 누적 수익. 미기록은 0으로 대표 건물 높이 기준을 사용한다.
+	UPROPERTY()
+	double LifetimeRevenueEarned = 0.0;
+
+
 	// DataTable 행 이름 (건물 메쉬 결정)
 	UPROPERTY()
 	FName InteractableName;

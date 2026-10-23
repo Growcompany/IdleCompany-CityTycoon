@@ -10,10 +10,11 @@
 class UTextBlock;
 class UImage;
 class UMaterialInstanceDynamic;
+class UTexture2D;
 
 /**
- * 가챠 멀티 리빌 사이드 사원증 (인쇄 완료 상태 — 도장/텍스트 정적, 사진만 라이브 RT UV 크롭).
- * 트리는 센터 사원증(UI_EmployeeGachaPresentation IdCardBox)의 560x773 미러 — 표시는 RenderScale 로 축소.
+ * 가챠 멀티 리빌 사이드 사원증. 일반 뽑기는 라이브 RT, 오피스 입장은 저장 초상화를 표시한다.
+ * 기본 트리는 센터 사원증(UI_EmployeeGachaPresentation IdCardBox)의 560x773 미러.
  * 등급 연출: 레어+ 시트 광택 스윕 / 에픽+ 배후광 브리딩 (자체 NativeTick — 호스트는 배치/딜링만).
  */
 UCLASS()
@@ -25,6 +26,7 @@ public:
 	void SetCardData(const FGachaResultData& Result, int32 IdOrdinal,
 		const FText& DeptDisplayName, const FString& RankDisplayName);
 	void SetPhotoMaterial(UMaterialInstanceDynamic* MID);
+	bool SetPhotoTexture(UTexture2D* Texture);
 
 protected:
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;

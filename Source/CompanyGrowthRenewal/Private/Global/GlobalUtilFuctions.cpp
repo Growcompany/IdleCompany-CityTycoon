@@ -4,11 +4,18 @@
 #include "Global/GlobalUtilFunctions.h"
 
 #include "Components/Image.h"
+#include "Engine/Texture2D.h"
+#include "UI/Element/Common/IconBrushUtils.h"
+#include "Components/HorizontalBoxSlot.h"
+#include "Components/VerticalBoxSlot.h"
+#include "Components/OverlaySlot.h"
+#include "Components/BorderSlot.h"
 #include "Components/ProgressBar.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/SizeBox.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/SlateUser.h"
+#include "Fonts/FontMeasure.h"
 
 FVector UGlobalUtilFunctions::SteppedPosition(const FVector& position)
 {
@@ -83,6 +90,50 @@ namespace
 		uint64 P = 1ull;
 		for (int32 i = 0; i < Exp; ++i) { P *= 10ull; }
 		return P;
+	}
+
+	// 4자리 그룹 단위. 인덱스 = 10^(4*i) 자리.
+	static const TCHAR* const KoreanGroupUnits[] = { TEXT(""), TEXT("만"), TEXT("억"), TEXT("조"), TEXT("경") };
+	constexpr int32 KoreanGroupMax = UE_ARRAY_COUNT(KoreanGroupUnits);
+
+	// INT64_MIN 은 단순 부호반전이 오버플로하므로 2의 보수로 절댓값을 만든다.
+	uint64 AbsU64(int64 Value)
+	{
+		return (Value < 0) ? (~static_cast<uint64>(Value) + 1ull) : static_cast<uint64>(Value);
+	}
+
+	int32 CountGroups(uint64 Abs)
+	{
+		int32 Groups = 1;
+		while (Abs >= 10000ull && Groups < KoreanGroupMax)
+		{
+			Abs /= 10000ull;
+			++Groups;
+		}
+		return Groups;
+	}
+
+	// 같은 자릿수의 최악폭 모양 — 숫자는 전부 '8', 빈 그룹 생략 없음.
+	// 실제 문자열은 이보다 넓어질 수 없어서 값이 변해도 고른 상세도가 유지된다.
+	FString BuildDetailProbe(uint64 Abs, int32 TotalGroups, int32 UseGroups, bool bNegative)
+	{
+		const int32 TopDigits = FMath::Max(1, FString::Printf(TEXT("%llu"), Abs).Len() - 4 * (TotalGroups - 1));
+
+		FString Probe;
+		if (bNegative)
+		{
+			Probe.AppendChar(TEXT('-'));
+		}
+		for (int32 i = 0; i < UseGroups; ++i)
+		{
+			if (i > 0)
+			{
+				Probe.AppendChar(TEXT(' '));
+			}
+			Probe.Append(FString::ChrN((i == 0) ? TopDigits : 4, TEXT('8')));
+			Probe.Append(KoreanGroupUnits[TotalGroups - 1 - i]);
+		}
+		return Probe;
 	}
 }
 
@@ -204,6 +255,80 @@ FText UGlobalUtilFunctions::FormatExactNumber(int64 Value)
 	return FText::AsNumber(Value);
 }
 
+FText UGlobalUtilFunctions::FormatKoreanUnitsDetailed(int64 Value, int32 MaxGroups)
+{
+	const uint64 Abs = AbsU64(Value);
+	if (Abs < 10000ull)
+	{
+		return FText::AsNumber(Value);
+	}
+
+	const int32 TotalGroups = CountGroups(Abs);
+	const int32 UseGroups = FMath::Clamp(MaxGroups, 1, TotalGroups);
+
+	FString Out;
+	int32 Printed = 0;
+	for (int32 GroupIdx = TotalGroups - 1; GroupIdx >= 0 && Printed < UseGroups; --GroupIdx)
+	{
+		const uint64 GroupValue = (Abs / PowTen(4 * GroupIdx)) % 10000ull;
+		if (GroupValue == 0ull)
+		{
+			continue; // "1억 0만 2342" 를 만들지 않는다 — 빈 그룹은 상세도를 소모하지 않고 건너뛴다
+		}
+		if (!Out.IsEmpty())
+		{
+			Out.AppendChar(TEXT(' '));
+		}
+		Out.Appendf(TEXT("%llu%s"), GroupValue, KoreanGroupUnits[GroupIdx]);
+		++Printed;
+	}
+
+	return FText::FromString(Value < 0 ? TEXT("-") + Out : Out);
+}
+
+int32 UGlobalUtilFunctions::SelectAmountDetailGroups(int64 Value, float AvailableWidthPx,
+	TFunctionRef<float(const FString&)> MeasureWidth)
+{
+	const uint64 Abs = AbsU64(Value);
+	if (Abs < 10000ull || AvailableWidthPx <= 0.f)
+	{
+		return 0; // 단위가 없으면 상세표기와 축약이 같은 문자열 — 폴백이 곧 정답
+	}
+
+	const int32 TotalGroups = CountGroups(Abs);
+	// 하한은 2그룹 — 1그룹("1억")은 축약("1.34억")보다 정보가 적다.
+	for (int32 Groups = TotalGroups; Groups >= 2; --Groups)
+	{
+		if (MeasureWidth(BuildDetailProbe(Abs, TotalGroups, Groups, Value < 0)) <= AvailableWidthPx)
+		{
+			return Groups;
+		}
+	}
+	return 0;
+}
+
+FText UGlobalUtilFunctions::FitAmountToWidth(int64 Value, float AvailableWidthPx, const FSlateFontInfo& Font,
+	ENumberRoundMode FallbackRoundMode)
+{
+	// 상세표기는 한국식 단위 전제 — 서양식으로 전환된 빌드에서는 축약만 쓴다.
+	const bool bCanMeasure = FSlateApplication::IsInitialized() && FSlateApplication::Get().GetRenderer();
+	if (!bCanMeasure || ResolveAbbrevStyle(ENumberAbbrevStyle::Auto) != ENumberAbbrevStyle::KoreanUnit)
+	{
+		return AbbreviateNumber(Value, ENumberAbbrevStyle::Auto, FallbackRoundMode);
+	}
+
+	const TSharedRef<FSlateFontMeasure> Measurer = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
+	const int32 Groups = SelectAmountDetailGroups(Value, AvailableWidthPx,
+		[&Measurer, &Font](const FString& Candidate)
+		{
+			return static_cast<float>(Measurer->Measure(Candidate, Font).X);
+		});
+
+	return (Groups > 0)
+		? FormatKoreanUnitsDetailed(Value, Groups)
+		: AbbreviateNumber(Value, ENumberAbbrevStyle::Auto, FallbackRoundMode);
+}
+
 FText UGlobalUtilFunctions::FormatDurationKorean(double Seconds)
 {
 	// 올림 — 남은 시간을 실제보다 짧게 약속하지 않는다.
@@ -249,6 +374,51 @@ FString UGlobalUtilFunctions::FormatRatePerBestUnit(int64 PerSecond, float Secon
 	else if (Interval > 1.f) { Label = TEXT("분당");   Scaled = PerSecond * 60; }
 
 	return FString::Printf(TEXT("%s +%s"), Label, *AbbreviateNumber(Scaled).ToString());
+}
+
+void UGlobalUtilFunctions::ApplyWidgetIcon(UImage* Icon, const TSoftObjectPtr<UTexture2D>& Texture,
+	FVector2D IconSize, FMargin IconPadding, bool bCollapseWhenEmpty)
+{
+	if (!Icon)
+	{
+		return;
+	}
+
+	UTexture2D* Tex = Texture.IsNull() ? nullptr : Texture.LoadSynchronous();
+	if (!Tex)
+	{
+		Icon->SetVisibility(bCollapseWhenEmpty ? ESlateVisibility::Collapsed : ESlateVisibility::Hidden);
+		return;
+	}
+
+	// ImageSize 가 (0,0) 이면 WBP 저작 크기를 그대로 둔다 (CGIconBrush 규약)
+	CGIconBrush::ApplyResource(Icon, Tex, IconSize);
+	Icon->SetVisibility(ESlateVisibility::HitTestInvisible);
+
+	UPanelSlot* IconSlot = Icon->Slot;
+	if (UHorizontalBoxSlot* HSlot = Cast<UHorizontalBoxSlot>(IconSlot))   { HSlot->SetPadding(IconPadding); }
+	else if (UVerticalBoxSlot* VSlot = Cast<UVerticalBoxSlot>(IconSlot))  { VSlot->SetPadding(IconPadding); }
+	else if (UOverlaySlot* OSlot = Cast<UOverlaySlot>(IconSlot))          { OSlot->SetPadding(IconPadding); }
+	else if (UBorderSlot* BSlot = Cast<UBorderSlot>(IconSlot))            { BSlot->SetPadding(IconPadding); }
+}
+
+UTexture2D* UGlobalUtilFunctions::GetDisciplineIcon(int32 SlotIdx)
+{
+	// 인덱스 = EProductionDiscipline 순서(Plan/Dev/Graphics/Sound/Server/QA).
+	// 파일명만 Graphics 가 아니라 Art 라 3번째만 이름이 어긋나 보이는 게 정상이다.
+	static const TCHAR* DiscIconPaths[6] = {
+		TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Plan.T_UIIcon_Disc_Plan"),
+		TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Dev.T_UIIcon_Disc_Dev"),
+		TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Art.T_UIIcon_Disc_Art"),
+		TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Sound.T_UIIcon_Disc_Sound"),
+		TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_Server.T_UIIcon_Disc_Server"),
+		TEXT("/Game/CompanyGrowth/UI/Textures/UIIcon/T_UIIcon_Disc_QA.T_UIIcon_Disc_QA"),
+	};
+	if (SlotIdx < 0 || SlotIdx >= UE_ARRAY_COUNT(DiscIconPaths))
+	{
+		return nullptr;
+	}
+	return TSoftObjectPtr<UTexture2D>(FSoftObjectPath(DiscIconPaths[SlotIdx])).LoadSynchronous();
 }
 
 FLinearColor UGlobalUtilFunctions::GetStepColor(int32 Step)

@@ -15,7 +15,7 @@ class UCloseButtonWidget;
  * - 프로필 정보 (HQ, 등급, 빌딩, 직원, 매출)
  * - 도시 방문 버튼
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API URankingPlayerDetailWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()

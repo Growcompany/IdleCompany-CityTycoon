@@ -29,6 +29,7 @@ namespace CGUISoundTags
 	UE_DEFINE_GAMEPLAY_TAG(RewardDiamond,         "UI.Sound.Reward.Diamond");
 	UE_DEFINE_GAMEPLAY_TAG(RewardBrick,           "UI.Sound.Reward.Brick");
 	UE_DEFINE_GAMEPLAY_TAG(BrickPop,              "UI.Sound.Reward.BrickPop");
+	UE_DEFINE_GAMEPLAY_TAG(BuildingIncome,        "UI.Sound.Reward.BuildingIncome");
 	UE_DEFINE_GAMEPLAY_TAG(RewardCompanyLevelUp,  "UI.Sound.Reward.CompanyLevelUp");
 	UE_DEFINE_GAMEPLAY_TAG(RewardGeneric,         "UI.Sound.Reward.Generic");
 
@@ -49,9 +50,37 @@ namespace CGUISoundTags
 	UE_DEFINE_GAMEPLAY_TAG(GachaShine,            "UI.Sound.Gacha.Shine");
 	UE_DEFINE_GAMEPLAY_TAG(GachaStamp,            "UI.Sound.Gacha.Stamp");
 
+	UE_DEFINE_GAMEPLAY_TAG(AttendanceStamp,       "UI.Sound.Attendance.Stamp");
+
 	UE_DEFINE_GAMEPLAY_TAG(PotentialReroll,       "UI.Sound.Potential.Reroll");
 
 	UE_DEFINE_GAMEPLAY_TAG(Catch,                 "UI.Sound.Catch");
+
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxLand,          "UI.Sound.GachaBox.Land");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxZip,           "UI.Sound.GachaBox.Zip");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxZipEnd,        "UI.Sound.GachaBox.ZipEnd");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxJolt1,         "UI.Sound.GachaBox.Jolt1");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxJolt2,         "UI.Sound.GachaBox.Jolt2");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxLid,           "UI.Sound.GachaBox.Lid");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxLidHigh,       "UI.Sound.GachaBox.LidHigh");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxDeal1,         "UI.Sound.GachaBox.Deal1");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxDeal10,        "UI.Sound.GachaBox.Deal10");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxDeal30,        "UI.Sound.GachaBox.Deal30");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxTok,           "UI.Sound.GachaBox.Tok");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxTok2,          "UI.Sound.GachaBox.Tok2");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxTok3,          "UI.Sound.GachaBox.Tok3");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxFlipA,         "UI.Sound.GachaBox.FlipA");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxStamp,         "UI.Sound.GachaBox.Stamp");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxRiseS,         "UI.Sound.GachaBox.RiseS");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxRiseSS,        "UI.Sound.GachaBox.RiseSS");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxRiseSSS,       "UI.Sound.GachaBox.RiseSSS");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxRiseStamp,     "UI.Sound.GachaBox.RiseStamp");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxHitS,          "UI.Sound.GachaBox.HitS");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxHitSS,         "UI.Sound.GachaBox.HitSS");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxHitSSS,        "UI.Sound.GachaBox.HitSSS");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxSettle,        "UI.Sound.GachaBox.Settle");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxClick,         "UI.Sound.GachaBox.Click");
+	UE_DEFINE_GAMEPLAY_TAG(GachaBoxZipLoop,       "UI.Sound.GachaBox.ZipLoop");
 
 	UE_DEFINE_GAMEPLAY_TAG(GroupAll,              "UI.Sound");
 	UE_DEFINE_GAMEPLAY_TAG(GroupNotification,     "UI.Sound.Notification");

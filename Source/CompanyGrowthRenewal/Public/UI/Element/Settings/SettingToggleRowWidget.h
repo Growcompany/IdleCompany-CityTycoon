@@ -10,11 +10,12 @@ class UBorder;
 class UCheckBox;
 class UImage;
 class UTextBlock;
+class UTexture2D;
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnSettingToggleChanged, bool);
 
 // 설정 행 부품 — 라벨 + 보조 캡션 + 토글 (연출 감소 등 on/off 설정)
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API USettingToggleRowWidget : public UUserWidget
 {
 	GENERATED_BODY()
@@ -29,12 +30,25 @@ public:
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
+	virtual void NativePreConstruct() override;
 
 	UPROPERTY(meta = (BindWidget))
 	UTextBlock* LabelText;
 
 	UPROPERTY(meta = (BindWidget))
 	UTextBlock* CaptionText;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UImage* RowIcon;
+
+	UPROPERTY(EditAnywhere, Category = "Setting Row|Icon")
+	TSoftObjectPtr<UTexture2D> IconTexture;
+
+	UPROPERTY(EditAnywhere, Category = "Setting Row|Icon")
+	FVector2D IconSize = FVector2D(42.0f, 42.0f);
+
+	UPROPERTY(EditAnywhere, Category = "Setting Row|Icon")
+	FMargin IconPadding = FMargin(0.0f);
 
 	UPROPERTY(meta = (BindWidget))
 	UCheckBox* ToggleCheck;
@@ -46,10 +60,20 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	UBorder* TrackBorder;
 
+	UPROPERTY(meta = (BindWidgetOptional))
+	UBorder* TrackOn;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UBorder* TrackOff;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* SelectionText;
+
 private:
 	UFUNCTION()
 	void HandleCheckChanged(bool bIsChecked);
 
 	// 노브 위치 + 트랙 색을 on/off 상태에 맞춤
 	void RefreshSwitchVisual(bool bOn);
+	void ApplyIconProperties();
 };

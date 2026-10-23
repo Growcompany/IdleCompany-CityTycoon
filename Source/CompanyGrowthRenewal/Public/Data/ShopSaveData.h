@@ -1,9 +1,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Data/EquipmentTicketShopData.h"
 #include "ShopSaveData.generated.h"
 
-// 상점 구매 상태 (게임 전체 1개 — 한도 카운트 + 마지막 리셋 시각)
+// 상점 구매 상태 (게임 전체 1개 — 한도 카운트 + 마지막 리셋 키)
 USTRUCT(BlueprintType)
 struct FShopSaveData
 {
@@ -14,8 +15,15 @@ struct FShopSaveData
 	TMap<FName, int32> PurchaseCounts;
 
 	UPROPERTY(SaveGame)
-	FDateTime LastDailyReset = FDateTime::MinValue();
+	TMap<FName, FString> EquipmentTicketResetPeriods;
 
 	UPROPERTY(SaveGame)
-	FDateTime LastWeeklyReset = FDateTime::MinValue();
+	TMap<FGuid, FEquipmentTicketShopReceipt> EquipmentTicketPurchases;
+
+	// 마지막으로 리셋을 적용한 게임 하루/주 키 (UGameClockSubsystem::GetDayKey 형식 "YYYY-MM-DD"). 빈값 = 아직 없음
+	UPROPERTY(SaveGame)
+	FString LastDailyKey;
+
+	UPROPERTY(SaveGame)
+	FString LastWeeklyKey;
 };

@@ -12,6 +12,8 @@ class UImage;
 class UCommonTextBlock;
 class UBorder;
 class UWidgetAnimation;
+class UEmployeeManager;
+class UOfficeEmployeeListCardWidget;
 
 // 직원 카드 클릭 델리게이트 (EmployeeID, 카드 포인터)
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnOfficeEmployeeListCardClicked, int32, EmployeeID, UOfficeEmployeeListCardWidget*, Card);
@@ -22,7 +24,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnOfficeEmployeeListCardClicked, i
  * - ListView Entry로 사용
  * - 직원 이미지, 부서 아이콘, 레벨, 이름/직급 표시
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOfficeEmployeeListCardWidget : public UCommonButtonBase, public IUserObjectListEntry
 {
 	GENERATED_BODY()
@@ -63,6 +65,7 @@ protected:
 	FVector2D PortraitDisplaySize = FVector2D(120.f, 160.f);
 
 private:
+	UPROPERTY() TObjectPtr<UEmployeeManager> EmployeeManager;
 	// 직원 데이터
 	UPROPERTY()
 	FEmployeeInstance EmployeeData;
@@ -81,6 +84,7 @@ private:
 
 	// 레벨업 가능 여부에 따라 표시 업데이트
 	void UpdateLevelUpIndicator();
+	void HandleEmployeeExperienceChanged(int32 EmployeeID);
 
 public:
 	// 직원 정보 설정

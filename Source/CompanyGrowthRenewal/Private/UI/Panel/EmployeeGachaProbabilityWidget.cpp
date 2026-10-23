@@ -56,7 +56,9 @@ void UEmployeeGachaProbabilityWidget::BuildTierRows(UVerticalBox* Container, EGa
 		UTextBlock* Line = NewObject<UTextBlock>(this);
 		Line->SetText(FText::FromString(FString::Printf(TEXT("%s   %.0f%%"),
 			*FLootBoxRarityUtility::GetKoreanName(Row.Rarity), Row.Percent)));
-		Line->SetColorAndOpacity(FSlateColor(FLootBoxRarityUtility::GetRarityColor(Row.Rarity)));
+		// 전역 등급표는 sRGB 16진값을 선형 자리에 담아 옅게 나온다 — 채용 창과 같이 16진 등급색 그대로 변환한다.
+		Line->SetColorAndOpacity(FSlateColor(FLinearColor::FromSRGBColor(
+			FLootBoxRarityUtility::GetRarityColor(Row.Rarity).ToFColor(false))));
 		Container->AddChildToVerticalBox(Line);
 	}
 }

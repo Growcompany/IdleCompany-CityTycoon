@@ -27,7 +27,7 @@ enum class ETooltipAnchor : uint8
  * 호출자는 인스턴스 1개 보유 후 ShowAt 으로 위치/데이터/지속시간 갱신.
  * BindWidgetAnimOptional 로 ShowAnim/HideAnim 있으면 자동 재생, 없으면 SetVisibility 토글.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UItemTooltipWidget : public UUserWidget
 {
 	GENERATED_BODY()
@@ -43,7 +43,7 @@ public:
 	 * @param ZOrder viewport ZOrder. 기본 101(=ProductionStartPopup 100 짝). 더 높은 오버레이(보상/가챠 리빌) 위에서는 host+1 을 넘긴다.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "ItemTooltip")
-	void ShowAt(FVector2D AbsoluteScreenPos, const FText& InName, UTexture2D* InIcon, const FText& InDesc, int32 InBasePrice = 0, float DurationSec = 2.5f, ETooltipAnchor AnchorMode = ETooltipAnchor::RightOfAnchor, int32 ZOrder = 101);
+	void ShowAt(FVector2D AbsoluteScreenPos, const FText& InName, UObject* InIcon, const FText& InDesc, int32 InBasePrice = 0, float DurationSec = 2.5f, ETooltipAnchor AnchorMode = ETooltipAnchor::RightOfAnchor, int32 ZOrder = 101);
 
 	UFUNCTION(BlueprintCallable, Category = "ItemTooltip")
 	void Hide();
@@ -74,6 +74,6 @@ protected:
 private:
 	FTimerHandle DismissTimerHandle;
 
-	void ApplyData(const FText& InName, UTexture2D* InIcon, const FText& InDesc, int32 InBasePrice);
+	void ApplyData(const FText& InName, UObject* InIcon, const FText& InDesc, int32 InBasePrice);
 	void HandleAutoDismiss();
 };

@@ -4,6 +4,7 @@
 #include "Manager/SpawnManager.h"
 
 #include "NavigationSystem.h"
+#include "EngineUtils.h" // TActorIterator (레벨 배치 부지 수집)
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Core/CGGameInstance.h"
 #include "Table/InteractableInfo.h"
@@ -16,6 +17,7 @@
 //#include "Entity/Interactable/Crop/CropBaseActor.h"
 #include "Util/CoordinateUtils.h"
 #include "Entity/Plot/CityPlotActor.h"
+#include "Entity/Plot/CityPlotWalkwayManager.h"
 #include "Entity/Ambient/VacantPlotDressingManager.h"
 #include "Table/CityPlotData.h"
 
@@ -34,6 +36,17 @@ namespace
 		const float GapX = FMath::Max(0.f, FMath::Abs(CenterA.X - CenterB.X) - (ExtentA.X + ExtentB.X));
 		const float GapY = FMath::Max(0.f, FMath::Abs(CenterA.Y - CenterB.Y) - (ExtentA.Y + ExtentB.Y));
 		return FMath::Sqrt(GapX * GapX + GapY * GapY);
+	}
+
+	// 레벨 배치 부지는 인접 게이트를 면제한다 — 되돌릴 때 여기 한 곳만 false 로.
+	// 리버워크 39부지는 블록이 촘촘해(최대 대각 간극 4,040) 간극 판정이 성립하지만, 손으로 놓는 부지는
+	// 도로를 사이에 두고 5,000 을 넘기 쉽고 그러면 시작 부지 다음부터 전부 도달 불가가 된다.
+	// 부지가 소수일 때 확장 병목은 가격 사다리가 맡는다(회사 인수 게이트도 같은 이유로 2026-06-28 제거).
+	constexpr bool bAuthoredPlotsBypassAdjacency = true;
+
+	bool IsAdjacencyExempt(const ACityPlotActor* Plot)
+	{
+		return bAuthoredPlotsBypassAdjacency && Plot && Plot->IsAuthoredInLevel();
 	}
 }
 
@@ -60,7 +73,10 @@ bool USpawnManager::ShouldCreateSubsystem(UObject* Outer) const
 
 	TArray<FString> AllowedLevelNames = {
 		TEXT("MainMap"),
-		TEXT("MainMap_TheRiverwalkCity")
+		TEXT("MainMap_City"),
+		TEXT("MainMap_Manhattan"),
+		TEXT("MainMap_TheRiverwalkCity"),
+		TEXT("Demonstration_WP_Office")
 	};
 
 	FString CurrentLevelName = World->GetMapName();
@@ -97,10 +113,12 @@ void USpawnManager::OnWorldBeginPlay(UWorld& InWorld)
 	GameInstance = UCGGameInstance::GetInstance();
 	TableManager = GameInstance->GetSubsystem<UTableManagerSubsystem>();
 
-	// 도시 부지 스폰 — MainMap 전용(USpawnManager 자체가 MainMap 에서만 생성됨).
-	// 세이브 로드보다 먼저 실행되므로 여기선 스폰 + bOwnedAtStart 만 반영하고,
+	// 도시 부지 확보 — 두 경로가 상호 배타다. DT 좌표 스폰(리버워크)을 먼저 하고,
+	// 그다음 레벨에 손으로 배치된 부지를 등록한다(City_Pack 계열 맵).
+	// 세이브 로드보다 먼저 실행되므로 여기선 확보 + bOwnedAtStart 만 반영하고,
 	// 로드된 OwnedPlotIds 소유 복원은 SaveLoadManager 가 RestorePlotOwnership 으로 처리한다.
 	SpawnCityPlots();
+	RegisterLevelPlacedPlots();
 }
 
 
@@ -158,6 +176,14 @@ void USpawnManager::ClearSpawnerTimer()
 
 void USpawnManager::SpawnCityPlots()
 {
+	// DT_CityPlot 의 Center 는 TheRiverwalkCity 좌표 전용이다. 다른 도시 맵에서 스폰하면 부지와 가격 배지가
+	// 허공에 뜬다 — 그 맵들은 RegisterLevelPlacedPlots 로 레벨에 배치된 부지를 쓴다.
+	if (GetWorld() && !GetWorld()->GetMapName().Contains(TEXT("TheRiverwalkCity")))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[SpawnManager] SpawnCityPlots: DT 좌표 스폰은 리버워크 전용 — 레벨 배치 부지로 진행"));
+		return;
+	}
+
 	// 중복 스폰 방지 — OnWorldBeginPlay 는 월드당 1회지만 가드로 안전성 확보
 	if (bPlotsSpawned)
 	{
@@ -203,6 +229,13 @@ void USpawnManager::SpawnCityPlots()
 			continue;
 		}
 
+		// 레벨 배치용 행은 Center 가 비어 있다 — 스폰하면 원점 허공에 부지가 뜬다.
+		// 그 행의 액터는 RegisterLevelPlacedPlots 가 레벨에서 찾아 등록한다.
+		if (PlotData.bPlacedInLevel)
+		{
+			continue;
+		}
+
 		// 회전: 도시 블록 방향 정렬은 Task 6(에디터 실측)에서 확정. 지금은 식별 회전 사용.
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -230,11 +263,137 @@ void USpawnManager::SpawnCityPlots()
 
 	bPlotsSpawned = true;
 
-	if (!IsValid(VacantPlotDressingManager))
+	EnsureVacantPlotDressingManager();
+
+	UE_LOG(LogTemp, Log, TEXT("[SpawnManager] SpawnCityPlots: spawned %d plots"), SpawnedPlots.Num());
+}
+
+bool USpawnManager::RegisterPlacedPlot(ACityPlotActor* Plot)
+{
+	// ⚠ 이 함수는 **부지가 스스로** 부른다(ACityPlotActor::BeginPlay). 한 번 훑는 방식은 쓰지 말 것 —
+	// World Partition 맵에서는 OnWorldBeginPlay 시점에 부지 액터 셀이 아직 스트리밍되지 않아
+	// TActorIterator 가 0 개를 반환한다. 그러면 등록이 비고 bOwnedAtStart 가 적용되지 않아
+	// "먼저 부지를 인수하세요" 로 건설이 전부 막힌다(실행마다 결과가 달라지는 타이밍 버그였다).
+	if (!IsValid(Plot))
+	{
+		return false;
+	}
+
+	if (!TableManager)
+	{
+		if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
+		{
+			TableManager = GI->GetSubsystem<UTableManagerSubsystem>();
+		}
+	}
+
+	const FName PlacedId = Plot->GetPlotId();
+	if (PlacedId.IsNone())
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[SpawnManager] 배치된 부지 '%s' 에 PlotId 가 비어 있다 — Details 에서 DT_CityPlot 행 이름을 지정할 것"),
+			*Plot->GetName());
+		return false;
+	}
+	if (!Plot->IsAuthoredInLevel())
+	{
+		// OnWorldBeginPlay 선등록은 부지 BeginPlay보다 빠를 수 있으므로 저작 경계를 먼저 확정한다.
+		// DT 스폰 부지는 InitFromAuthoredBounds 내부에서 제외된다.
+		Plot->InitFromAuthoredBounds();
+	}
+
+	if (ACityPlotActor** Existing = SpawnedPlots.Find(PlacedId))
+	{
+		if (*Existing == Plot)
+		{
+			return false; // 이미 등록됨 — 재호출은 무해(멱등)
+		}
+		// 같은 PlotId 가 둘 다 살아 있으면 세이브의 OwnedPlotIds 가 어느 쪽인지 못 가려 소유가 엉킨다.
+		if (IsValid(*Existing))
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("[SpawnManager] PlotId '%s' 중복 — '%s' 는 등록하지 않는다. 배치마다 고유 PlotId 를 줄 것"),
+				*PlacedId.ToString(), *Plot->GetName());
+			return false;
+		}
+		// 셀이 언로드되며 죽은 엔트리다. UPROPERTY TMap 은 **키를 지우지 않고 값만 null 로** 만들므로
+		// Find 는 계속 성공한다 — 이걸 중복으로 읽으면 다시 스트리밍 인 된 부지가 영구히 미등록이 되고,
+		// 수용량 조회·표면 Z·원장 소유 복원이 전부 죽은 포인터/널을 보게 된다. 돌아온 액터로 덮는다.
+		SpawnedPlots.Remove(PlacedId);
+	}
+
+	if (TableManager)
+	{
+		bool bOk = false;
+		const FCityPlotData PlotData = TableManager->GetCityPlotData(PlacedId, bOk);
+		if (!bOk)
+		{
+			// 가격·시작소유는 DT 가 권위다. 행이 없으면 가격 0 으로 아무나 가져가므로 반드시 보이게 할 것.
+			UE_LOG(LogTemp, Error,
+				TEXT("[SpawnManager] 배치된 부지 PlotId '%s' 에 해당하는 DT_CityPlot 행이 없다 — 가격/시작소유 미설정"),
+				*PlacedId.ToString());
+		}
+		else if (PlotData.bOwnedAtStart)
+		{
+			Plot->SetOwnedState(true);
+		}
+	}
+
+	// 세이브 로드가 이미 지나간 뒤에 스트리밍된 부지 — 원장에서 소유를 되살린다.
+	if (OwnedPlotIdLedger.Contains(PlacedId))
+	{
+		Plot->SetOwnedState(true);
+	}
+
+	SpawnedPlots.Add(PlacedId, Plot);
+	UE_LOG(LogTemp, Log, TEXT("[SpawnManager] 부지 등록 %s (총 %d)"), *PlacedId.ToString(), SpawnedPlots.Num());
+
+	if (Plot->IsAuthoredInLevel())
+	{
+		EnsurePlotWalkwayManager();
+		if (IsValid(PlotWalkwayManager))
+		{
+			PlotWalkwayManager->RefreshPlot(PlacedId);
+		}
+	}
+	EnsureVacantPlotDressingManager();
+	if (IsValid(VacantPlotDressingManager))
+	{
+		VacantPlotDressingManager->RefreshPlot(PlacedId);
+	}
+	return true;
+}
+
+void USpawnManager::RegisterLevelPlacedPlots()
+{
+	// begin play 시점에 이미 스트리밍된 부지를 먼저 받는다. 늦게 들어오는 부지는
+	// 각자 BeginPlay 에서 RegisterPlacedPlot 을 불러 스스로 등록한다(스트리밍 순서 무관).
+	UWorld* PlotWorld = GetWorld();
+	if (!PlotWorld)
+	{
+		return;
+	}
+
+	int32 RegisteredCount = 0;
+	for (TActorIterator<ACityPlotActor> It(PlotWorld); It; ++It)
+	{
+		if (RegisterPlacedPlot(*It))
+		{
+			++RegisteredCount;
+		}
+	}
+	UE_LOG(LogTemp, Log, TEXT("[SpawnManager] RegisterLevelPlacedPlots: 선등록 %d (부지 총 %d) — 나머지는 스트리밍 시 자가 등록"),
+		RegisteredCount, SpawnedPlots.Num());
+}
+
+void USpawnManager::EnsureVacantPlotDressingManager()
+{
+	UWorld* PlotWorld = GetWorld();
+	if (PlotWorld && !IsValid(VacantPlotDressingManager))
 	{
 		FActorSpawnParameters DressingSpawnParams;
 		DressingSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		VacantPlotDressingManager = SpawnWorld->SpawnActor<AVacantPlotDressingManager>(
+		VacantPlotDressingManager = PlotWorld->SpawnActor<AVacantPlotDressingManager>(
 			AVacantPlotDressingManager::StaticClass(),
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
@@ -244,16 +403,36 @@ void USpawnManager::SpawnCityPlots()
 			UE_LOG(LogTemp, Warning, TEXT("[SpawnManager] VacantPlotDressingManager spawn failed"));
 		}
 	}
+}
 
-	UE_LOG(LogTemp, Log, TEXT("[SpawnManager] SpawnCityPlots: spawned %d plots"), SpawnedPlots.Num());
+void USpawnManager::EnsurePlotWalkwayManager()
+{
+	UWorld* PlotWorld = GetWorld();
+	if (PlotWorld && !IsValid(PlotWalkwayManager))
+	{
+		FActorSpawnParameters WalkwaySpawnParams;
+		WalkwaySpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		PlotWalkwayManager = PlotWorld->SpawnActor<ACityPlotWalkwayManager>(
+			ACityPlotWalkwayManager::StaticClass(),
+			FVector::ZeroVector,
+			FRotator::ZeroRotator,
+			WalkwaySpawnParams);
+		if (!PlotWalkwayManager)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[SpawnManager] CityPlotWalkwayManager spawn failed"));
+		}
+	}
 }
 
 void USpawnManager::GatherOwnedPlotIds(TArray<FName>& OutOwnedPlotIds) const
 {
-	OutOwnedPlotIds.Reset();
+	// 원장이 권위 — 스트리밍 아웃된 부지, 다른 도시 맵의 부지까지 보존한다.
+	OutOwnedPlotIds = OwnedPlotIdLedger.Array();
+
+	// 원장을 거치지 않고 소유로 바뀐 경로가 있어도 세이브에서 빠지지 않게 하는 안전망.
 	for (const TPair<FName, ACityPlotActor*>& Pair : SpawnedPlots)
 	{
-		if (Pair.Value && Pair.Value->IsOwned())
+		if (IsValid(Pair.Value) && Pair.Value->IsOwned() && !OwnedPlotIdLedger.Contains(Pair.Key))
 		{
 			OutOwnedPlotIds.Add(Pair.Key);
 		}
@@ -298,9 +477,32 @@ ACityPlotActor* USpawnManager::GetOwnedPlotAt(const FVector& WorldPos) const
 
 ACityPlotActor* USpawnManager::GetSpawnedPlotById(FName InPlotId) const
 {
+	// 스트리밍 아웃된 부지는 키가 남은 채 값만 죽는다 — 소비자(수용량/표면 Z/테두리)에 넘기지 않는다.
 	if (ACityPlotActor* const* Found = SpawnedPlots.Find(InPlotId))
 	{
-		return *Found;
+		return IsValid(*Found) ? *Found : nullptr;
+	}
+	return nullptr;
+}
+
+ACityPlotActor* USpawnManager::FindPlotByOccupantKey(int32 CompanyKey) const
+{
+	if (CompanyKey <= 0 || !TableManager)
+	{
+		return nullptr;
+	}
+	for (const TPair<FName, ACityPlotActor*>& Pair : SpawnedPlots)
+	{
+		if (!IsValid(Pair.Value))
+		{
+			continue;
+		}
+		bool bOk = false;
+		const FCityPlotData PlotData = TableManager->GetCityPlotData(Pair.Key, bOk);
+		if (bOk && PlotData.OccupantCompanyKeys.Contains(CompanyKey))
+		{
+			return Pair.Value;
+		}
 	}
 	return nullptr;
 }
@@ -321,6 +523,17 @@ void USpawnManager::GetAdjacentUnownedPlots(TArray<ACityPlotActor*>& OutAdjacent
 		}
 	}
 
+	// 면제 부지는 소유 부지 유무와 무관하게 목록에 든다 — bOwnedAtStart 를 빼먹으면 배지가 전멸해
+	// 시작조차 못 하는 상태가 되므로, 소유 0개 조기 반환보다 앞에 둔다.
+	for (const TPair<FName, ACityPlotActor*>& Pair : SpawnedPlots)
+	{
+		ACityPlotActor* Plot = Pair.Value;
+		if (IsValid(Plot) && !Plot->IsOwned() && IsAdjacencyExempt(Plot))
+		{
+			OutAdjacentPlots.Add(Plot);
+		}
+	}
+
 	if (OwnedRects.Num() == 0)
 	{
 		return;
@@ -329,7 +542,7 @@ void USpawnManager::GetAdjacentUnownedPlots(TArray<ACityPlotActor*>& OutAdjacent
 	for (const TPair<FName, ACityPlotActor*>& Pair : SpawnedPlots)
 	{
 		ACityPlotActor* Plot = Pair.Value;
-		if (!IsValid(Plot) || Plot->IsOwned())
+		if (!IsValid(Plot) || Plot->IsOwned() || IsAdjacencyExempt(Plot))
 		{
 			continue;
 		}
@@ -353,6 +566,11 @@ bool USpawnManager::IsPlotAdjacentBuyable(const ACityPlotActor* Plot) const
 	if (!IsValid(Plot) || Plot->IsOwned())
 	{
 		return false;
+	}
+
+	if (IsAdjacencyExempt(Plot))
+	{
+		return true;
 	}
 
 	const FVector PlotCenter = Plot->GetCenter();
@@ -380,19 +598,26 @@ void USpawnManager::RestorePlotOwnership(const TArray<FName>& OwnedPlotIds)
 		return;
 	}
 
+	// 아직 스트리밍 안 된 부지도 원장에는 올려 둔다 — RegisterPlacedPlot 이 늦게 들어올 때 집어간다.
+	OwnedPlotIdLedger.Append(OwnedPlotIds);
+
 	for (const FName& PlotId : OwnedPlotIds)
 	{
 		if (ACityPlotActor* const* FoundPlot = SpawnedPlots.Find(PlotId))
 		{
-			if (ACityPlotActor* Plot = *FoundPlot)
+			if (ACityPlotActor* Plot = IsValid(*FoundPlot) ? *FoundPlot : nullptr)
 			{
 				Plot->SetOwnedState(true);
 			}
 		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[SpawnManager] RestorePlotOwnership: owned plot %s not spawned"), *PlotId.ToString());
-		}
+	}
+}
+
+void USpawnManager::NoteOwnedPlot(FName InPlotId)
+{
+	if (!InPlotId.IsNone())
+	{
+		OwnedPlotIdLedger.Add(InPlotId);
 	}
 }
 
@@ -475,7 +700,7 @@ bool USpawnManager::FindFreeFootprintOnPlot(FName InPlotId, FVector2D Footprint,
 		bool bOverlap = false;
 		for (ABuildingBaseActor* Other : Existing)
 		{
-			if (Other && OverlapsAt(Other->GetActorLocation()))
+			if (Other && OverlapsAt(Other->GetPlacementFootprintCenter()))
 			{
 				bOverlap = true;
 				break;

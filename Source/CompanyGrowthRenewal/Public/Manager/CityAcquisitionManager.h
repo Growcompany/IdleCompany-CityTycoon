@@ -3,9 +3,11 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "Containers/Ticker.h"
 #include "Engine/TimerHandle.h"
+#include "Data/CloudEconomyData.h"
 #include "CityAcquisitionManager.generated.h"
 
 struct FCityCompanyData;
+class UCloudEconomySubsystem;
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCompanyCleared, int32 /*Key*/);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnCompanyVisualCleared, int32 /*Key*/);
@@ -47,9 +49,16 @@ public:
     AActor* GetCompanyActor(int32 Key) const;
     void GetOccupantKeysForPlot(FName PlotId, TArray<int32>& OutKeys) const;
 
+    // 튜토리얼 M25 지목 — 디렉터 매핑(=이 맵에 실재)된 미인수 회사 중 인수가 최저. 자금은 안 본다: 잔액에 따라 지목이 바뀌면 안 된다. 없으면 INDEX_NONE
+    int32 FindCheapestAcquirableCompanyKey() const;
+    // 튜토리얼 M26~M28 지목 — 이 맵에 실재하는 회사 중 State 인 가장 작은 키(재접속에도 같은 대상). 없으면 INDEX_NONE
+    int32 FindFirstCompanyKeyInState(EAcqState State) const;
+
     // 부지 인수 게이트 0의 단일 구현 — 입주 회사가 없거나 전원 Cleared 면 true.
     // 진입점 2개(TryPurchase / CanBePurchasedNow)가 이걸 공유한다. 갈라지면 소프트락이 난다.
     bool ArePlotOccupantsCleared(FName PlotId) const;
+    // 아직 철거되지 않은 입주 회사 수 ― 튜토리얼 부지 설명의 「N곳 남음」
+    int32 CountUnclearedPlotOccupants(FName PlotId) const;
 
     // ⚠ 아래 3종 재진입 계약: 구독자는 핸들러 안에서 Runtime 을 바꾸는 호출(Acquire/DebugClearAllCompanies) 금지 — 순회 중 브로드캐스트라 이터레이터 무효화.
 	// 회사 정리(철거) 완료 — 부지 게이트/UI 갱신용
@@ -64,8 +73,33 @@ public:
     // 이미 굴려져 있어 결과가 달라지지 않는다. 반환: 실행됐으면 true.
     bool SkipRecovery(int32 Key);
 
-    // 즉시 완료 보석 가격 = 티어 × 10. 소요 시간은 티어에 지수로 늘고 가격은 선형이라 후반일수록 이득 —
-    // 실제로 답답한 구간에서만 쓰이게 하려는 의도적 기울기.
+    // ========== 서버 권위 즉시 완료 ==========
+
+    /** 요청 1건 완료. 성공·실패 어느 쪽이든 정확히 1회 호출된다 */
+    DECLARE_DELEGATE_OneParam(FOnCityAcqActionDone, bool /*bOk*/);
+
+    /**
+     * `/wallet/spend`(city.skipRecovery) -> 성공 응답 뒤에만 압축 드립 실행.
+     * 압축은 되돌릴 수 없으므로(고갈까지 진행) 서버 실패 시 Milking 이 그대로 유지돼야 한다.
+     * 차감은 서버가 하고 응답 지갑이 콜백 전에 로컬에 적용된다 ― 로컬에서 또 깎지 않는다.
+     */
+    void RequestSkipRecovery(int32 Key, FOnCityAcqActionDone Done);
+
+    /**
+     * 위와 같은 요청인데 **실패 코드까지** 준다(1-B-4c).
+     * 코드가 없으면 호출부가 "지금은 즉시 완료할 수 없습니다" 한 문구로 서버·네트워크 실패까지 덮는다.
+     * bool 버전은 이 함수로 위임한다 ― 기존 호출부는 그대로 컴파일된다.
+     */
+    void RequestSkipRecovery(int32 Key, FOnCloudEconomyOpDone Done);
+
+    /** `/wallet/spend` reason ― spendRules.json 과 바이트 단위로 같아야 한다(구 이름 city.acquire 는 폐기) */
+    static FName GetSkipRecoverySpendReason();
+
+    /** 중복 클릭 차단 키 ― 회사별로 따로 잠근다 */
+    static FName SkipRecoveryActionKey(int32 Key);
+
+    // 즉시 완료 보석 가격 = 티어 × 10 × 남은 회수 비율(최소 1, 회수 중이 아니면 0) ― FSkipCostRules.
+    // 소요 시간은 티어에 지수로 늘고 가격은 선형이라 후반일수록 이득 — 실제로 답답한 구간에서만 쓰이게 하려는 의도적 기울기.
     int32 GetSkipDiamondCost(int32 Key) const;
 
     // [치트] 모든 도시 회사를 즉시 Cleared 로. 데모 연출 없이 LoadFromGame 의 Cleared 복원과 동일한 즉시 숨김
@@ -80,7 +114,7 @@ public:
 
     // 관리 패널(BottomStack) 오픈 — OnCompanyClicked(Milking/Depleted) 재클릭과 인수 모달의 확인 클릭 체인이 공유하는 단일 진입점
     // (카메라 좌측 프레이밍도 이 함수가 함께 책임진다). 계약: 중복 push 가드는 호출자 책임 — 새 호출자가 늘면 이중 push 위험.
-    void OpenManagePanel(int32 Key);
+    bool OpenManagePanel(int32 Key);
 
     void SaveToGame();   // Runtime -> GameData + persist
     void LoadFromGame();
@@ -98,6 +132,12 @@ protected:
     // 실제로 기다린 결과와 달라진다. bSilent 면 VFX/브로드캐스트 생략(압축은 한 프레임에 수만 틱을 돈다).
     // 반환: 상태가 바뀌었으면(고갈) true. bOutDripped = 이번 틱에 적립이 있었나.
     bool StepDrip(int32 Key, FCityAcqRuntime& R, const FCityCompanyData& D, bool bSilent, bool& bOutDripped);
+
+    // 서버 응답 뒤 로컬 효과 — 압축 드립 + 알림 + 저장. FCityAcqRuntime* 를 콜백까지 들고 가지 않는다
+    // (TMap 재해시에 무효가 된다) — Key 로 다시 찾고 Milking 을 재검사한다.
+    bool ApplySkipRecoveryEffect(int32 Key);
+
+    class UCloudEconomySubsystem* CloudEconomy() const;
 
     void SettleOffline(float TotalGained, float OfflineSeconds);
 

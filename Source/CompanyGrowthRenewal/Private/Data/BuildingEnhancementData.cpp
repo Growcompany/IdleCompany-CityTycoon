@@ -39,7 +39,7 @@ namespace
 		return false;
 	}
 
-	// 행 부재 스팸 방지 — KeystoneAuraPower 등 폴백 운용 타입
+	// 행 부재 스팸 방지 — DT 행 없이 폴백으로 운용되는 타입
 	static TSet<uint8> GLoggedMissingBaseCostTypes;
 	static bool GLoggedMissingVaultK = false;
 
@@ -120,7 +120,7 @@ namespace
 	}
 }
 
-int64 UBuildingEnhancementHelper::CalculateUpgradeCost(EBuildingEnhancementType EnhancementType, int32 CurrentLevel, int32 FootprintCells)
+int64 UBuildingEnhancementHelper::CalculateUpgradeCost(EBuildingEnhancementType EnhancementType, int32 CurrentLevel, int64 BaseBuildCost)
 {
 	const int32 Level = FMath::Max(CurrentLevel, 0);
 
@@ -131,9 +131,9 @@ int64 UBuildingEnhancementHelper::CalculateUpgradeCost(EBuildingEnhancementType 
 		Def.BaseCost = GetBaseCost(EnhancementType);
 	}
 
-	// 증축은 층당 인원이 칸수 비례로 늘므로 비용도 같이 비례시킨다 — 안 그러면 큰 건물이 공짜로 4~9배 이득.
-	const int64 CellMultiplier = Def.bScaleCostByFootprint ? FMath::Max(FootprintCells, 1) : 1;
-	const double Base = static_cast<double>(Def.BaseCost) * static_cast<double>(CellMultiplier);
+	// 증축은 그 빌딩 값에 맞춰 비싸진다 — BaseCost 가 기본 건설비의 배수가 된다.
+	const int64 CostScale = Def.bScaleCostByBuildCost ? FMath::Max<int64>(BaseBuildCost, 1) : 1;
+	const double Base = static_cast<double>(Def.BaseCost) * static_cast<double>(CostScale);
 	double Cost = 0.0;
 	if (Def.CostCurveType == ECostCurveType::Power)
 	{
@@ -148,7 +148,7 @@ int64 UBuildingEnhancementHelper::CalculateUpgradeCost(EBuildingEnhancementType 
 	return SafeCostCast(Cost);
 }
 
-int64 UBuildingEnhancementHelper::CalculateBulkUpgradeCost(EBuildingEnhancementType EnhancementType, int32 CurrentLevel, int32 UpgradeCount, int32 FootprintCells)
+int64 UBuildingEnhancementHelper::CalculateBulkUpgradeCost(EBuildingEnhancementType EnhancementType, int32 CurrentLevel, int32 UpgradeCount, int64 BaseBuildCost)
 {
 	if (UpgradeCount <= 0)
 	{
@@ -165,7 +165,7 @@ int64 UBuildingEnhancementHelper::CalculateBulkUpgradeCost(EBuildingEnhancementT
 			return MAX_int64;
 		}
 
-		const int64 LevelCost = CalculateUpgradeCost(EnhancementType, static_cast<int32>(TargetLevel), FootprintCells);
+		const int64 LevelCost = CalculateUpgradeCost(EnhancementType, static_cast<int32>(TargetLevel), BaseBuildCost);
 		if (LevelCost == MAX_int64 || TotalCost > MAX_int64 - LevelCost)
 		{
 			return MAX_int64;

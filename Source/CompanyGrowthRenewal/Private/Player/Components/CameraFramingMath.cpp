@@ -55,19 +55,69 @@ float CameraFramingMath::HorizontalHalfTangent(float HorizontalFOVDeg, float Cam
 	return VerticalHalfTangent(HorizontalFOVDeg, CameraAspectRatio) * FMath::Max(ViewportAspectRatio, UE_KINDA_SMALL_NUMBER);
 }
 
-float CameraFramingMath::RequiredArmLengthForHeight(float Height, float PitchDeg, float HorizontalFOVDeg, float CameraAspectRatio, float ScreenHeightRatio)
+float CameraFramingMath::RequiredArmLengthForHeight(float Height, float PitchDeg, float HorizontalFOVDeg, float CameraAspectRatio, float ScreenHeightRatio, float ScreenCenterRatioY)
 {
-	const float VisibleHeight = Height * FMath::Cos(FMath::DegreesToRadians(FMath::Abs(PitchDeg)));
-	const float Denominator = 2.f * VerticalHalfTangent(HorizontalFOVDeg, CameraAspectRatio) * FMath::Max(ScreenHeightRatio, UE_KINDA_SMALL_NUMBER);
-	return VisibleHeight / Denominator;
+	const double PitchRad = FMath::DegreesToRadians(static_cast<double>(FMath::Abs(PitchDeg)));
+	const double S = FMath::Sin(PitchRad);
+	const double C = FMath::Cos(PitchRad);
+	const double T = VerticalHalfTangent(HorizontalFOVDeg, CameraAspectRatio);
+	const double Ratio = FMath::Max(static_cast<double>(ScreenHeightRatio), static_cast<double>(UE_KINDA_SMALL_NUMBER));
+	const double CenterTan = (2.0 * static_cast<double>(ScreenCenterRatioY) - 1.0) * T;
+	const double ShiftedCos = C + CenterTan * S;
+	const double RatioTanSin = Ratio * T * S;
+	// 목표 화면 구간의 위·아래 끝점을 역투영해 실제 카메라 거리를 구한다.
+	const double Distance = static_cast<double>(Height) * (ShiftedCos * ShiftedCos - RatioTanSin * RatioTanSin) / (2.0 * Ratio * T * C);
+	return static_cast<float>(FMath::Max(0.0, Distance));
 }
 
-float CameraFramingMath::SolveZoomForHeight(const FZoomRigParams& Params, TFunctionRef<float(float)> CurveEval, float Height, float ScreenHeightRatio, int32 MaxIterations, float ToleranceCm)
+FVerticalFramingResult CameraFramingMath::SolveVerticalFraming(float Height, float CameraDistance, float PitchDeg,
+	float HorizontalFOVDeg, float CameraAspectRatio, float ScreenHeightRatio, float OverflowTopScreenPosition, bool bAnchorOverflowToTop, float ScreenCenterRatioY)
+{
+	const double H = FMath::Max(static_cast<double>(Height), 0.0);
+	const double D = FMath::Max(static_cast<double>(CameraDistance), static_cast<double>(UE_KINDA_SMALL_NUMBER));
+	const double PitchRad = FMath::DegreesToRadians(static_cast<double>(FMath::Abs(PitchDeg)));
+	const double S = FMath::Sin(PitchRad);
+	const double C = FMath::Cos(PitchRad);
+	const double T = VerticalHalfTangent(HorizontalFOVDeg, CameraAspectRatio);
+
+	const double CenterTan = (2.0 * static_cast<double>(ScreenCenterRatioY) - 1.0) * T;
+	const double ShiftedCos = C + CenterTan * S;
+	// 두 끝점의 화면상 평균을 지정한 중심에 맞춘다. 유리화한 근은 작은 높이와 수평 피치에서도 안정적이다.
+	const double DepthRoot = FMath::Sqrt(C * C * D * D + ShiftedCos * ShiftedCos * S * S * H * H);
+	const double CenteredPivot = H * 0.5 - D * CenterTan / ShiftedCos
+		+ ShiftedCos * S * H * H / (2.0 * (DepthRoot + C * D));
+	const auto Project = [D, S, C, T](double RelativeHeight)
+	{
+		return 0.5 + 0.5 * (C * RelativeHeight / (D - S * RelativeHeight)) / T;
+	};
+	const double CenteredTop = Project(H - CenteredPivot);
+	const double CenteredBottom = Project(-CenteredPivot);
+
+	FVerticalFramingResult Result;
+	Result.bFitsInFrame = CenteredTop - CenteredBottom <= static_cast<double>(ScreenHeightRatio) + 0.001;
+	double Pivot = CenteredPivot;
+	if (!Result.bFitsInFrame && bAnchorOverflowToTop)
+	{
+		const double TargetNdc = 2.0 * static_cast<double>(OverflowTopScreenPosition) - 1.0;
+		const double A = TargetNdc * T;
+		const double TopRelativeHeight = A * D / (C + A * S);
+		Pivot = H - TopRelativeHeight;
+	}
+	Result.PivotHeight = static_cast<float>(Pivot);
+	Result.TopScreenPosition = static_cast<float>(Project(H - Pivot));
+	Result.BottomScreenPosition = static_cast<float>(Project(-Pivot));
+	return Result;
+}
+
+float CameraFramingMath::SolveZoomForHeight(const FZoomRigParams& Params, TFunctionRef<float(float)> CurveEval, float Height, float ScreenHeightRatio, float ScreenCenterRatioY, int32 MaxIterations, float ToleranceCm)
 {
 	return BisectZoom([&](float Zoom)
 	{
 		const FZoomRigSample Sample = EvaluateRig(Params, CurveEval(Zoom));
-		return Sample.ArmLength - RequiredArmLengthForHeight(Height, Sample.PitchDeg, Sample.HorizontalFOVDeg, Params.CameraAspectRatio, ScreenHeightRatio);
+		// 실제 피사체 거리 = 팔길이 + 소켓 후퇴. RequiredArmLengthForHeight 는 "필요한 카메라 거리"를 돌려주므로
+		// 같은 축에서 비교해야 한다 — 후퇴를 빼먹으면 늘 그만큼 멀리 서서 피사체가 작게 잡힌다.
+		return Sample.ArmLength + Params.CameraPullBackCm
+			- RequiredArmLengthForHeight(Height, Sample.PitchDeg, Sample.HorizontalFOVDeg, Params.CameraAspectRatio, ScreenHeightRatio, ScreenCenterRatioY);
 	}, MaxIterations, ToleranceCm);
 }
 

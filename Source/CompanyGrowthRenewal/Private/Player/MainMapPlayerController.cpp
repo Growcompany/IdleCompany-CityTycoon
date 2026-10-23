@@ -4,6 +4,7 @@
 #include "Player/InputTypeManager.h"
 #include "Player/CGCheatManager.h"
 #include "PlayerCamera.h"
+#include "Player/OfficeCameraPawn.h"
 #include "Core/CGGameInstance.h"
 #include "Manager/TableManagerSubsystem.h"
 #include <Util/CoordinateUtils.h>
@@ -127,6 +128,7 @@ void AMainMapPlayerController::OnTouchPressed(ETouchIndex::Type FingerIndex, FVe
 
     TouchStartTime = GetWorld()->GetTimeSeconds();
     TouchStartLocation = FVector2D(Location.X, Location.Y);
+    CoordinateUtils::RecordTouchEventPosition(TouchStartLocation);
     bIsTouchActive = true;
 
     UE_LOG(LogTemp, Error, TEXT("Touch Pressed at: %s"), *TouchStartLocation.ToString());
@@ -142,6 +144,11 @@ void AMainMapPlayerController::OnTouchPressed(ETouchIndex::Type FingerIndex, FVe
 
 void AMainMapPlayerController::OnTouchReleased(ETouchIndex::Type FingerIndex, FVector Location)
 {
+    // 편집 드래그의 주 터치는 두 번째 손가락의 핀치 종료로 끝내지 않는다.
+    if (const AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(GetPawn()))
+    {
+        if (OfficePawn->IsOfficePlacementEditing() && FingerIndex != ETouchIndex::Touch1) return;
+    }
     if (GEngine)
     {
         FString msg = FString::Printf(TEXT("TOUCH RELEASED! Finger: %d"), (int32)FingerIndex);
@@ -176,6 +183,7 @@ void AMainMapPlayerController::OnTouchReleased(ETouchIndex::Type FingerIndex, FV
 void AMainMapPlayerController::OnTouchMoved(ETouchIndex::Type FingerIndex, FVector Location)
 {
     if (FingerIndex != ETouchIndex::Touch1 || !bIsTouchActive) return;
+    CoordinateUtils::RecordTouchEventPosition(FVector2D(Location.X, Location.Y));
 
     APlayerCamera* PlayerCamera = Cast<APlayerCamera>(GetPawn());
     if (PlayerCamera && PlayerCamera->InteractableInputHandler)

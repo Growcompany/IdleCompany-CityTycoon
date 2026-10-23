@@ -22,7 +22,7 @@ class UTableManagerSubsystem;
  *
  * 보유 완성품 목록 + 일괄 판매 (싱가포르 빠른 / 미국 +35%).
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UWorldProductsPanelWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()

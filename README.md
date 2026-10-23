@@ -44,6 +44,23 @@
 > [!NOTE]
 > 라이선스 에셋, 레벨, WBP·DataTable 에셋, 운영 설정과 외부 플러그인 바이너리를 제외한 **source-only snapshot**입니다. 이 저장소만으로 완성 게임을 실행하거나 전체 UE 빌드를 재현할 수는 없습니다. 기준 revision과 공개 수치는 [SNAPSHOT.md](SNAPSHOT.md)에 정리했습니다.
 
+### 포트폴리오 코드 안내
+
+[Notion 포트폴리오](https://www.notion.so/2626907ae0ce8030b6edd2bdb5ae4931)의 본문과 코드 발췌에 대응하는 구현입니다. Notion의 코드 링크는 검토한 커밋으로 고정합니다.
+
+| 사례 | 확인할 구현 |
+|---|---|
+| 건물 배치에 따른 도로 자동 연결 | [삼각형 절개·정점 보간](Source/CompanyGrowthRenewal/Private/Entity/Plot/CityPlotStreetSurface.cpp) |
+| 생산 진행 계산과 저장·불러오기 | [고정 스텝·난수·진행 상태](Source/CompanyGrowthRenewal/Private/Utils/ManufacturingWorkSimulator.cpp), [오프라인 중복 구간 제외](Source/CompanyGrowthRenewal/Private/Manager/ManufacturingDevelopmentManager.cpp) |
+| 맵 이동 시 데이터 유지와 객체 정리 | [월드 종료 시 촬영 작업 정리](Source/CompanyGrowthRenewal/Private/Manager/EmployeeManager.cpp) |
+| GPU 최적화의 차량 보조 구현 | [화면 내 대수·활성 상한·ISM 갱신](Source/CompanyGrowthRenewal/Private/Entity/Ambient/TrafficManager.cpp) |
+| 여러 직원 채용 시 화면 멈춤 | [직원 생성 분산](Source/CompanyGrowthRenewal/Private/Office/OfficeRecruitmentFlowSubsystem.cpp), [사진 버퍼 이동·비동기 저장·요청 검사](Source/CompanyGrowthRenewal/Private/Entity/Officeworker/Officeworker.cpp) |
+| HISM 변환·복구 도구 | [변환·복구](Tools/CityOpt/hism_convert.py), [왕복 비교](Tools/CityOpt/verify_roundtrip.py) |
+| Balance Studio | [미리보기 이후 원본 변경 검사](Tools/Balance/studio/apply.js) |
+| 건물 카메라·가림 / 도시 진입 | [줌 계산](Source/CompanyGrowthRenewal/Private/Player/Components/CameraFramingMath.cpp), [가림 조회](Source/CompanyGrowthRenewal/Private/Player/Components/FocusOcclusionHandler.cpp), [로딩 화면 제어](Source/CompanyGrowthRenewal/Private/Core/CGGameInstance.cpp) |
+
+타일 머티리얼은 공개 대상에서 제외한 콘텐츠 에셋이며, 선택 이유와 컴파일 통계는 Notion 본문에 정리했습니다.
+
 <div align="center">
 
 [Cropout → C++](#cropout-redesign) · [Highlights](#engineering-highlights) · [Architecture](#system-architecture) · [Validation](#visual-validation) · [Code](#code-tour) · [Problems](#troubleshooting) · [AI Workflow](#ai-workflow)
@@ -143,16 +160,12 @@
 
 ## 6. Troubleshooting
 
-| Case | Root cause & approach | Prevention | Evidence |
-|---|---|---|---|
-| **건물 포커스 프레이밍** | 줌값 하나가 팔길이·피치·FOV를 동시에 바꾸는 SSOT 설계라 화면 점유율→줌값 역산이 순환. 순수 리그 모델 위 잔차 이분법 한 번으로 프레이밍(수직 FOV 변환 포함), 초고층은 바닥 고정, 가림 건물은 골조 고스트 | 순수 계산부 분리(컴포넌트 미접촉), 순수 수학층 유닛 테스트, PIE 체크리스트 | [카메라 SOT](docs/01_Systems/Player/CAMERA_MOVEMENT_SYSTEM.md), [PlayerCamera.cpp](Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.cpp), [FocusOcclusionHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/FocusOcclusionHandler.cpp), [4막 기록](https://cookie-roquefort-35d.notion.site/2626907ae0ce8030b6edd2bdb5ae4931) |
-| **Android 야간 Shimmer** | 정지 화질 문제가 아니라 오토 노출의 시간축 진동으로 분리. AA·노출·Tonemapper를 동일 조건 A/B로 검증 | 플랫폼 노출 정책, 자동 캡처와 정량 validator | [렌더링 기록](docs/08_Optimization/MOBILE_RENDERING.md), [validator](Tools/MainMapPreview/validate_night_readability_ab.py) |
-| **건물 파츠 깜빡임** | 프러스텀 컬링으로 추정해 콜리전 바운드·BoundsScale·bUseAsOccluder를 차례로 기각한 뒤 <code>r.AllowOcclusionQueries 0</code>으로 Hardware Occlusion Query를 확정. 탑다운에서는 쿼리 이득이 없어 전역 비활성화 | 컴포넌트 단위 컬링 방어 설정, 컬링 종류별 제어 노브 표 | [진단 기록](docs/07_Reference/TROUBLESHOOTING_FLICKERING.md), [BuildingBaseActor.cpp](Source/CompanyGrowthRenewal/Private/Entity/Building/BuildingBaseActor.cpp) |
-| **UMG 좌표 오차** | Screen·Viewport·Canvas 좌표를 혼용해 SafeZone·DPI에서 위치가 어긋남 | <code>LocalToAbsolute → AbsoluteToLocal</code> 변환을 공통 규칙으로 고정 | [UI playbook](docs/05_UI/UI_CREATION_PLAYBOOK.md), [적용 코드](Source/CompanyGrowthRenewal/Private/UI/Panel/InGameLayerWidget.cpp) |
-| **Android 에셋 누락** | Soft Reference 자체가 아니라 C++ 문자열 진입점을 쿠커가 발견하지 못한 문제 | 쿠킹 도달성을 기준으로 첫 문자열 경로만 수동 등록 | [원인과 검증](docs/TROUBLESHOOTING.md#android-cooking), [적용 코드](Source/CompanyGrowthRenewal/Private/UI/HUD/MissionGuideOverlayWidget.cpp) |
-| **저장 초기화·연타 히칭** | 로드 전 저장과 고빈도 동기 쓰기가 데이터 손상·프레임 끊김을 유발 | 로드 완료 가드와 첫 요청 기준 3초 저장 스로틀 | [SaveLoadManager](Source/CompanyGrowthRenewal/Private/Manager/SaveLoadManager.cpp), [Round-trip test](Source/CompanyGrowthRenewal/Private/Tests/OfficeExteriorSaveRoundTripTests.cpp) |
+| 대표 사례 | 조사와 선택 | 확인한 결과 |
+|---|---|---|
+| **저사양 모바일 렌더링 최적화** | Galaxy A9의 드로우 호출 내부 대기를 추적하고 ISM 숨김·픽셀 예산 진단으로 렌더링 부하의 반응을 확인했습니다. 넓은 면적의 공용 타일은 월드 투영을 유지하면서 셰이더를 단순화했고, 차량은 활성 대수와 ISM 갱신량을 줄였습니다. | 타일 에디터 컴파일 통계: 명령 **376→222**, 샘플 **12→6**. 여러 변경을 적용한 빌드의 SurfaceFlinger 평균 표시 간격 **29.0ms**이며, 진단 기준과 동일 조건의 전후 개선율은 아닙니다. |
+| **여러 직원 채용 시 화면 멈춤** | 실제 직원·촬영용 캐릭터 생성, 외형 준비와 직원별 저장이 같은 프레임에 겹쳤습니다. 사진 재사용·공용 촬영·알림과 저장 묶음 처리, Tick당 한 명 준비를 적용했습니다. 사진 버퍼는 작업 스레드로 이동하고 최종 반영 시 객체·요청·직원·외형을 검사합니다. | PIE에서 **5명 준비가 서로 다른 5개 프레임**에 분산되고 모두 착석했습니다. 프레임 멈춤 시간의 전후 비교는 하지 않았습니다. |
 
-[문제 해결 과정과 코드 근거 자세히 보기 →](docs/TROUBLESHOOTING.md)
+[Notion의 상세 코드·비교표](https://www.notion.so/2626907ae0ce8030b6edd2bdb5ae4931) · [구현·문제 해결 기록](docs/TROUBLESHOOTING.md)
 
 <a id="ai-workflow"></a>
 

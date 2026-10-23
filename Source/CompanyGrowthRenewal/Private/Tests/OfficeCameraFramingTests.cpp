@@ -11,6 +11,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGROfficeCameraFloorFocusPointTest,
+	"CGR.Office.Exterior.CameraFraming.FloorFocusPoint",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGROfficeCameraInvalidFloorFocusPointTest,
+	"CGR.Office.Exterior.CameraFraming.InvalidFloorFocusPoint",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FCGROfficeCameraProjectionTest,
 	"CGR.Office.Exterior.CameraFraming.Projection",
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
@@ -35,17 +45,88 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	"CGR.Office.Exterior.CameraFraming.SearchLimits",
 	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGROfficeCameraApprovedEntryPoseRoomAnchorsTest,
+	"CGR.Office.Exterior.CameraFraming.ApprovedEntryPoseRoomAnchors",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
 bool FCGROfficeCameraHeroBoundsTest::RunTest(const FString& Parameters)
 {
+	// Mutation caught: reducing the initial hero volume back to one facade floor hides the approved three-floor reveal.
 	const FBox2D FloorBounds(FVector2D(4.f, -2409.f), FVector2D(2004.f, -9.f));
-	const FBox HeroBounds = FOfficeCameraFraming::MakeHeroBounds(FloorBounds, 0.f, 400.f);
-	TestEqual(TEXT("hero min"), HeroBounds.Min, FVector(1004.f, -2409.f, -400.f));
+	const FBox HeroBounds = FOfficeCameraFraming::MakeHeroBounds(FloorBounds, 0.f, 1200.f);
+	TestEqual(TEXT("hero min"), HeroBounds.Min, FVector(1004.f, -2409.f, -1200.f));
 	TestEqual(TEXT("hero max"), HeroBounds.Max, FVector(2004.f, -1209.f, 0.f));
 
 	const TStaticArray<FVector, 8> Corners = FOfficeCameraFraming::MakeBoxCorners(HeroBounds);
 	TestEqual(TEXT("hero produces eight corners"), Corners.Num(), 8);
 	TestEqual(TEXT("first corner is minimum"), Corners[0], HeroBounds.Min);
 	TestEqual(TEXT("last corner is maximum"), Corners[7], HeroBounds.Max);
+
+	return true;
+}
+
+bool FCGROfficeCameraFloorFocusPointTest::RunTest(const FString& Parameters)
+{
+	// Mutation caught: retaining the hidden 500cm offset ignores the approved 300cm focus depth.
+	const FBox2D FloorBounds(FVector2D(4.f, -2409.f), FVector2D(2004.f, -9.f));
+	FVector FloorFocusPoint = FVector::ZeroVector;
+
+	TestTrue(
+		TEXT("valid floor bounds produce a focus point"),
+		FOfficeCameraFraming::TryMakeFloorFocusPoint(FloorBounds, 37.f, 300.f, FloorFocusPoint));
+	TestEqual(
+		TEXT("focus point keeps the complete floor XY center and aims 300cm below structural floor Z"),
+		FloorFocusPoint,
+		FVector(1004.f, -1209.f, -263.f));
+
+	return true;
+}
+
+bool FCGROfficeCameraInvalidFloorFocusPointTest::RunTest(const FString& Parameters)
+{
+	// Mutation caught: accepting a negative/NaN focus depth or writing before validation corrupts the caller's sentinel.
+	const float Infinity = std::numeric_limits<float>::infinity();
+	const float NaN = std::numeric_limits<float>::quiet_NaN();
+	const FBox2D ValidFloorBounds(FVector2D(4.f, -2409.f), FVector2D(2004.f, -9.f));
+
+	auto TestRejectedInputPreservesOutput = [this](
+		const TCHAR* Label,
+		const FBox2D& FloorBounds,
+		const float StructuralFloorZ,
+		const float FocusBelowFloorCm)
+	{
+		const FVector Sentinel(11.f, 22.f, 33.f);
+		FVector FloorFocusPoint = Sentinel;
+
+		TestFalse(
+			FString::Printf(TEXT("%s is rejected"), Label),
+			FOfficeCameraFraming::TryMakeFloorFocusPoint(
+				FloorBounds,
+				StructuralFloorZ,
+				FocusBelowFloorCm,
+				FloorFocusPoint));
+		TestEqual(
+			FString::Printf(TEXT("%s preserves the output sentinel"), Label),
+			FloorFocusPoint,
+			Sentinel);
+	};
+
+	TestRejectedInputPreservesOutput(TEXT("invalid floor bounds"), FBox2D(ForceInit), 0.f, 300.f);
+	TestRejectedInputPreservesOutput(
+		TEXT("infinite floor coordinate"),
+		FBox2D(FVector2D(4.f, -2409.f), FVector2D(Infinity, -9.f)),
+		0.f,
+		300.f);
+	TestRejectedInputPreservesOutput(
+		TEXT("NaN floor coordinate"),
+		FBox2D(FVector2D(4.f, NaN), FVector2D(2004.f, -9.f)),
+		0.f,
+		300.f);
+	TestRejectedInputPreservesOutput(TEXT("infinite structural floor"), ValidFloorBounds, Infinity, 300.f);
+	TestRejectedInputPreservesOutput(TEXT("NaN structural floor"), ValidFloorBounds, NaN, 300.f);
+	TestRejectedInputPreservesOutput(TEXT("negative focus depth"), ValidFloorBounds, 37.f, -1.f);
+	TestRejectedInputPreservesOutput(TEXT("NaN focus depth"), ValidFloorBounds, 37.f, NaN);
 
 	return true;
 }
@@ -318,6 +399,66 @@ bool FCGROfficeCameraSearchLimitsTest::RunTest(const FString& Parameters)
 		TEXT("maximum refine iterations stay within the accepted budget"),
 		ProviderCallCount,
 		2 + ExpectedMaxRefineIterations);
+
+	return true;
+}
+
+bool FCGROfficeCameraApprovedEntryPoseRoomAnchorsTest::RunTest(const FString& Parameters)
+{
+	// 2026-09-06 PIE CamPose 캡처(2x2, 1290x722, identity interior). 승인 구도는 앞쪽 바닥 모서리·파사드를 화면 아래로 잘라낸다.
+	// Mutation caught: gating the calibrated pose on the full hero box silently sends every Office entry to dynamic framing.
+	const FTransform CameraTransform(
+		FRotator(-35.137, 150.0, 0.0),
+		FVector(2295.072f, -1438.574f, 1780.254f));
+	const float HorizontalFOV = 39.545f;
+	const FVector2D SafeMin(0.06f, 0.06f);
+	const FVector2D SafeMax(0.94f, 0.94f);
+
+	const TArray<FVector> RoomAnchors = {
+		FVector(404.f, -409.f, 0.f),
+		FVector(4.f, -9.f, 0.f),
+		FVector(4.f, -809.f, 0.f)
+	};
+	const float SupportedAspects[] = {16.f / 10.f, 16.f / 9.f, 1290.f / 722.f, 19.5f / 9.f};
+	for (const float Aspect : SupportedAspects)
+	{
+		TestTrue(
+			FString::Printf(TEXT("room anchors fit the approved pose at aspect %.3f"), Aspect),
+			FOfficeCameraFraming::DoesViewFit(
+				MakeArrayView(RoomAnchors),
+				CameraTransform,
+				HorizontalFOV,
+				Aspect,
+				SafeMin,
+				SafeMax));
+	}
+
+	const FBox2D FloorBounds(FVector2D(4.f, -809.f), FVector2D(804.f, -9.f));
+	const FBox HeroBounds = FOfficeCameraFraming::MakeHeroBounds(FloorBounds, 0.f, 800.f);
+	const TStaticArray<FVector, 8> HeroCorners = FOfficeCameraFraming::MakeBoxCorners(HeroBounds);
+	TestFalse(
+		TEXT("the approved pose crops the hero box, so a full hero-box gate would reject it"),
+		FOfficeCameraFraming::DoesViewFit(
+			TConstArrayView<FVector>(HeroCorners.GetData(), HeroCorners.Num()),
+			CameraTransform,
+			HorizontalFOV,
+			16.f / 9.f,
+			SafeMin,
+			SafeMax));
+
+	FVector2D FloorCenterOnScreen = FVector2D::ZeroVector;
+	TestTrue(
+		TEXT("floor center projects"),
+		FOfficeCameraFraming::ProjectWorldPoint(
+			RoomAnchors[0],
+			CameraTransform,
+			HorizontalFOV,
+			1290.f / 722.f,
+			FloorCenterOnScreen));
+	// PIE ProjectWorldToScreen 실측 (679.6,500.1)px / 1290x722
+	TestTrue(
+		TEXT("floor center lands where the PIE capture projected it"),
+		FloorCenterOnScreen.Equals(FVector2D(679.6f / 1290.f, 500.1f / 722.f), 0.005f));
 
 	return true;
 }

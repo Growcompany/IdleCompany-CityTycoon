@@ -13,8 +13,7 @@ namespace PotentialOdds
 		float Percent;
 	};
 
-	// 등급 추첨 기본 확률 (높은 등급부터). RollPotentialRarity 와 확률표 UI 가 공유하는 단일 진실 —
-	// 두 곳에 숫자를 따로 두면 표가 실제와 조용히 어긋난다.
+	// 등급 계산의 기본 확률 (높은 등급부터). 재설정 결과와 실효 상승 확률 계산이 함께 사용한다.
 	static const FBaseChance BaseTable[] = {
 		{ ELootBoxRarity::Legendary,  0.5f },
 		{ ELootBoxRarity::Epic,       2.0f },
@@ -29,6 +28,15 @@ namespace
 	// 크리 줄 환산 스케일 (Live Coding 튜닝) — 값 1~25 → 확률 +0.04~1%p / 배수 +0.02~0.5
 	constexpr float CritChancePerValue = 0.0004f;
 	constexpr float CritDamagePerValue = 0.02f;
+
+	ELootBoxRarity LimitPotentialRarityIncrease(ELootBoxRarity RolledRarity, ELootBoxRarity MaxAchievedRarity)
+	{
+		const uint8 Achieved = static_cast<uint8>(MaxAchievedRarity);
+		const uint8 Next = Achieved < static_cast<uint8>(ELootBoxRarity::Mythic)
+			? static_cast<uint8>(Achieved + 1) : Achieved;
+		const uint8 Result = FMath::Min(FMath::Max(static_cast<uint8>(RolledRarity), Achieved), Next);
+		return static_cast<ELootBoxRarity>(Result);
+	}
 
 	// BlueprintFunctionLibrary static 함수에서 GameInstance/Subsystem 접근 헬퍼
 	UTableManagerSubsystem* GetTableMgrForPotential()
@@ -133,12 +141,7 @@ ELootBoxRarity UEmployeePotentialHelper::RollPotentialRarity(ELootBoxRarity MaxA
 		}
 	}
 
-	if (static_cast<uint8>(NewRarity) < static_cast<uint8>(MaxAchievedRarity))
-	{
-		return MaxAchievedRarity;
-	}
-
-	return NewRarity;
+	return LimitPotentialRarityIncrease(NewRarity, MaxAchievedRarity);
 }
 
 TArray<FPotentialRarityOdds> UEmployeePotentialHelper::GetBaseRarityOdds()
@@ -156,7 +159,7 @@ TArray<FPotentialRarityOdds> UEmployeePotentialHelper::GetBaseRarityOdds()
 
 TArray<FPotentialRarityOdds> UEmployeePotentialHelper::GetEffectiveRarityOdds(ELootBoxRarity MaxAchievedRarity, ELootBoxRarity CardCeiling)
 {
-	// ResetPotentialAbility 와 같은 순서로 접는다: 기본 롤 → 래칫 → 상한 클램프.
+	// ResetPotentialAbility 와 같은 순서로 접는다: 기본 롤 → 하락 방지·한 단계 상승 제한 → 명함 상한.
 	// 상한은 래칫 아래로 못 내려가므로 EffectiveCeiling 도 그쪽 계산을 그대로 미러한다.
 	const uint8 Achieved = static_cast<uint8>(MaxAchievedRarity);
 	const uint8 EffectiveCeiling = FMath::Max(static_cast<uint8>(CardCeiling), Achieved);
@@ -164,8 +167,8 @@ TArray<FPotentialRarityOdds> UEmployeePotentialHelper::GetEffectiveRarityOdds(EL
 	TMap<uint8, float> Folded;
 	for (const PotentialOdds::FBaseChance& Entry : PotentialOdds::BaseTable)
 	{
-		const uint8 Ratcheted = FMath::Max(static_cast<uint8>(Entry.Rarity), Achieved);
-		Folded.FindOrAdd(FMath::Min(Ratcheted, EffectiveCeiling)) += Entry.Percent;
+		const uint8 Progressed = static_cast<uint8>(LimitPotentialRarityIncrease(Entry.Rarity, MaxAchievedRarity));
+		Folded.FindOrAdd(FMath::Min(Progressed, EffectiveCeiling)) += Entry.Percent;
 	}
 
 	TArray<FPotentialRarityOdds> Out;
@@ -295,10 +298,46 @@ int32 UEmployeePotentialHelper::GetAdditionalResetCost()
 	return 100;
 }
 
+FText UEmployeePotentialHelper::GetPotentialOptionValueText(const FPotentialOptionLine& Option)
+{
+	switch (Option.OptionType)
+	{
+	case EPotentialOptionType::CriticalChance:
+		// 집계 스케일은 0~1 배수라 표기용 %p 로 올린다 — 값 25 = +1.0%p
+		return FText::FromString(FString::Printf(TEXT("+%.1f%%p"), Option.Value * CritChancePerValue * 100.f));
+	case EPotentialOptionType::CriticalDamage:
+		return FText::FromString(FString::Printf(TEXT("+%.1f배"), Option.Value * CritDamagePerValue));
+	default:
+		return FText::FromString(FString::Printf(TEXT("+%d%%"), FMath::RoundToInt(Option.Value)));
+	}
+}
+
 FText UEmployeePotentialHelper::GetPotentialOptionDescription(const FPotentialOptionLine& Option)
 {
-	FText OptionName = GetPotentialOptionName(Option.OptionType);
-	return FText::Format(FText::FromString(TEXT("{0} +{1}%")), OptionName, FText::AsNumber(FMath::RoundToInt(Option.Value)));
+	return FText::Format(FText::FromString(TEXT("{0} {1}")), GetPotentialOptionName(Option.OptionType), GetPotentialOptionValueText(Option));
+}
+
+float UEmployeePotentialHelper::GetRarityUpgradeChancePercent(ELootBoxRarity CurrentRarity, ELootBoxRarity MaxAchievedRarity, ELootBoxRarity CardCeiling)
+{
+	float StayOrBelow = 0.f;
+	for (const FPotentialRarityOdds& Row : GetEffectiveRarityOdds(MaxAchievedRarity, CardCeiling))
+	{
+		if (static_cast<uint8>(Row.Rarity) <= static_cast<uint8>(CurrentRarity))
+		{
+			StayOrBelow += Row.Percent;
+		}
+	}
+	return FMath::Clamp(100.f - StayOrBelow, 0.f, 100.f);
+}
+
+FString UEmployeePotentialHelper::GetLockedLineUnlockText(int32 LineIndex)
+{
+	switch (LineIndex)
+	{
+	case 1:  return TEXT("★3에 열림");
+	case 2:  return TEXT("★6에 열림");
+	default: return FString();
+	}
 }
 
 FText UEmployeePotentialHelper::GetAdditionalOptionDescription(const FAdditionalOptionLine& Option)
@@ -317,7 +356,8 @@ FText UEmployeePotentialHelper::GetPotentialOptionName(EPotentialOptionType Opti
 			return Label;
 		}
 	}
-	return FText::FromString(TEXT("알 수 없음"));
+	UE_LOG(LogTemp, Warning, TEXT("[EmployeePotential] Missing display name for option %d"), static_cast<int32>(OptionType));
+	return FText::GetEmpty();
 }
 
 FText UEmployeePotentialHelper::GetAdditionalOptionName(EAdditionalOptionType OptionType)

@@ -15,7 +15,7 @@ class UBuildingSkinManagerSubsystem;
  * 자체 딤 + 중앙 패널 + 닫기 (GachaProbabilityWidget 클론).
  * 카테고리는 여는 쪽이 SetCategory 로 주입 — 천장/마일리지 상수는 양쪽 동일이라 확률표와 라벨만 갈린다.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UTraitGachaProbabilityWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()

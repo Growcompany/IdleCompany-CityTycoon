@@ -14,6 +14,7 @@ UNotificationContainerWidget::UNotificationContainerWidget(const FObjectInitiali
 void UNotificationContainerWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	SetVisibility(ESlateVisibility::HitTestInvisible);
 }
 
 namespace
@@ -22,9 +23,9 @@ namespace
 	constexpr double DuplicateNotificationWindow = 1.5;
 }
 
-void UNotificationContainerWidget::AddNotification(const FText& Message, float Duration, FLinearColor TextColor)
+void UNotificationContainerWidget::AddNotification(const FText& Message, float Duration, FLinearColor TextColor, UTexture2D* Icon)
 {
-	AddNotificationInternal(Message, nullptr, Duration, TextColor, EWidgetType::NotificationElement);
+	AddNotificationInternal(Message, Icon, Duration, TextColor, EWidgetType::NotificationElement);
 }
 
 void UNotificationContainerWidget::AddIconNotification(
@@ -115,8 +116,8 @@ void UNotificationContainerWidget::AddNotificationInternal(
 	// 최대 개수 초과 시 오래된 알림 제거
 	RemoveOldestNotifications();
 
-	// 알림 초기화 및 애니메이션 시작
-	if (WidgetType == EWidgetType::FundsToast)
+	// 기준은 위젯 타입이 아니라 아이콘 유무 — NotificationElement 도 아이콘을 받는다
+	if (Icon)
 	{
 		NewNotification->ShowIconMessage(Message, Icon, Duration, TextColor);
 	}

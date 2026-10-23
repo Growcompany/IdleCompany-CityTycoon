@@ -15,8 +15,9 @@
  * CompanyType별로 별도 DataTable 사용:
  *   DT_Recipe_Electronics, DT_Recipe_Automobile, DT_Recipe_Semiconductor
  *
- * 중간재는 공장 라인이 내부에서 자동 처리하므로,
- * 플레이어에게는 "원자재 → 최종제품" 으로 보임
+ * 중간재 숨김 결정은 2026-10-03 폐기 — 전자 업종 프리미엄 구간은 선행 제품(칩)을
+ * 보이는 입력으로 먹는다. 기초 전자·칩 구간은 여전히 원자재만 먹는다.
+ * 근거: docs/superpowers/specs/2026-10-03-industry-roster-4-design.md §2
  */
 USTRUCT(BlueprintType)
 struct FProductRecipeTable : public FTableRowBase
@@ -31,6 +32,18 @@ public:
 	// 프로젝트 인덱스 (1~100, FProjectData와 연동)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recipe")
 	int32 ProjectIndex = 0;
+
+	// 제품 1개분의 생산 가능 수량을 확보하는 제조업 3분야 비용. 슬롯 순서는 EProductionDiscipline의 앞 3칸.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Development")
+	TArray<double> DevelopmentPointCosts = { 0.0, 0.0, 0.0 };
+
+	// 최초 개발에 필요한 현재 착석 직원들의 분야별 능력 합계. 슬롯 순서는 제조업 3분야.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Development")
+	TArray<int32> RequiredTeamCapability = { 0, 0, 0 };
+
+	// 최초 개발에 필요한 실제 직원 평균 근무 시간(초).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Development")
+	float ResearchWorkSeconds = 0.0f;
 
 	// ──────────── 원자재 소모량 (10종) ────────────
 
@@ -84,9 +97,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Production")
 	int32 BaseMarketCap = 10;
 
+	// 제품 1개 기본 판매가. 판매처·수요·주문 배율 적용 전 금액.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Production")
+	int64 BaseSalePrice = 0;
+
 	// 에너지 소모량 (사우디 발전소에서 공급)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Production")
 	int32 EnergyCost = 5;
+
+	// ──────────── 제품 입력 (수직계열화) ────────────
+
+	// 같은 업종 안에서 먹는 선행 제품의 ProjectIndex. 0 = 제품 입력 없음.
+	// 업종 간 의존은 두지 않는다 — 한쪽이 미해금이면 생산이 막힌다.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ProductInput")
+	int32 InputProjectIndex = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ProductInput")
+	int32 InputProductQty = 0;
 
 	// ──────────── 헬퍼 함수 ────────────
 
@@ -165,6 +192,20 @@ public:
 		if (GoldOre > 0)    ++Count;
 		if (DiamondOre > 0) ++Count;
 		return Count;
+	}
+
+	// 제품 입력 조회. 반쪽 설정(한쪽만 채움)과 자기·전방 참조는 "입력 없음" 으로 떨어뜨린다 —
+	// CSV 오타 하나가 생산을 영구 불가로 만드는 쪽보다 안전하다.
+	// 입력 인덱스가 엄격히 작아야 통과하므로 사이클이 성립할 수 없다 — 따로 검사하지 않는다.
+	bool GetProductInput(int32& OutProjectIndex, int32& OutQty) const
+	{
+		OutProjectIndex = 0;
+		OutQty = 0;
+		if (InputProjectIndex <= 0 || InputProductQty <= 0) return false;
+		if (InputProjectIndex >= ProjectIndex) return false;
+		OutProjectIndex = InputProjectIndex;
+		OutQty = InputProductQty;
+		return true;
 	}
 
 	FProductRecipeTable() = default;

@@ -29,6 +29,13 @@ enum class EProjectLifecycle : uint8
 	ReportPending  UMETA(DisplayName = "ReportPending"),
 };
 
+// 개발중 집중 구간 술어의 단일 구현 — 매니저의 IsFocusLocked() 가 이걸 부르고,
+// 상태를 인자로만 받는 UI(RefreshOfficeUI) 도 같은 한 줄을 본다. 개발 배속도 이 구간에만 산다.
+inline bool IsFocusLockedPhase(EProjectLifecycle Value)
+{
+	return Value == EProjectLifecycle::Developing || Value == EProjectLifecycle::LaunchPending;
+}
+
 inline FString LexToString(EProjectLifecycle Value)
 {
 	switch (Value)

@@ -15,7 +15,7 @@ class UCommonTextBlock;
  * 업무공간 카드 위젯
  * - 업무공간(책상) 배치용 카드 UI
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOfficeWorkstationCardWidget : public UEntityCardWidgetBase
 {
 	GENERATED_BODY()

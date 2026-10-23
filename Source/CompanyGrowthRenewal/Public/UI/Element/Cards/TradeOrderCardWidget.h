@@ -21,7 +21,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTradeOrderDismissRequested, int32
  * Accept/Deliver 클릭은 델리게이트로만 보고, 실제 매니저 호출은 상위 Board가 처리.
  * 카드는 외부 의존성 없이 전달받은 데이터만 표시한다.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UTradeOrderCardWidget : public UCommonUserWidget
 {
 	GENERATED_BODY()

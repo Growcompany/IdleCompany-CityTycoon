@@ -15,9 +15,12 @@
 #include "Data/RecruitmentData.h"
 #include "Data/GachaRecruitmentData.h"
 #include "Data/ShopSaveData.h"
+#include "Data/QuestSaveData.h"
+#include "Data/AttendanceSaveData.h"
+#include "Data/MailboxSaveData.h"
+#include "Data/LiveOpsSaveData.h"
 #include "Data/BuildingTraitSaveData.h"
 #include "Data/CityAcqSaveData.h"
-#include "Data/TrendState.h"
 #include "Data/ShippedRecord.h"
 #include "Data/BuildingSkinGachaSaveData.h"
 #include "Data/WorldMapTypes.h"
@@ -27,7 +30,11 @@
 #include "Enum/RawMaterialType.h"
 #include "Enum/ItemType.h"
 #include "Enum/CompanyTitle.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
+#include "Data/EmployeeEquipmentData.h"
+#include "Data/SideContentSaveData.h"
+#include "Data/ManufacturingDevelopmentLedger.h"
+#include "Data/FacilityInstantFinishTransaction.h"
 #include "GameSaveData.generated.h"
 
 USTRUCT(BlueprintType)
@@ -41,8 +48,7 @@ struct FGameSaveData
     UPROPERTY(SaveGame)
     int32 NextEmployeeID = 1;
 
-    UPROPERTY(SaveGame)
-    TMap<int32, FEmployeeAppearanceData> EmployeeAppearances;
+    // ===== Inventory System =====
 
     // 보유 중인 건물 스킨 목록
     UPROPERTY(SaveGame)
@@ -62,9 +68,20 @@ struct FGameSaveData
     UPROPERTY(SaveGame)
     TMap<int32, FOfficeSaveData> OfficeDataMap;
 
+    // 제조 개발 포인트와 같은 스냅샷에 온라인 지급 범위와 오프라인 정산 끝을 보존한다.
+    UPROPERTY(SaveGame)
+    TArray<FManufacturingOnlineInterval> ManufacturingOnlineIntervals;
+
+    UPROPERTY(SaveGame)
+    FDateTime ManufacturingLastOfflineSettledEndUtc;
+
     // 보유 재화 (Brick, Money, Diamond 등)
     UPROPERTY(SaveGame)
     TMap<EResourceType, int64> ResourceBank;
+
+    // 도시 기체의 마지막 수령 시각은 맵 왕복과 재실행에도 유지한다.
+    UPROPERTY(SaveGame)
+    TMap<FName, int64> AmbientAircraftBonusLastClaimUnix;
 
     // 건물 해금 레벨 (1~40, Building1부터 순차적으로 해금)
     UPROPERTY(SaveGame)
@@ -85,17 +102,13 @@ struct FGameSaveData
     UPROPERTY(SaveGame)
     int32 CreditedPermanentEmployeeCapacity = 0;
 
-    // ===== GDS Trend System =====
+    // ===== GDS Discovery Codex =====
 
-    // 산업별 트렌드 상태 (라이트 루프 — 소재 유행, 착수 3회마다 교체)
-    UPROPERTY(SaveGame)
-    TMap<ECompanyType, FTrendState> TrendStates;
-
-    // 발견한 (산업|장르|소재) 조합 — 리뷰에서 등급 공개 시 기록, 도감(Phase 6)의 데이터
+    // 발견한 (산업|장르|소재) 조합 — 출시 확정 시 기록, 도감(Phase 6)의 데이터
     UPROPERTY(SaveGame)
     TArray<FString> DiscoveredCombos;
 
-    // 출시작 이력 (도감 [출시작] 탭)
+    // 건물별 출시작 이력. 도감 [출시작] 탭은 산업별로 합산한다.
     UPROPERTY(SaveGame)
     TArray<FShippedProjectRecord> ShippedProjects;
 
@@ -141,7 +154,19 @@ struct FGameSaveData
     UPROPERTY(SaveGame)
     bool bCurrentMissionReadyToClaim = false;
 
-    // M7 피날레 수령까지 끝난 명시적 튜토리얼 완료 상태. GoalBoard 언락 여부를 대용하지 않는다.
+    // 수익 설명 도중 실제 지급된 첫 회사 수익. 안내 완료와 별도로 보존한다.
+    UPROPERTY(SaveGame)
+    bool bCurrentMissionRevenueReceived = false;
+
+    // 도출형 미션(M8~M31)의 래치 걸음이 속한 미션 ID. 같은 미션으로 복원될 때만 아래 래치를 되살린다.
+    UPROPERTY(SaveGame)
+    FName DerivedMissionLatchID;
+
+    // 도달형으로 다시 물어볼 수 없는 걸음(SP 투자·별 강화 시도·설명 열람 등)의 래치 이름
+    UPROPERTY(SaveGame)
+    TArray<FName> DerivedMissionLatches;
+
+    // 마지막 필수 미션(M31) 수령까지 끝난 명시적 튜토리얼 완료 상태. GoalBoard 언락 여부를 대용하지 않는다.
     UPROPERTY(SaveGame)
     bool bTutorialCompleted = false;
 
@@ -149,15 +174,22 @@ struct FGameSaveData
     UPROPERTY(SaveGame)
     bool bGoalBoardUnlocked = false;
 
-    // 조건 충족 래치 (이벤트형 필수 — 도달형도 래치해 재평가 생략)
+    // 최초 보상 수령 이력. 후속 목표의 선행 조건으로 사용한다.
     UPROPERTY(SaveGame)
     TArray<FName> CompletedGoalIDs;
 
     UPROPERTY(SaveGame)
     TMap<FName, int64> GoalEventProgressByID;
 
+    // 반복 목표의 보상 수령 횟수.
     UPROPERTY(SaveGame)
-    TArray<FName> ClaimedGoalIDs;
+    TMap<FName, int32> GoalSuccessCountsByID;
+
+    UPROPERTY(SaveGame)
+    TArray<FName> ReadyGoalIDs;
+
+    UPROPERTY(SaveGame)
+    FName ActiveGuideGoalID;
 
     // ===== Panel Intro (패널 최초 진입 코치마크 — 스펙 2026-08-12) =====
 
@@ -181,11 +213,34 @@ struct FGameSaveData
     UPROPERTY(SaveGame)
     FGachaRecruitmentData GachaRecruitmentData;
 
+    UPROPERTY(SaveGame)
+    FEmployeeEquipmentState EmployeeEquipmentState;
+
     // ===== Shop System =====
 
     // 상점 구매 한도/리셋 상태
     UPROPERTY(SaveGame)
     FShopSaveData ShopSaveData;
+
+    // ===== Quest Ledger (일일/주간/업적 — 스펙 2026-09-13 §3) =====
+    UPROPERTY(SaveGame)
+    FQuestSaveData QuestSaveData;
+
+    // ===== 출석 (28일 순환 — 스펙 2026-09-13 §4) =====
+    UPROPERTY(SaveGame)
+    FAttendanceSaveData AttendanceSaveData;
+
+    // ===== 우편함 (시스템/글로벌 메일 — 스펙 2026-09-13 §5) =====
+    UPROPERTY(SaveGame)
+    FMailboxSaveData MailboxSaveData;
+
+    // ===== 라이브옵스 (이벤트 진행 · 읽은 공지 — 스펙 2026-09-13 §6) =====
+    UPROPERTY(SaveGame)
+    FLiveOpsSaveData LiveOpsSaveData;
+
+    // 접속·하루 첫 한가한 순간 자동 창(출석 → 새 공지)을 그날 이미 띄웠는가
+    UPROPERTY(SaveGame)
+    FEntryPopupSaveData EntryPopupSaveData;
 
     // ===== Building Trait System (BUILDING_TRAIT_SYSTEM v1.1) =====
 
@@ -291,6 +346,9 @@ struct FGameSaveData
     UPROPERTY(SaveGame)
     TMap<ECountryType, FCountryFactoryData> WorldMap_FactoryData;
 
+    UPROPERTY(SaveGame)
+    TArray<FFacilityInstantFinishTransaction> PendingFacilityInstantFinishes;
+
     // ===== 무역 주문서 시스템 =====
 
     UPROPERTY(SaveGame)
@@ -301,6 +359,22 @@ struct FGameSaveData
 
     UPROPERTY(SaveGame)
     int32 TradeOrders_ComboCount = 0;
+
+    // ===== 사이드 컨텐츠 (연수원·스카이라인·산업 융합·출장) =====
+    UPROPERTY(SaveGame)
+    FSideContentSaveData SideContentSaveData;
+
+    UPROPERTY(SaveGame)
+    TArray<FString> OfflineEconomyClaimKeys;
+
+    UPROPERTY(SaveGame)
+    FString OfflineTradeDiamondDayKey;
+
+    UPROPERTY(SaveGame)
+    int32 OfflineTradeDiamondCreditedToday = 0;
+
+    UPROPERTY(SaveGame)
+    FDateTime OfflineLastSaveUtc;
 };
 
 UCLASS()
@@ -318,4 +392,3 @@ public:
     UPROPERTY(VisibleAnywhere, Category = "Save")
     uint32 UserIndex = 0;
 };
-

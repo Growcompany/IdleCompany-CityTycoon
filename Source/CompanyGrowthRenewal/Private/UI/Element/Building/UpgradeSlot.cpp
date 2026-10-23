@@ -147,7 +147,8 @@ void UUpgradeSlot::UpdateInfo(int32 Level, float CurrentValue, float NextValue, 
 
 	auto FormatNumber = [this](float Value) -> FText
 	{
-		if (bAbbreviateValue)
+		// Small percentage gains keep their precision even when totals use compact notation.
+		if (bAbbreviateValue && (ValueUnit != TEXT("%") || FMath::Abs(Value) >= 10.f))
 		{
 			return UGlobalUtilFunctions::AbbreviateNumberFloat(Value);
 		}
@@ -202,6 +203,10 @@ void UUpgradeSlot::UpdateInfo(int32 Level, float CurrentValue, float NextValue, 
 	}
 
 	// 잠금 상태 UI 업데이트
+	if (LockConditionTextBlock)
+	{
+		LockConditionTextBlock->SetText(LockConditionText);
+	}
 	if (LockedBorder)
 	{
 		LockedBorder->SetVisibility(bIsLocked ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
@@ -245,10 +250,20 @@ void UUpgradeSlot::SetPunchSuppressed(bool bSuppressed)
 
 void UUpgradeSlot::SetIconTexture(UTexture2D* InTexture)
 {
-	if (IconImage && InTexture)
+	if (!IconImage)
+	{
+		return;
+	}
+
+	if (InTexture)
 	{
 		IconImage->SetBrushFromTexture(InTexture);
 		IconImage->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	}
+	else
+	{
+		IconImage->SetBrush(FSlateBrush());
+		IconImage->SetVisibility(ESlateVisibility::Collapsed);
 	}
 }
 

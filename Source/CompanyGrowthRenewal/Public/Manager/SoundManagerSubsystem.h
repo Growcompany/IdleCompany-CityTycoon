@@ -21,6 +21,9 @@ class COMPANYGROWTHRENEWAL_API USoundManagerSubsystem : public UGameInstanceSubs
 	GENERATED_BODY()
 
 public:
+	// 스냅샷 수집 진입점 — 세이브 슬롯이 아직 없어도 볼륨·뮤트가 실려 나간다(SaveLoadManager 가 부른다).
+	void CollectSaveData(struct FGameSaveData& OutData) const;
+
 	USoundManagerSubsystem();
 
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
@@ -94,6 +97,13 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Sound Manager")
 	void SaveAudioSettings();
+
+private:
+	// 디스크 쓰기 없이 세이브 캐시에만 반영한다. 설정창을 열어둔 채 홈버튼을 누르면
+	// 백그라운드 훅이 캐시를 그대로 저장하는데, 그 캐시에 새 값이 없어 유실됐다.
+	void PushAudioToSaveCache();
+
+public:
 
 	UFUNCTION(BlueprintCallable, Category = "Sound Manager")
 	void LoadAudioSettings();

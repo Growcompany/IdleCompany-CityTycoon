@@ -4,12 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "CommonActivatableWidget.h"
-#include "Entity/Country/CountryActor.h"
 #include "CountryRouterPanelWidget.generated.h"
 
 class UScrollBox;
-class UTextBlock;
-class UCloseButtonWidget;
+class UPanelHeaderWidget;
 class UButton;
 class UCountryRouterCardWidget;
 struct FCountryInfoTable;
@@ -30,7 +28,7 @@ enum class ECountryRouterMode : uint8
  * 자원/공장 하단바 버튼 공통 라우터 패널.
  * 모드 enum 하나로 필터/제목/점프탭이 결정됨 → 클래스 1개 + WBP 1개로 2가지 variation 처리.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UCountryRouterPanelWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()
@@ -48,13 +46,10 @@ protected:
 	virtual void NativeDestruct() override;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UTextBlock> TitleText;
-
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UScrollBox> CardScrollBox;
 
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UCloseButtonWidget> CloseButton;
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	TObjectPtr<UPanelHeaderWidget> PanelHeader;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UButton> BackgroundBtn;

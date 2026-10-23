@@ -16,7 +16,7 @@ class UHorizontalBox;
  * - 에디터에서 두께/길이/색상을 바로 설정 가능
  * - GradientLength > 0 이면 양 끝이 투명으로 페이드 (HBox 3분할 WBP 구조 필요)
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API USeparatorWidget : public UUserWidget
 {
 	GENERATED_BODY()

@@ -7,7 +7,7 @@
 class UButton;
 class UImage;
 class UCommonTextBlock;
-class UCloseButtonWidget;
+class UModalFrameWidget;
 class UWrapBox;
 class UCommonButtonBase;
 class UCommonButtonGroupBase;
@@ -19,7 +19,7 @@ class UProfileAvatarTileWidget;
  * - 좌: 현재 프로필 미리보기 (메인 HUD 액자와 같은 규격)
  * - 우: DT_ProfileImage 아바타 격자, 타일 클릭 → ProfileImageID 변경
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UProfileImagePanelWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()
@@ -34,7 +34,7 @@ protected:
 	TObjectPtr<UButton> BackgroundBtn = nullptr;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	TObjectPtr<UCloseButtonWidget> UIE_CloseButton = nullptr;
+	TObjectPtr<UModalFrameWidget> ModalFrame;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	TObjectPtr<UWrapBox> ImageCardContainer = nullptr;

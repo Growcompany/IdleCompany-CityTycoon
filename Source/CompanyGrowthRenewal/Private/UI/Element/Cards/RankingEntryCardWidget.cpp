@@ -1,16 +1,18 @@
 #include "UI/Element/Cards/RankingEntryCardWidget.h"
-#include "UI/Element/Buttons/ButtonWidget.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Global/GlobalUtilFunctions.h"
 #include "Table/ProfileImageData.h"
 #include "Enum/CompanyTitle.h"
 #include "Components/TextBlock.h"
 #include "Components/Image.h"
+#include "Components/WidgetSwitcher.h"
 #include "CommonButtonBase.h"
 
 void URankingEntryCardWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	if (RowButton) RowButton->OnClicked().AddUObject(this, &URankingEntryCardWidget::OnMoveBtnClicked);
+	SetVisitEnabled(bVisitEnabled);
 
 	if (MoveBtn)
 	{
@@ -25,12 +27,18 @@ void URankingEntryCardWidget::NativeDestruct()
 		MoveBtn->OnClicked().RemoveAll(this);
 	}
 
+	if (RowButton) RowButton->OnClicked().RemoveAll(this);
 	Super::NativeDestruct();
 }
 
 void URankingEntryCardWidget::SetEntryData(const FRankingEntry& InEntry)
 {
 	CachedEntry = InEntry;
+	if (PlayerNameText) PlayerNameText->SetText(FText::FromString(InEntry.DisplayName));
+	if (UWidgetSwitcher* RankVisual = Cast<UWidgetSwitcher>(GetWidgetFromName(TEXT("RankVisualSwitcher"))))
+	{
+		RankVisual->SetActiveWidgetIndex(InEntry.Rank >= 1 && InEntry.Rank <= 3 ? InEntry.Rank : 0);
+	}
 
 	if (RankText)
 	{
@@ -44,14 +52,9 @@ void URankingEntryCardWidget::SetEntryData(const FRankingEntry& InEntry)
 		}
 	}
 
-	if (UButtonWidget* NameBtn = Cast<UButtonWidget>(PlayerNameButton))
-	{
-		NameBtn->SetButtonText(FText::FromString(InEntry.DisplayName));
-	}
-
 	if (HQLevelText)
 	{
-		HQLevelText->SetText(FText::FromString(FString::Printf(TEXT("Lv.%d"), InEntry.HQLevel)));
+		HQLevelText->SetText(InEntry.HQLevel > 0 ? FText::FromString(FString::Printf(TEXT("Lv.%d"), InEntry.HQLevel)) : FText::GetEmpty());
 	}
 
 	if (RevenueText)
@@ -62,7 +65,8 @@ void URankingEntryCardWidget::SetEntryData(const FRankingEntry& InEntry)
 	// 프로필 이미지 로드
 	if (IconImage)
 	{
-		UTableManagerSubsystem* TableMgr = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+		IconImage->SetVisibility(InEntry.PlayFabId.IsEmpty() ? ESlateVisibility::Hidden : ESlateVisibility::HitTestInvisible);
+		UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
 		if (TableMgr)
 		{
 			bool bSuccess = false;
@@ -81,48 +85,33 @@ void URankingEntryCardWidget::SetEntryData(const FRankingEntry& InEntry)
 
 void URankingEntryCardWidget::OnMoveBtnClicked()
 {
-	OnEntryCardClicked.Broadcast(CachedEntry);
-}
-
-float URankingEntryCardWidget::EaseOutCubic(float A)
-{
-	const float T = 1.0f - A;
-	return 1.0f - T * T * T;
+	if (bVisitEnabled) OnEntryCardClicked.Broadcast(CachedEntry);
 }
 
 void URankingEntryCardWidget::PlayIntro(int32 OrderIndex)
 {
-	IntroDelay = FMath::Min(OrderIndex * IntroStagger, IntroMaxDelay);
-	IntroElapsed = 0.f;
-	bIntroPlaying = true;
-
-	// 첫 틱 전 제자리 1프레임 깜빡임 방지 — 시작 상태(투명 + 우측 오프셋) 즉시 적용
-	FWidgetTransform Init;
-	Init.Translation = FVector2D(IntroSlideX, 0.f);
-	SetRenderTransform(Init);
-	SetRenderOpacity(0.f);
+	Intro.Play(*this, OrderIndex);
 }
 
 void URankingEntryCardWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
-	if (!bIntroPlaying) return;
 
-	IntroElapsed += InDeltaTime;
-	if (IntroElapsed < IntroDelay) return;
+	Intro.Tick(*this, InDeltaTime);
+}
 
-	const float T = FMath::Clamp((IntroElapsed - IntroDelay) / IntroDuration, 0.f, 1.f);
-	const float E = EaseOutCubic(T);
-
-	FWidgetTransform Xform;
-	Xform.Translation = FVector2D(IntroSlideX * (1.f - E), 0.f);
-	SetRenderTransform(Xform);
-	SetRenderOpacity(E);
-
-	if (T >= 1.f)
+void URankingEntryCardWidget::SetVisitEnabled(bool bEnabled)
+{
+	bVisitEnabled = bEnabled;
+	if (RowButton) RowButton->SetIsEnabled(bEnabled);
+	if (MoveBtn)
 	{
-		bIntroPlaying = false;
-		SetRenderTransform(FWidgetTransform());
-		SetRenderOpacity(1.f);
+		MoveBtn->SetIsEnabled(bEnabled);
+		MoveBtn->SetVisibility(bEnabled ? ESlateVisibility::Visible : ESlateVisibility::Hidden);
 	}
+}
+
+void URankingEntryCardWidget::SetScoreAvailable(bool bAvailable)
+{
+	if (RevenueText) RevenueText->SetText(bAvailable ? UGlobalUtilFunctions::AbbreviateNumber(CachedEntry.TotalRevenue, ENumberAbbrevStyle::Auto, ENumberRoundMode::Floor) : FText::FromString(TEXT("-")));
 }

@@ -5,8 +5,10 @@
 #include "Components/StaticMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Utils/MobileFacadeMaterialTuning.h"
+#include "Utils/BuildingGroundContact.h"
 #include "EngineUtils.h" // TActorIterator
 #include "Engine/GameInstance.h"
+#include "Engine/World.h"
 #if WITH_EDITOR
 #include "Editor.h"
 #include "Engine/DataTable.h"
@@ -16,14 +18,33 @@
 
 // 스카이라인 창문 발광색 다양화 — 키 해시로 DT_BuildingLight 색 결정(결정적, 재시작 불변) 후
 // BP_MB 머티리얼의 "Window_Emissive_Color" 파라미터에 적용. (Static mobility 무관 — 머티리얼 파라미터라 OK)
-static void ApplyWindowLightToBuilding(AActor* B, int32 Key, int32 ExplicitLightID, UTableManagerSubsystem* TableMgr)
+static void ApplyWindowLightToBuilding(AActor* B, int32 Key, int32 ExplicitLightID,
+	float WindowLightIntensityScale, UTableManagerSubsystem* TableMgr)
 {
 	if (!B || !TableMgr) { return; }
 	TArray<UStaticMeshComponent*> Comps;
 	B->GetComponents<UStaticMeshComponent>(Comps);
+	TArray<UStaticMeshComponent*> FacadeComponents;
+	FacadeComponents.Reserve(Comps.Num());
 	for (UStaticMeshComponent* C : Comps)
 	{
-		MobileFacadeMaterialTuning::ApplyToSlotZero(C);
+		if (C && MobileFacadeMaterialTuning::IsFacadeMaterialQualified(C->GetMaterial(0)))
+		{
+			FacadeComponents.Add(C);
+		}
+	}
+
+	FBox FacadeBounds(ForceInit);
+	for (const UStaticMeshComponent* FacadeComponent : FacadeComponents)
+	{
+		if (FacadeComponent->IsRegistered())
+		{
+			FacadeBounds += FacadeComponent->Bounds.GetBox();
+		}
+	}
+	for (UStaticMeshComponent* FacadeComponent : FacadeComponents)
+	{
+		MobileFacadeMaterialTuning::ApplyToSlotZero(FacadeComponent, FacadeBounds);
 	}
 
 	// DT_CityCompany.LightID 로 회사별 지정: >0 이면 그 DT_BuildingLight 행 명시 사용,
@@ -41,10 +62,20 @@ static void ApplyWindowLightToBuilding(AActor* B, int32 Key, int32 ExplicitLight
 	bool bOk = false;
 	const FBuildingLightData L = TableMgr->GetBuildingLightData(Lid, bOk);
 	if (!bOk) { return; }
-	const FLinearColor FinalEmissive = L.EmissiveColor * L.EmissiveIntensity;
+	const FLinearColor SourceEmissive = L.EmissiveColor * L.EmissiveIntensity;
+	const UWorld* BuildingWorld = B->GetWorld();
+	const bool bMobileES31 = BuildingWorld
+		&& BuildingWorld->GetFeatureLevel() == ERHIFeatureLevel::ES3_1;
+	const FLinearColor ResolvedEmissive = MobileFacadeMaterialTuning::ResolveWindowEmissiveColor(
+		SourceEmissive,
+		bMobileES31);
+	const float ClampedLightScale = FMath::Clamp(WindowLightIntensityScale, 0.0f, 1.0f);
+	const FLinearColor ScaledEmissive = MobileFacadeMaterialTuning::ScaleRgbPreserveAlpha(
+		ResolvedEmissive, FLinearColor(ClampedLightScale, ClampedLightScale, ClampedLightScale, 1.0f));
 
 	for (UStaticMeshComponent* C : Comps)
 	{
+		if (!C || C->GetFName() == FName(TEXT("GroundContactSMC"))) { continue; }
 		const int32 NumMat = C->GetNumMaterials();
 		for (int32 i = 0; i < NumMat; ++i)
 		{
@@ -52,7 +83,7 @@ static void ApplyWindowLightToBuilding(AActor* B, int32 Key, int32 ExplicitLight
 			if (!Cur) { continue; }
 			UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Cur);
 			if (!MID) { MID = C->CreateAndSetMaterialInstanceDynamicFromMaterial(i, Cur); }
-			if (MID) { MID->SetVectorParameterValue(TEXT("Window_Emissive_Color"), FinalEmissive); }
+			if (MID) { MID->SetVectorParameterValue(TEXT("Window_Emissive_Color"), ScaledEmissive); }
 		}
 	}
 }
@@ -70,6 +101,7 @@ static void ApplySkinToBuilding(AActor* B, int32 SkinID, UTableManagerSubsystem*
 	B->GetComponents<UStaticMeshComponent>(Comps);
 	for (UStaticMeshComponent* C : Comps)
 	{
+		if (!C || C->GetFName() == FName(TEXT("GroundContactSMC"))) { continue; }
 		C->SetMaterial(0, Mat); // 슬롯0 = 바디 머티리얼
 	}
 }
@@ -191,12 +223,14 @@ int32 UCityCompanyDirector::GetMobileFacadePreviewActorCount() const
 bool UCityCompanyDirector::IsEligibleEditorPreviewWorld() const
 {
 	const UWorld* DirectorWorld = GetWorld();
+	const FString MapPackage = DirectorWorld ? DirectorWorld->GetPackage()->GetName() : FString();
 	return DirectorWorld
 		&& DirectorWorld->WorldType == EWorldType::Editor
 		&& !DirectorWorld->IsGameWorld()
 		&& DirectorWorld->GetFeatureLevel() == ERHIFeatureLevel::ES3_1
-		&& DirectorWorld->GetPackage()->GetName()
-			== TEXT("/Game/CompanyGrowth/Level/MainMap_TheRiverwalkCity");
+		&& (MapPackage == TEXT("/Game/CompanyGrowth/Level/MainMap_City")
+			|| MapPackage == TEXT("/Game/CompanyGrowth/Level/MainMap_Manhattan")
+			|| MapPackage == TEXT("/Game/CompanyGrowth/Level/MainMap_TheRiverwalkCity"));
 }
 
 bool UCityCompanyDirector::ApplyMobileFacadePreview()
@@ -502,7 +536,8 @@ void UCityCompanyDirector::BuildSkylineMapping()
 		// 스킨(머티리얼 슬롯0) 적용 (DT_CityCompany.SkinID)
 		ApplySkinToBuilding(A, Data.SkinID, TableMgr);
 		// 창문 발광색 적용 (DT_CityCompany.LightID: >0 명시 / 0 자동 해시 팔레트)
-		ApplyWindowLightToBuilding(A, Key, Data.LightID, TableMgr);
+		ApplyWindowLightToBuilding(A, Key, Data.LightID, Data.WindowLightIntensityScale, TableMgr);
+		BuildingGroundContact::AddToCityBuilding(A);
 
 		FCitySkylineEntry E;
 		E.BuildingKey = Key;

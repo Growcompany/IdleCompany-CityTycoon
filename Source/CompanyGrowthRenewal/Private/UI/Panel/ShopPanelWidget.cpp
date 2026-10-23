@@ -1,4 +1,7 @@
 #include "UI/Panel/ShopPanelWidget.h"
+#include "UI/Element/Common/PanelHeaderWidget.h"
+#include "Utils/EquipmentTicketShopRules.h"
+#include "Manager/ItemInventoryManager.h"
 #include "CommonTextBlock.h"
 #include "CommonButtonBase.h"
 #include "Groups/CommonButtonGroupBase.h"
@@ -29,27 +32,39 @@ void UShopPanelWidget::NativeConstruct()
 	TabButtonGroup = NewObject<UCommonButtonGroupBase>(this);
 	TabButtonGroup->SetSelectionRequired(true);
 
-	UTabButtonWidget* Tabs[] = { DailyTab, WeeklyTab, DiamondTab, MileageTab };
-	for (UTabButtonWidget* Tab : Tabs)
+	// 레일 표시 순서. 등록된 것만 TabOrder 에 쌓아 인덱스↔탭을 항상 일치시킨다
+	struct FTabEntry { UTabButtonWidget* Widget; EShopTab Tab; };
+	const FTabEntry Entries[] = {
+		{ PackageTab,  EShopTab::Package },
+		{ DailyTab,    EShopTab::Daily   },
+		{ WeeklyTab,   EShopTab::Weekly  },
+		{ DiamondTab,  EShopTab::Diamond },
+		{ MileageTab,  EShopTab::Mileage },
+	};
+
+	TabOrder.Reset();
+	for (const FTabEntry& Entry : Entries)
 	{
-		if (Tab && Tab->GetButton())
+		if (Entry.Widget && Entry.Widget->GetButton())
 		{
-			TabButtonGroup->AddWidget(Tab->GetButton());
-			Tab->GetButton()->SetIsSelectable(true);
+			TabButtonGroup->AddWidget(Entry.Widget->GetButton());
+			Entry.Widget->GetButton()->SetIsSelectable(true);
+			// 전환음은 OnTabSelectionChanged 가 낸다 — 버튼 자체 클릭음을 끊어 두 발을 막는다
+			if (UButtonWidget* TabBtn = Cast<UButtonWidget>(Entry.Widget->GetButton())) TabBtn->SetPlayClickSound(false);
+			TabOrder.Add(Entry.Tab);
 		}
 	}
 
 	TabButtonGroup->OnSelectedButtonBaseChanged.AddDynamic(this, &UShopPanelWidget::OnTabSelectionChanged);
-	TabButtonGroup->SelectButtonAtIndex(0);
-	CurrentTab = EShopTab::Daily;
 
-	if (UIE_CloseButton)
+	// 기본 진입 탭은 계속 일일 (패키지가 레일 맨 위여도 첫 화면은 바뀌지 않는다)
+	const int32 DefaultIndex = FMath::Max(IndexForTab(EShopTab::Daily), 0);
+	TabButtonGroup->SelectButtonAtIndex(DefaultIndex);
+	CurrentTab = TabForIndex(DefaultIndex);
+
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UShopPanelWidget::OnCloseButtonClicked);
-	}
-	if (ManualResetButton)
-	{
-		ManualResetButton->OnClicked().AddUObject(this, &UShopPanelWidget::OnManualResetClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UShopPanelWidget::OnCloseButtonClicked);
 	}
 }
 
@@ -59,13 +74,9 @@ void UShopPanelWidget::NativeDestruct()
 	{
 		TabButtonGroup->OnSelectedButtonBaseChanged.RemoveAll(this);
 	}
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.RemoveDynamic(this, &UShopPanelWidget::OnCloseButtonClicked);
-	}
-	if (ManualResetButton)
-	{
-		ManualResetButton->OnClicked().RemoveAll(this);
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UShopPanelWidget::OnCloseButtonClicked);
 	}
 	Super::NativeDestruct();
 }
@@ -73,6 +84,7 @@ void UShopPanelWidget::NativeDestruct()
 void UShopPanelWidget::NativeOnActivated()
 {
 	Super::NativeOnActivated();
+	if (auto* PC = Cast<AMainMapPlayerController>(GetOwningPlayer())) PC->GoToUIMode();
 
 	UGameInstance* GI = GetGameInstance();
 	if (UShopManagerSubsystem* ShopMgr = GI->GetSubsystem<UShopManagerSubsystem>())
@@ -139,6 +151,8 @@ void UShopPanelWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime
 
 void UShopPanelWidget::NativeOnDeactivated()
 {
+	RefillTicketType = EItemType::None;
+	RefillRequiredCount = 0;
 	UGameInstance* GI = GetGameInstance();
 	if (UShopManagerSubsystem* ShopMgr = GI->GetSubsystem<UShopManagerSubsystem>())
 	{
@@ -168,29 +182,21 @@ void UShopPanelWidget::NativeOnDeactivated()
 
 void UShopPanelWidget::SetInitialTab(EShopTab Tab)
 {
-	int32 Index = 0;
-	switch (Tab)
-	{
-	case EShopTab::Weekly:  Index = 1; break;
-	case EShopTab::Diamond: Index = 2; break;
-	case EShopTab::Mileage: Index = 3; break;
-	default: break;
-	}
-	if (TabButtonGroup)
+	const int32 Index = IndexForTab(Tab);
+	if (TabButtonGroup && Index != INDEX_NONE)
 	{
 		TabButtonGroup->SelectButtonAtIndex(Index);
 	}
 }
 
-EShopTab UShopPanelWidget::TabForIndex(int32 Index)
+EShopTab UShopPanelWidget::TabForIndex(int32 Index) const
 {
-	switch (Index)
-	{
-	case 1: return EShopTab::Weekly;
-	case 2: return EShopTab::Diamond;
-	case 3: return EShopTab::Mileage;
-	default: return EShopTab::Daily;
-	}
+	return TabOrder.IsValidIndex(Index) ? TabOrder[Index] : EShopTab::Daily;
+}
+
+int32 UShopPanelWidget::IndexForTab(EShopTab Tab) const
+{
+	return TabOrder.IndexOfByKey(Tab);
 }
 
 void UShopPanelWidget::OnTabSelectionChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex)
@@ -222,14 +228,31 @@ void UShopPanelWidget::RebuildGrid()
 		return;
 	}
 
-	TSubclassOf<UUserWidget> CardClass = TableMgr->GetWidgetClass(EWidgetType::ShopItemCard);
+	// 패키지는 카드가 3단이라 더 크고 항목도 적다 — 전용 카드 + 3열
+	const bool bPackageTab = (CurrentTab == EShopTab::Package);
+	const int32 Columns = bPackageTab ? 3 : 4;
+	TSubclassOf<UUserWidget> CardClass = TableMgr->GetWidgetClass(
+		bPackageTab ? EWidgetType::ShopPackageCard : EWidgetType::ShopItemCard);
+	if (!CardClass)
+	{
+		// 전용 카드가 아직 등록 전이면 공용 카드로 떨어진다 — 탭이 비는 것보다 낫다
+		CardClass = TableMgr->GetWidgetClass(EWidgetType::ShopItemCard);
+	}
 	if (!CardClass)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ShopPanel] ShopItemCard widget class not found in DT_WidgetClass"));
 		return;
 	}
 
-	const TArray<FName> RowNames = TableMgr->GetShopItemRowsForTab(CurrentTab);
+	TArray<FName> RowNames = TableMgr->GetShopItemRowsForTab(CurrentTab);
+	if (RefillTicketType != EItemType::None) RowNames.StableSort([this, TableMgr](FName A, FName B)
+	{
+		FShopItemTable RowA, RowB;
+		TableMgr->GetShopItemRow(A, RowA); TableMgr->GetShopItemRow(B, RowB);
+		const int32 ScoreA = RowA.Item == RefillTicketType ? (RowA.Quantity == RefillRequiredCount ? 2 : 1) : 0;
+		const int32 ScoreB = RowB.Item == RefillTicketType ? (RowB.Quantity == RefillRequiredCount ? 2 : 1) : 0;
+		return ScoreA > ScoreB;
+	});
 	int32 Index = 0;
 	for (const FName& RowName : RowNames)
 	{
@@ -248,7 +271,11 @@ void UShopPanelWidget::RebuildGrid()
 		Card->InitCard(RowName, Row);
 		Card->OnPurchaseRequested.AddUObject(this, &UShopPanelWidget::HandlePurchaseRequested);
 
-		ItemGrid->AddChildToUniformGrid(Card, Index / 4, Index % 4);
+		if (UUniformGridSlot* GridSlot = ItemGrid->AddChildToUniformGrid(Card, Index / Columns, Index % Columns))
+		{
+			// 이름이 두 줄인 카드가 칸을 키워도 같은 탭의 카드 높이를 맞춘다(버튼은 카드 바닥에 붙어 있다)
+			GridSlot->SetVerticalAlignment(VAlign_Fill);
+		}
 		Card->PlayEntrance(0.05f + Index * 0.045f);
 		Cards.Add(Card);
 		++Index;
@@ -284,6 +311,32 @@ void UShopPanelWidget::HandlePurchaseRequested(FName RowName)
 	{
 		return;
 	}
+	FShopItemTable TicketRow;
+	if (TableMgr->GetShopItemRow(RowName, TicketRow) && EquipmentTicketShopRules::IsTicket(TicketRow.Item))
+	{
+		FEquipmentTicketShopRequest Request;
+		FEquipmentTicketShopQuote Quote;
+		FName Error;
+		if (!ShopMgr->PrepareEquipmentTicketPurchase(RowName, Request, Quote, Error) || !Quote.bCanAfford || Quote.RemainingCount == 0)
+		{
+			UIMgr->ShowNotification(NSLOCTEXT("Shop", "TicketUnavailable", "재화 또는 구매 가능 횟수를 확인해 주세요."), 3.f, ENotificationType::Failed);
+			RefreshAllCardStates();
+			return;
+		}
+		const auto* Items = GI->GetSubsystem<UItemInventoryManager>();
+		const int32 Held = Items ? Items->GetItemCount(Quote.Item) : 0;
+		bool bCurrencyFound = false;
+		const FResourceInfo Currency = TableMgr->GetResourceInfo(Quote.Currency == EShopCurrency::Money ? EResourceType::Money : EResourceType::Diamond, bCurrencyFound);
+		if (Quote.Price > 0 && !bCurrencyFound) { UE_LOG(LogTemp, Warning, TEXT("Ticket shop currency display missing")); return; }
+		const FText Cost = Quote.Price == 0 ? NSLOCTEXT("Shop", "TicketFree", "무료")
+			: FText::Format(NSLOCTEXT("Shop", "TicketCurrencyCost", "{0} {1}개 사용"), Currency.DisplayName, FText::AsNumber(Quote.Price));
+		UIMgr->ShowConfirmDialog(NSLOCTEXT("Shop", "TicketPurchaseTitle", "상자 구매 확인"),
+			FText::Format(NSLOCTEXT("Shop", "TicketPurchaseQuote", "{0} {1}개\n{2}\n보유 {3}개 → {4}개"),
+				GetItemTypeDisplayName(Quote.Item), FText::AsNumber(Quote.Quantity), Cost, FText::AsNumber(Held), FText::AsNumber(static_cast<int64>(Held) + Quote.Quantity)),
+			FSimpleDelegate::CreateUObject(this, &ThisClass::ConfirmEquipmentTicketPurchase, Request),
+			FSimpleDelegate(), EConfirmDialogIcon::Info);
+		return;
+	}
 
 	if (!ShopMgr->CanAfford(RowName))
 	{
@@ -303,8 +356,9 @@ void UShopPanelWidget::HandlePurchaseRequested(FName RowName)
 
 	UIMgr->ShowConfirmDialog(
 		NSLOCTEXT("Shop", "PurchaseTitle", "구매 확인"),
-		FText::Format(NSLOCTEXT("Shop", "PurchaseMsg", "{0}을(를) 구매하시겠습니까?"), Row.DisplayName),
-		FSimpleDelegate::CreateUObject(this, &UShopPanelWidget::ConfirmPurchase, RowName));
+		FText::Format(NSLOCTEXT("Shop", "PurchaseMsg", "{0}|hpp(을,를) 구매하시겠습니까?"), Row.DisplayName),
+		FSimpleDelegate::CreateUObject(this, &UShopPanelWidget::ConfirmPurchase, RowName),
+		FSimpleDelegate(), EConfirmDialogIcon::Info);
 }
 
 void UShopPanelWidget::ConfirmPurchase(FName RowName)
@@ -329,21 +383,6 @@ void UShopPanelWidget::ConfirmPurchase(FName RowName)
 				break;
 			}
 		}
-		if (UTableManagerSubsystem* TableMgr = GI->GetSubsystem<UTableManagerSubsystem>())
-		{
-			FShopItemTable Row;
-			if (TableMgr->GetShopItemRow(RowName, Row))
-			{
-				if (Row.Currency == EShopCurrency::Money && UIE_Resource_Money_1)
-				{
-					UIE_Resource_Money_1->PlayBump();
-				}
-				else if (Row.Currency == EShopCurrency::Diamond && UIE_Resource_Diamond_1)
-				{
-					UIE_Resource_Diamond_1->PlayBump();
-				}
-			}
-		}
 	}
 	else
 	{
@@ -355,47 +394,6 @@ void UShopPanelWidget::ConfirmPurchase(FName RowName)
 	// 카드 상태는 OnShopStockChanged/OnResourceChanged 경유로 갱신됨
 }
 
-void UShopPanelWidget::OnManualResetClicked()
-{
-	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
-	{
-		UIMgr->ShowConfirmDialog(
-			NSLOCTEXT("Shop", "ResetTitle", "일일 상점 초기화"),
-			NSLOCTEXT("Shop", "ResetMsg", "다이아 50개로 일일 상점 구매 한도를 초기화할까요?"),
-			FSimpleDelegate::CreateUObject(this, &UShopPanelWidget::ConfirmManualReset));
-	}
-}
-
-void UShopPanelWidget::ConfirmManualReset()
-{
-	UGameInstance* GI = GetGameInstance();
-	UShopManagerSubsystem* ShopMgr = GI->GetSubsystem<UShopManagerSubsystem>();
-	USoundManagerSubsystem* SM = GI->GetSubsystem<USoundManagerSubsystem>();
-
-	if (ShopMgr && ShopMgr->ManualResetDaily())
-	{
-		if (SM)
-		{
-			SM->PlayUISound(CGUISoundTags::PurchaseSuccess);
-		}
-		if (UIE_Resource_Diamond_1)
-		{
-			UIE_Resource_Diamond_1->PlayBump();
-		}
-	}
-	else
-	{
-		if (SM)
-		{
-			SM->PlayUISound(CGUISoundTags::PurchaseFail);
-		}
-		if (UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>())
-		{
-			UIMgr->ShowNotification(NSLOCTEXT("Shop", "NotEnoughDia", "다이아가 부족합니다"), 3.0f, ENotificationType::Failed);
-		}
-	}
-}
-
 void UShopPanelWidget::RefreshCurrencyChips()
 {
 	UResourceItemManager* ResourceMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>();
@@ -404,27 +402,31 @@ void UShopPanelWidget::RefreshCurrencyChips()
 		return;
 	}
 
-	if (UIE_Resource_Money_1)
+	if (UIE_Resource_Money)
 	{
-		UIE_Resource_Money_1->SetValue(ResourceMgr->GetResourceAmount(EResourceType::Money));
+		UIE_Resource_Money->SetValue(ResourceMgr->GetResourceAmount(EResourceType::Money));
 	}
-	if (UIE_Resource_Diamond_1)
+	if (UIE_Resource_Diamond)
 	{
-		UIE_Resource_Diamond_1->SetValue(ResourceMgr->GetResourceAmount(EResourceType::Diamond));
+		UIE_Resource_Diamond->SetValue(ResourceMgr->GetResourceAmount(EResourceType::Diamond));
 	}
 }
 
 void UShopPanelWidget::UpdateInfoText()
 {
-	if (ManualResetButton)
-	{
-		ManualResetButton->SetVisibility(CurrentTab == EShopTab::Daily ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
-	}
 	if (!InfoText)
 	{
 		return;
 	}
 
+	if (RefillTicketType != EItemType::None && CurrentTab == EShopTab::Diamond)
+	{
+		const auto* Items = GetGameInstance()->GetSubsystem<UItemInventoryManager>();
+		InfoText->SetText(FText::Format(NSLOCTEXT("Shop", "EquipmentReturn", "{0} · 보유 {1}개 / 필요 {2}개 · 닫으면 이전 뽑기로 돌아갑니다"),
+			GetItemTypeDisplayName(RefillTicketType), FText::AsNumber(Items ? Items->GetItemCount(RefillTicketType) : 0), FText::AsNumber(RefillRequiredCount)));
+		InfoText->SetVisibility(ESlateVisibility::HitTestInvisible);
+		return;
+	}
 	switch (CurrentTab)
 	{
 	case EShopTab::Daily:
@@ -459,6 +461,7 @@ void UShopPanelWidget::UpdateInfoText()
 void UShopPanelWidget::HandleStockChanged()
 {
 	RefreshAllCardStates();
+	UpdateInfoText();
 }
 
 void UShopPanelWidget::HandleResourceChanged(EResourceType Type, int64 NewValue)
@@ -482,4 +485,50 @@ void UShopPanelWidget::HandleMileageChanged(int32 NewPoints)
 void UShopPanelWidget::OnCloseButtonClicked()
 {
 	CloseWithAnimation();
+}
+
+UWidget* UShopPanelWidget::GetCloseButtonWidget() const
+{
+	return PanelHeader ? PanelHeader->GetCloseButton() : nullptr;
+}
+
+void UShopPanelWidget::SetEquipmentTicketContext(EItemType TicketType, int32 RequiredCount)
+{
+	if (!EquipmentTicketShopRules::IsTicket(TicketType)) return;
+	RefillTicketType = TicketType;
+	RefillRequiredCount = RequiredCount;
+	SetInitialTab(EShopTab::Diamond);
+	RebuildGrid();
+	UpdateInfoText();
+}
+
+void UShopPanelWidget::ConfirmEquipmentTicketPurchase(FEquipmentTicketShopRequest Request)
+{
+	auto* Shop = GetGameInstance()->GetSubsystem<UShopManagerSubsystem>();
+	if (!Shop) return;
+	const auto Result = Shop->PurchaseEquipmentTickets(Request);
+	if (auto* Sound = GetGameInstance()->GetSubsystem<USoundManagerSubsystem>()) Sound->PlayUISound(Result.bCommitted ? CGUISoundTags::PurchaseSuccess : CGUISoundTags::PurchaseFail);
+	if (Result.bCommitted)
+	{
+		for (auto* Card : Cards) if (Card && Card->GetRowName() == Request.RowName) { Card->PlayPurchasePunch(); break; }
+		// 지출 눌림이 칩 쪽에서 나가므로 여기서 확대를 걸지 않는다
+	}
+	else if (auto* UI = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+	{
+		if (Result.ErrorCode == TEXT("SaveFailed"))
+		{
+			// The shared confirmation closes its current dialog after invoking this callback.
+			GetWorld()->GetTimerManager().SetTimerForNextTick(FTimerDelegate::CreateWeakLambda(this, [this, Request]()
+			{
+				if (!IsActivated()) return;
+				if (auto* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+					UIManager->ShowConfirmDialog(NSLOCTEXT("Shop", "TicketRetryTitle", "구매 저장 실패"),
+						NSLOCTEXT("Shop", "TicketRetry", "재화는 사용되지 않았습니다. 같은 구매를 다시 시도할까요?"),
+						FSimpleDelegate::CreateUObject(this, &ThisClass::ConfirmEquipmentTicketPurchase, Request),
+						FSimpleDelegate(), EConfirmDialogIcon::Info);
+			}));
+		}
+		else UI->ShowNotification(NSLOCTEXT("Shop", "TicketChanged", "상품 조건 또는 보유 재화가 변경되었습니다. 구매 내용을 다시 확인해 주세요."), 3.f, ENotificationType::Failed);
+	}
+	RefreshAllCardStates(); RefreshCurrencyChips(); UpdateInfoText();
 }

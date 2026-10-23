@@ -13,6 +13,7 @@ UNotificationElementWidget::UNotificationElementWidget(const FObjectInitializer&
 void UNotificationElementWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	SetVisibility(ESlateVisibility::HitTestInvisible);
 
 	// 초기 상태 설정 (숨김 상태로 시작)
 	SetWidgetAlpha(0.0f);

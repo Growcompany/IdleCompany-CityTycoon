@@ -37,6 +37,7 @@ public:
 
 	// M18 미션 가이드 — [강화] 실행 버튼 하이라이트 타겟
 	class UWidget* GetEnhanceActionButtonWidget() const;
+	class UWidget* GetCloseButtonWidget() const;
 
 protected:
 	virtual void NativeConstruct() override;

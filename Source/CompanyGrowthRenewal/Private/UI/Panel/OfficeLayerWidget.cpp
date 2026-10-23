@@ -1,7 +1,6 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Panel/OfficeLayerWidget.h"
-#include "UI/Panel/TierRoadmapWidget.h"
 #include "Core/CGGameInstance.h"
 #include "Player/MainMapPlayerController.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
@@ -35,6 +34,8 @@
 #include "Components/Button.h"
 #include "UI/Element/Common/DiamondProgressWidget.h"
 #include "UI/Element/Common/RevenueRateChipWidget.h"
+#include "UI/Element/Common/ItemTooltipWidget.h"
+#include "Global/GlobalUtilFunctions.h"
 #include "CommonTextBlock.h"
 #include "Manager/PlayFabManagerSubsystem.h"
 #include "Manager/SaveLoadManager.h"
@@ -44,11 +45,26 @@
 #include "Table/BuildableCardTable.h"
 #include "Data/GameSaveData.h"
 #include "Data/EntitySaveData.h"
-#include "Components/OverlaySlot.h"
 #include "Enum/WidgetType.h"
 #include "Manager/ProjectOperationManager.h"
 #include "Manager/SoundManagerSubsystem.h"
 #include "UI/UISoundTags.h"
+
+namespace
+{
+	// 오피스 밴드의 게이지와 툴팁은 같은 건물의 저장된 클리어 기록을 표시한다.
+	int32 GetBandTierClearedCount(int32 BuildingIndex, int32 Tier)
+	{
+		UCGGameInstance* GI = UCGGameInstance::GetInstance();
+		USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+		const USaveGame_GameData* SaveData = SaveMgr ? SaveMgr->GetCurrentSaveData() : nullptr;
+		const FOfficeSaveData* Office = SaveData ? SaveData->GameData.OfficeDataMap.Find(BuildingIndex) : nullptr;
+		return Office ? FMath::Min(Office->TierProgress.GetTierClearedCount(Tier), TierConstants::CLEAR_TO_UNLOCK) : 0;
+	}
+
+	// #43C95E, linear — 단계 진행 게이지 채움.
+	const FLinearColor TierProgressColor(0.056128f, 0.584078f, 0.111932f, 1.f);
+}
 
 void UOfficeLayerWidget::NativeConstruct()
 {
@@ -88,7 +104,7 @@ void UOfficeLayerWidget::NativeConstruct()
 		UpdateEmployeeChip();
 	}
 
-	// 회사 플레이트 블록 = 빌딩 레벨 로드맵 진입점
+	// 회사 플레이트 블록 = 현재 단계 진행 수치 툴팁 진입점
 	if (CompanyPlateButton)
 	{
 		CompanyPlateButton->OnClicked.AddDynamic(this, &UOfficeLayerWidget::HandleCompanyPlateClicked);
@@ -228,19 +244,42 @@ void UOfficeLayerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTi
 		RefreshRevenueRateChip();
 	}
 
-	// 집중 모드 페이드 — 하단 도크/미션 트래커와 같은 보간(멱등). 히트테스트는 SetFocusLocked 가 이미 끊었다.
+	// 집중 모드 페이드 — 하단 도크/미션 트래커와 같은 보간(멱등). 히트테스트는 SetFocusLocked·SetTopBlockHidden 이 이미 끊었다.
+	auto StepFade = [InDeltaTime](float& Alpha, float Target)
 	{
-		const float Target = bFocusLocked ? 1.0f : 0.0f;
-		if (!FMath::IsNearlyEqual(FocusFadeAlpha, Target, 0.001f))
+		if (FMath::IsNearlyEqual(Alpha, Target, 0.001f))
 		{
-			FocusFadeAlpha = FMath::FInterpTo(FocusFadeAlpha, Target, InDeltaTime, FocusFadeSpeed);
-			// FInterpTo 는 목표에 정확히 안 닿음 — 도착 프레임만 스냅
-			if (FMath::IsNearlyEqual(FocusFadeAlpha, Target, 0.001f))
-			{
-				FocusFadeAlpha = Target;
-			}
-			ApplyFocusFade(FocusFadeAlpha);
+			return false;
 		}
+		Alpha = FMath::FInterpTo(Alpha, Target, InDeltaTime, FocusFadeSpeed);
+		// FInterpTo 는 목표에 정확히 안 닿음 — 도착 프레임만 스냅
+		if (FMath::IsNearlyEqual(Alpha, Target, 0.001f))
+		{
+			Alpha = Target;
+		}
+		return true;
+	};
+	if (StepFade(FocusFadeAlpha, bFocusLocked ? 1.0f : 0.0f))
+	{
+		ApplyFocusFade(FocusFadeAlpha);
+	}
+	if (StepFade(TopBlockFadeAlpha, bTopBlockHidden ? 1.0f : 0.0f) && TopBlock)
+	{
+		TopBlock->SetRenderOpacity(1.0f - TopBlockFadeAlpha);
+	}
+}
+
+void UOfficeLayerWidget::SetTopBlockHidden(bool bHidden)
+{
+	if (bTopBlockHidden == bHidden)
+	{
+		return;
+	}
+	bTopBlockHidden = bHidden;
+	// 나가기와 같이 누르기만 즉시 끊고 그림은 페이드에 맡긴다
+	if (TopBlock)
+	{
+		TopBlock->SetVisibility(bHidden ? ESlateVisibility::HitTestInvisible : ESlateVisibility::SelfHitTestInvisible);
 	}
 }
 
@@ -258,28 +297,20 @@ void UOfficeLayerWidget::SetFocusLocked(bool bLocked)
 	bFocusLocked = bLocked;
 
 	// 히트테스트는 페이드를 기다리지 않는다 — 사라지는 0.2초 동안 눌리면 잠금이 그대로 뚫린다.
-	// Collapsed 가 아니라 HitTestInvisible 이라야 상단 밴드 레이아웃이 안 흔들린다.
+	// Collapsed 면 그리지도 않아 화살표가 판보다 먼저 툭 사라진다 ― 누르기만 끊고 그림은 페이드에 맡긴다.
 	const ESlateVisibility Vis = bLocked ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Visible;
 	if (BackButton)
 	{
 		BackButton->SetVisibility(Vis);
-	}
-	if (CodexButton)
-	{
-		CodexButton->SetVisibility(Vis);
 	}
 }
 
 void UOfficeLayerWidget::ApplyFocusFade(float Alpha)
 {
 	const float Opacity = 1.0f - Alpha;
-	if (BackButton)
+	if (BackPlateBox)
 	{
-		BackButton->SetRenderOpacity(Opacity);
-	}
-	if (CodexButton)
-	{
-		CodexButton->SetRenderOpacity(Opacity);
+		BackPlateBox->SetRenderOpacity(Opacity);
 	}
 }
 
@@ -316,10 +347,6 @@ void UOfficeLayerWidget::BindButtonEvents()
 	{
 		BackButton->OnClicked().AddUObject(this, &UOfficeLayerWidget::OnBackButtonClicked);
 	}
-	if (CodexButton)
-	{
-		CodexButton->OnClicked().AddUObject(this, &UOfficeLayerWidget::OnCodexBtnClicked);
-	}
 }
 
 void UOfficeLayerWidget::UnbindButtonEvents()
@@ -327,10 +354,6 @@ void UOfficeLayerWidget::UnbindButtonEvents()
 	if (BackButton)
 	{
 		BackButton->OnClicked().Clear();
-	}
-	if (CodexButton)
-	{
-		CodexButton->OnClicked().Clear();
 	}
 }
 
@@ -442,29 +465,54 @@ void UOfficeLayerWidget::HandleCompanyPlateClicked()
 {
 	UCGGameInstance* GI = UCGGameInstance::GetInstance();
 	if (!GI) { return; }
-	UTableManagerSubsystem* RoadmapTableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-	UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>();
-	if (!RoadmapTableMgr || !UIMgr || !UIMgr->GetUIBase()) { return; }
-
-	TSubclassOf<UUserWidget> Cls = RoadmapTableMgr->GetWidgetClass(EWidgetType::TierRoadmap);
-	if (!Cls)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[OfficeLayer] TierRoadmap 위젯 미등록(DT_WidgetClass)"));
-		return;
-	}
+	UTableManagerSubsystem* TooltipTableMgr = GI->GetSubsystem<UTableManagerSubsystem>();
+	if (!TooltipTableMgr) { return; }
 
 	// 오피스에서는 현재 관리 중인 빌딩이 곧 이 오피스다
-	UCommonActivatableWidget* W = UIMgr->GetUIBase()->PushPromptClass(Cls.Get());
-	UTierRoadmapWidget* Roadmap = Cast<UTierRoadmapWidget>(W);
-	if (!Roadmap) { return; }
-
-	Roadmap->ConfigureForBuilding(GI->GetCurrentManagedBuildingIndex());
-
-	// 오피스는 Normal 모드라 팝오버 뒤로 월드 탭/카메라 드래그가 살아 있다 — 여기서 잡고 복원 책임을 로드맵에 넘긴다
-	if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GI->GetCurrentPlayerController()))
+	const int32 BandBuildingIndex = GI->GetCurrentManagedBuildingIndex();
+	int32 Tier = 1;
+	if (USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>())
 	{
-		PC->GoToUIMode();
-		Roadmap->SetOwnsInputMode(true);
+		Tier = SaveMgr->GetBuildingTier(BandBuildingIndex);
+	}
+
+	// 단계별 해금 목록은 건물 강화 패널이 이미 "{N}단계 달성 시 해금" 으로 말한다 — 여기선 진행 수치만.
+	const bool bAtMax = Tier >= TierConstants::MAX_TIER;
+	const int32 Cleared = GetBandTierClearedCount(BandBuildingIndex, Tier);
+	const int32 Remaining = TierConstants::CLEAR_TO_UNLOCK - Cleared;
+
+	const FText Title = FText::Format(NSLOCTEXT("Tier", "BandStage", "{0}단계"), FText::AsNumber(Tier));
+	FText Desc;
+	if (bAtMax)
+	{
+		Desc = NSLOCTEXT("Tier", "BandStageMax", "최고 단계입니다.");
+	}
+	else
+	{
+		const FText Counts = FText::Format(NSLOCTEXT("Tier", "BandStageCleared", "프로젝트 클리어 {0} / {1}"),
+			FText::AsNumber(Cleared), FText::AsNumber(TierConstants::CLEAR_TO_UNLOCK));
+		const FText NextLine = (Remaining > 0)
+			? FText::Format(NSLOCTEXT("Tier", "BandStageRemain", "다음 단계까지 {0}개 남았습니다."), FText::AsNumber(Remaining))
+			: NSLOCTEXT("Tier", "BandStageReady", "다음 단계 조건을 달성했습니다.");
+		Desc = FText::Format(FText::FromString(TEXT("{0}\n{1}")), Counts, NextLine);
+	}
+
+	if (!ActiveTooltip)
+	{
+		const TSubclassOf<UUserWidget> TooltipClass = TooltipTableMgr->GetWidgetClass(EWidgetType::ItemTooltip);
+		if (!TooltipClass)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeLayer] EWidgetType::ItemTooltip 미등록(DT_WidgetClass)"));
+			return;
+		}
+		ActiveTooltip = CreateWidget<UItemTooltipWidget>(this, TooltipClass);
+	}
+
+	// 비모달이라 입력 모드를 잡지 않는다 — 팝오버 뒤로 월드 탭/카메라 드래그가 그대로 살아 있어야 한다
+	if (ActiveTooltip)
+	{
+		ActiveTooltip->ShowAt(UGlobalUtilFunctions::GetPointerAbsolutePosition(),
+			Title, nullptr, Desc, /*BasePrice*/0, /*Duration*/2.5f, ETooltipAnchor::BelowAnchor);
 	}
 }
 
@@ -550,7 +598,7 @@ void UOfficeLayerWidget::OnBackButtonClicked()
 		// 스택이 1개 이하면 MainMap으로 이동
 		if (UCGGameInstance* CGGameInst = Cast<UCGGameInstance>(GetWorld()->GetGameInstance()))
 		{
-			CGGameInst->TransitionToLevel(TEXT("MainMap_TheRiverwalkCity"), 0);
+			CGGameInst->TransitionToLevel(TEXT("MainMap_City"), 0);
 		}
 	}
 	else
@@ -558,28 +606,6 @@ void UOfficeLayerWidget::OnBackButtonClicked()
 		// 스택에 여러 개가 있으면 하나씩 제거
 		UIManager->GetUIBase()->PopBottomWidget();
 	}
-}
-
-void UOfficeLayerWidget::OnCodexBtnClicked()
-{
-	if (bFocusLocked)
-	{
-		return;
-	}
-
-	UCGGameInstance* GI = UCGGameInstance::GetInstance();
-	if (!GI) return;
-	UTableManagerSubsystem* TblMgr = GI->GetSubsystem<UTableManagerSubsystem>();
-	UUIManagerSubsystem* UIMgr = GI->GetSubsystem<UUIManagerSubsystem>();
-	if (!TblMgr || !UIMgr || !UIMgr->GetUIBase()) return;
-
-	TSubclassOf<UUserWidget> CodexClass = TblMgr->GetWidgetClass(EWidgetType::CodexPanel);
-	if (!CodexClass)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[OfficeLayerWidget] CodexPanel 위젯 미등록(DT_WidgetClass)"));
-		return;
-	}
-	UIMgr->GetUIBase()->PushPromptClass(CodexClass.Get());
 }
 
 // 현재 오피스 건물 아이콘을 프로필 액자에 적용 — 성공 시 true, 실패 시 호출부가 산업 글리프 폴백.
@@ -605,12 +631,8 @@ static bool TryApplyBuildingProfileIcon(UCGGameInstance* GI, UTableManagerSubsys
 		if (!IconTex) return false;
 
 		IconImage->SetBrushFromTexture(IconTex);
-		// WBP 브러시의 웜크림 틴트는 단색 글리프용 — 풀컬러 건물 아이콘엔 해제, 여백도 축소(64→80px)
+		// WBP 브러시의 웜크림 틴트는 단색 글리프용 — 풀컬러 건물 아이콘엔 해제
 		IconImage->SetBrushTintColor(FSlateColor(FLinearColor::White));
-		if (UOverlaySlot* IconSlot = Cast<UOverlaySlot>(IconImage->Slot))
-		{
-			IconSlot->SetPadding(FMargin(12.f));
-		}
 		return true;
 	}
 	return false;
@@ -622,16 +644,14 @@ void UOfficeLayerWidget::RefreshTopBar()
 	if (!GI) { return; }
 	const ECompanyType Industry = GI->GetCurrentBuildingCompanyType();
 
-	// ===== 회사 배너 (산업 시그니처색/산업명 = DT, 아이콘 = 현재 건물, 회사명/레벨 = PlayFab/HQ) =====
+	// ===== 회사 블록 (아이콘 = 현재 건물, 이름 = 업종 + 순번, 마름모 = 이 건물의 단계) =====
 	if (UTableManagerSubsystem* TblMgr = GI->GetSubsystem<UTableManagerSubsystem>())
 	{
 		bool bFound = false;
 		const FCompanyInfoTable Info = TblMgr->GetCompanyInfo(Industry, bFound);
 		if (bFound)
 		{
-			if (CompanyPlate) { CompanyPlate->SetColorAndOpacity(Info.AccentColor); }
-			if (CompanyIndustryText) { CompanyIndustryText->SetText(Info.DisplayName); }
-			// 산업은 텍스트가 이미 말하므로 아이콘은 건물 정체성 담당 — 해석 실패 시에만 글리프
+			// 업종은 이름이 이미 말하므로 아이콘은 건물 정체성 담당 — 해석 실패 시에만 글리프
 			if (CompanyProfileIcon && !TryApplyBuildingProfileIcon(GI, TblMgr, CompanyProfileIcon)
 				&& !Info.GlyphIcon.IsNull())
 			{
@@ -644,15 +664,7 @@ void UOfficeLayerWidget::RefreshTopBar()
 	}
 	if (CompanyNameText)
 	{
-		FString Name;
-		if (UPlayFabManagerSubsystem* PlayFabMgr = GI->GetSubsystem<UPlayFabManagerSubsystem>())
-		{
-			if (PlayFabMgr->IsLoggedIn())
-			{
-				Name = PlayFabMgr->GetUserInfo().DisplayName;
-			}
-		}
-		CompanyNameText->SetText(FText::FromString(Name.IsEmpty() ? TEXT("내 회사") : Name));
+		CompanyNameText->SetText(GI->GetCompanyDisplayName(GI->GetCurrentManagedBuildingIndex()));
 	}
 	// 뱃지는 플레이트가 가리키는 대상(= 이 회사가 들어있는 건물)의 티어. HQ 레벨은 다른 축이라 여기 오면 범주 오류.
 	// 마름모 하나가 단계(숫자)와 진행(둘레 게이지)을 다 말하므로 별도 칩/핍을 두지 않는다.
@@ -669,10 +681,11 @@ void UOfficeLayerWidget::RefreshTopBar()
 	if (CompanyLevelProgress)
 	{
 		// 테두리 자체가 진행 게이지 ― 크기 변화 0. 티어 게이트가 사라져 "막힘" 상태는 존재하지 않는다
-		bool bAtMax = false;
-		CompanyLevelProgress->SetPercent(
-			UTierRoadmapWidget::ComputeTierProgress(BandBuildingIndex, BandTier, bAtMax));
-		CompanyLevelProgress->SetFillColor(CGTierColors::Reached);
+		const float Progress = BandTier >= TierConstants::MAX_TIER ? 1.f : FMath::Clamp(
+			static_cast<float>(GetBandTierClearedCount(BandBuildingIndex, BandTier))
+			/ static_cast<float>(TierConstants::CLEAR_TO_UNLOCK), 0.f, 1.f);
+		CompanyLevelProgress->SetPercent(Progress);
+		CompanyLevelProgress->SetFillColor(TierProgressColor);
 	}
 }
 
@@ -706,7 +719,7 @@ void UOfficeLayerWidget::PlayStoredRevenueCollection(int64 CollectedAmount)
 
 	// Money 위젯 텍스트를 OldMoney로 되돌림 (시각적)
 	bSuppressMoneyUpdate = true;
-	UIE_Resource_Money->SetValue(CoinAnimOldMoney);
+	UIE_Resource_Money->SetValueSilent(CoinAnimOldMoney);
 
 	// 코인 수 계산: Amount / 500, 최소 5개 ~ 최대 20개
 	CoinAnimTotalCoins = FMath::Clamp(static_cast<int32>(CollectedAmount / 500), 5, 20);
@@ -906,6 +919,37 @@ void UOfficeLayerWidget::EvaluateAllWorkstationBubbles()
 		BubbleContainer->UpdateBubbleForAnchor(
 			static_cast<int32>(Workstation->GetUniqueID()), Workstation, Type);
 	}
+}
+
+void UOfficeLayerWidget::SetOfficePlacementBubblesSuppressed(bool bSuppressed)
+{
+	if (!BubbleContainer || bPlacementBubblesSuppressed == bSuppressed) return;
+	if (bSuppressed)
+	{
+		BubbleVisibilityBeforePlacement = BubbleContainer->GetVisibility();
+		BubbleContainer->SetVisibility(ESlateVisibility::Collapsed);
+	}
+	else
+	{
+		BubbleContainer->SetVisibility(BubbleVisibilityBeforePlacement);
+	}
+	// 부모 가시성만 억제하여 내부의 전역 가시성 정책을 보존한다.
+	bPlacementBubblesSuppressed = bSuppressed;
+}
+
+void UOfficeLayerWidget::SetSuppressedForEmployeePanel(bool bSuppressed)
+{
+	if (bSuppressedForEmployeePanel == bSuppressed) return;
+	if (bSuppressed)
+	{
+		VisibilityBeforeEmployeePanel = GetVisibility();
+		SetVisibility(ESlateVisibility::Collapsed);
+	}
+	else
+	{
+		SetVisibility(VisibilityBeforeEmployeePanel);
+	}
+	bSuppressedForEmployeePanel = bSuppressed;
 }
 
 EBubbleType UOfficeLayerWidget::EvaluateBubbleTypeForWorkstation(AWorkstationActorBase* Workstation) const
@@ -1127,10 +1171,11 @@ void UOfficeLayerWidget::RefreshCatchRings()
 	TArray<AOfficeworker*, TInlineAllocator<8>> BurstingWorkers;
 
 	// 1) 파열 중인 링 유지 — 클릭 프레임에 회수하면 잔상이 한 프레임도 안 보인다.
+	//    끌기 중인 링도 유지 — 재배정되면 손가락을 붙잡은 버튼이 다른 직원으로 넘어간다.
 	for (int32 i = 0; i < CatchRingPool.Num(); ++i)
 	{
 		UCatchRingWidget* PooledRing = CatchRingPool[i];
-		if (!PooledRing || !PooledRing->IsBurstActive()) continue;
+		if (!PooledRing || !(PooledRing->IsBurstActive() || PooledRing->IsHoldingCarry())) continue;
 
 		Claimed[i] = true;
 		HideCatchHint(i); // 캐치됐으니 손은 즉시 사라진다

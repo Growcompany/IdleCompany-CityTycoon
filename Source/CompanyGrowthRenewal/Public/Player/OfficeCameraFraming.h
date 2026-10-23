@@ -26,10 +26,25 @@ struct COMPANYGROWTHRENEWAL_API FOfficeCameraFraming
 	static constexpr int32 MaxCoarseSteps = 256;
 	static constexpr int32 MaxRefineIterations = 32;
 
+	static FIntPoint ResolveFramingSlack(bool bCanExpandX, bool bCanExpandY,
+		TFunctionRef<bool(FIntPoint SlackTiles, bool bAxisX)> IsCellInside);
+
 	static FBox MakeHeroBounds(
 		const FBox2D& FloorBounds,
 		float StructuralFloorZ,
 		float VisibleDepthCm);
+
+	static bool TryMakeFloorFocusPoint(
+		const FBox2D& FloorBounds,
+		float StructuralFloorZ,
+		float FocusBelowFloorCm,
+		FVector& OutFocusPoint);
+
+	static bool TryClampInitialArmLength(
+		float CalculatedArmLength,
+		float MinimumInitialArmLength,
+		float MaximumInitialArmLength,
+		float& OutArmLength);
 
 	static TStaticArray<FVector, 8> MakeBoxCorners(const FBox& Bounds);
 

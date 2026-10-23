@@ -43,7 +43,8 @@ enum class EEmployeeBehaviorMode : uint8
 {
 	Idle		UMETA(DisplayName = "Idle"),		// 배회만 (Walk <-> Idle 반복)
 	Stage		UMETA(DisplayName = "Stage"),		// 프로젝트 진행 중 (Workstation에서 Typing 유지)
-	Operation	UMETA(DisplayName = "Operation"),	// 운영 중 (배회 <-> 업무 반복)
+	Operation	UMETA(DisplayName = "Operation"),	// 운영 중 (자리 착석 Typing 유지 — 상시 배회 없음)
+	Manufacturing UMETA(DisplayName = "Manufacturing"), // 상시 개발. 산출은 건물별 정산 매니저가 소유한다.
 
 	Max			UMETA(Hidden)
 };

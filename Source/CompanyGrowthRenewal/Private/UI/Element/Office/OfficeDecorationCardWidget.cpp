@@ -25,6 +25,7 @@
 void UOfficeDecorationCardWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	if (UIE_EntityCardFrame) UIE_EntityCardFrame->ApplyCompactCatalogLayout();
 
 	CacheReferences();
 }
@@ -72,10 +73,9 @@ void UOfficeDecorationCardWidget::SetDecorationInfo(const FDecorationCardTable& 
 	if (!DecorationInfo.UIIcon.IsNull())
 	{
 		const FSoftObjectPath IconPath = DecorationInfo.UIIcon.ToSoftObjectPath();
-		UAssetManager::Get().GetStreamableManager().RequestAsyncLoad(
-			IconPath,
-			FStreamableDelegate::CreateUObject(this, &UEntityCardWidgetBase::OnIconLoaded, IconPath)
-		);
+		if (DecorationInfo.UIIcon.IsValid()) OnIconLoaded(IconPath);
+		else UAssetManager::Get().GetStreamableManager().RequestAsyncLoad(IconPath,
+			FStreamableDelegate::CreateUObject(this, &ThisClass::OnDecorationIconLoaded, IconPath));
 	}
 
 	// 잠금 조건 체크
@@ -83,6 +83,12 @@ void UOfficeDecorationCardWidget::SetDecorationInfo(const FDecorationCardTable& 
 
 	UE_LOG(LogTemp, Log, TEXT("[OfficeDecorationCardWidget] SetDecorationInfo - Name: %s, Category: %d"),
 		*DecorationInfo.Name.ToString(), (int32)DecorationInfo.Category);
+}
+
+void UOfficeDecorationCardWidget::OnDecorationIconLoaded(FSoftObjectPath LoadedPath)
+{
+	// 스크롤이나 필터 전환으로 재활용된 카드에는 이전 요청의 그림을 적용하지 않는다.
+	if (LoadedPath == DecorationInfo.UIIcon.ToSoftObjectPath()) OnIconLoaded(LoadedPath);
 }
 
 void UOfficeDecorationCardWidget::CheckUnlockCondition()
@@ -170,33 +176,43 @@ void UOfficeDecorationCardWidget::HandleCardClicked()
 			return;
 		}
 
-		// 장식품 배치 모드 시작
-		OfficePawn->BeginDecorationPlacement(DecorationInfo);
-
 		// BuildPlacementPanelWidget 열기
 		UTableManagerSubsystem* TableManager = GameInstance->GetSubsystem<UTableManagerSubsystem>();
 		UUIManagerSubsystem* UIManager = GameInstance->GetSubsystem<UUIManagerSubsystem>();
-
-		if (TableManager && UIManager)
+		UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
+		if (!TableManager || !UIBase)
 		{
-			TSubclassOf<UUserWidget> PlacementWidgetClass = TableManager->GetWidgetClass(EWidgetType::BuildPlacementPanel);
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeDecorationCardWidget] Placement UI dependencies not available for grid decoration"));
+			return;
+		}
 
-			// 카탈로그를 닫으면 이 카드는 위젯 풀로 반납된다 — 멤버를 더 읽지 않도록 먼저 복사.
-			const FDecorationCardTable InfoCopy = DecorationInfo;
+		TSubclassOf<UUserWidget> PlacementWidgetClass = TableManager->GetWidgetClass(EWidgetType::BuildPlacementPanel);
+		if (!PlacementWidgetClass || !PlacementWidgetClass->IsChildOf(UBuildPlacementPanelWidget::StaticClass()))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeDecorationCardWidget] BuildPlacementPanel class missing or invalid for grid decoration"));
+			return;
+		}
 
-			UUIBase* UIBase = UIManager->GetUIBase();
+		// 카탈로그를 닫으면 이 카드는 위젯 풀로 반납된다 — 멤버를 더 읽지 않도록 먼저 복사.
+		const FDecorationCardTable InfoCopy = DecorationInfo;
+		OfficePawn->BeginDecorationPlacement(InfoCopy);
 
-			// 카탈로그를 배치 바 아래에 깔아두지 않는다 — 깔아두면 배치 종료 시 되살아난다. 닫기 먼저, push 나중.
-			UIBase->PopBottomWidget();
+		// 카탈로그를 배치 바 아래에 깔아두지 않는다 — 깔아두면 배치 종료 시 되살아난다. 닫기 먼저, push 나중.
+		UIBase->PopBottomWidget();
 
-			UBuildPlacementPanelWidget* PlacementWidget = Cast<UBuildPlacementPanelWidget>(
-				UIBase->PushBottomClass(PlacementWidgetClass.Get()));
+		UBuildPlacementPanelWidget* PlacementWidget = Cast<UBuildPlacementPanelWidget>(
+			UIBase->PushBottomClass(PlacementWidgetClass.Get()));
 
-			if (PlacementWidget)
-			{
-				PlacementWidget->SetDecorationInfo(InfoCopy);
-				UE_LOG(LogTemp, Log, TEXT("[OfficeDecorationCardWidget] BuildPlacementPanelWidget opened with decoration info"));
-			}
+		if (PlacementWidget)
+		{
+			PlacementWidget->SetDecorationInfo(InfoCopy);
+			UE_LOG(LogTemp, Log, TEXT("[OfficeDecorationCardWidget] BuildPlacementPanelWidget opened with decoration info"));
+		}
+		else
+		{
+			OfficePawn->EndDecorationPlacement();
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeDecorationCardWidget] Failed to open BuildPlacementPanelWidget for grid decoration"));
+			return;
 		}
 	}
 	else if (DecorationInfo.AllowedSurface == EDecorationSurface::Wall)
@@ -217,36 +233,49 @@ void UOfficeDecorationCardWidget::HandleCardClicked()
 				}
 			}
 
-			CachedOfficeManager->OnDecorationItemSelected(DecorationInfo);
-
 			// BuildPlacementPanelWidget 열기 (벽 장식품도 확인/취소 버튼 필요)
 			UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
-			if (GameInstance)
+			AOfficePlayerController* PC = GameInstance
+				? Cast<AOfficePlayerController>(GameInstance->GetCurrentPlayerController()) : nullptr;
+			AOfficeCameraPawn* OfficePawn = PC ? Cast<AOfficeCameraPawn>(PC->GetPawn()) : nullptr;
+			UTableManagerSubsystem* TableManager = GameInstance
+				? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+			UUIManagerSubsystem* UIManager = GameInstance
+				? GameInstance->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+			UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
+			if (!OfficePawn || !TableManager || !UIBase)
 			{
-				UTableManagerSubsystem* TableManager = GameInstance->GetSubsystem<UTableManagerSubsystem>();
-				UUIManagerSubsystem* UIManager = GameInstance->GetSubsystem<UUIManagerSubsystem>();
+				UE_LOG(LogTemp, Warning, TEXT("[OfficeDecorationCardWidget] Placement UI dependencies not available for wall decoration"));
+				return;
+			}
 
-				if (TableManager && UIManager)
-				{
-					TSubclassOf<UUserWidget> PlacementWidgetClass = TableManager->GetWidgetClass(EWidgetType::BuildPlacementPanel);
+			TSubclassOf<UUserWidget> PlacementWidgetClass = TableManager->GetWidgetClass(EWidgetType::BuildPlacementPanel);
+			if (!PlacementWidgetClass || !PlacementWidgetClass->IsChildOf(UBuildPlacementPanelWidget::StaticClass()))
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[OfficeDecorationCardWidget] BuildPlacementPanel class missing or invalid for wall decoration"));
+				return;
+			}
 
-					// 카탈로그를 닫으면 이 카드는 위젯 풀로 반납된다 — 멤버를 더 읽지 않도록 먼저 복사.
-					const FDecorationCardTable InfoCopy = DecorationInfo;
+			// 카탈로그를 닫으면 이 카드는 위젯 풀로 반납된다 — 멤버를 더 읽지 않도록 먼저 복사.
+			const FDecorationCardTable InfoCopy = DecorationInfo;
+			CachedOfficeManager->OnDecorationItemSelected(InfoCopy);
 
-					UUIBase* UIBase = UIManager->GetUIBase();
+			// 카탈로그를 배치 바 아래에 깔아두지 않는다 — 깔아두면 배치 종료 시 되살아난다. 닫기 먼저, push 나중.
+			UIBase->PopBottomWidget();
 
-					// 카탈로그를 배치 바 아래에 깔아두지 않는다 — 깔아두면 배치 종료 시 되살아난다. 닫기 먼저, push 나중.
-					UIBase->PopBottomWidget();
+			UBuildPlacementPanelWidget* PlacementWidget = Cast<UBuildPlacementPanelWidget>(
+				UIBase->PushBottomClass(PlacementWidgetClass.Get()));
 
-					UBuildPlacementPanelWidget* PlacementWidget = Cast<UBuildPlacementPanelWidget>(
-						UIBase->PushBottomClass(PlacementWidgetClass.Get()));
-
-					if (PlacementWidget)
-					{
-						PlacementWidget->SetDecorationInfo(InfoCopy);
-						UE_LOG(LogTemp, Log, TEXT("[OfficeDecorationCardWidget] BuildPlacementPanelWidget opened for wall decoration"));
-					}
-				}
+			if (PlacementWidget)
+			{
+				PlacementWidget->SetDecorationInfo(InfoCopy);
+				UE_LOG(LogTemp, Log, TEXT("[OfficeDecorationCardWidget] BuildPlacementPanelWidget opened for wall decoration"));
+			}
+			else
+			{
+				OfficePawn->EndDecorationPlacement();
+				UE_LOG(LogTemp, Warning, TEXT("[OfficeDecorationCardWidget] Failed to open BuildPlacementPanelWidget for wall decoration"));
+				return;
 			}
 		}
 		else

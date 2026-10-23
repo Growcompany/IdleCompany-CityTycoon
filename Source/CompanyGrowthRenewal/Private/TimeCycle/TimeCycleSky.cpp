@@ -5,14 +5,26 @@
 #include "EngineUtils.h"
 #include "TimeCycle/TimeCycleManager.h"
 #include "TimeCycle/TimeCycleSkyLighting.h"
+#include "TimeCycle/TimeCycleSkyVisualProfile.h"
 #include "Components/PostProcessComponent.h"
+#include "Components/ExponentialHeightFogComponent.h"
+#include "Components/ReflectionCaptureComponent.h"
 #include "Components/SkyLightComponent.h"
+#include "Components/SkyAtmosphereComponent.h"
+#include "Engine/SphereReflectionCapture.h"
+#include "Engine/ExponentialHeightFog.h"
 #include "Engine/TextureCube.h"
 #include "Engine/PostProcessVolume.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Materials/MaterialParameterCollection.h"
+#include "Materials/MaterialParameterCollectionInstance.h"
+#include "RenderingThread.h"
 
 namespace
 {
+	constexpr TCHAR E6ReflectionCubemapPath[] =
+		TEXT("/Game/CompanyGrowth/Resources/Materials/MainMap/TC_StudioReflect.TC_StudioReflect");
+
 	bool IsFiniteColor(const FLinearColor& Color)
 	{
 		return FMath::IsFinite(Color.R)
@@ -32,12 +44,54 @@ namespace
 			&& IsFiniteColor(Look.NightAmbientColor)
 			&& FMath::IsFinite(Look.NightExposureBias);
 	}
+
+	void ApplyMobileVisualProfile(
+		FPostProcessSettings& Settings,
+		const FTimeCycleSkyVisualProfile& Profile,
+		UTexture* ColorGradingLUT)
+	{
+		Settings.bOverride_ColorGradingLUT = true;
+		Settings.ColorGradingLUT = ColorGradingLUT;
+		Settings.bOverride_ColorGradingIntensity = true;
+		Settings.ColorGradingIntensity = Profile.LutIntensity;
+
+		Settings.bOverride_ColorSaturation = true;
+		Settings.ColorSaturation = FVector4(Profile.Saturation);
+		Settings.bOverride_ColorContrast = true;
+		Settings.ColorContrast = FVector4(Profile.Contrast);
+		Settings.bOverride_ColorGain = true;
+		Settings.ColorGain = FVector4(Profile.Gain);
+		Settings.bOverride_ColorSaturationMidtones = true;
+		Settings.ColorSaturationMidtones = FVector4(Profile.MidtoneSaturation);
+		Settings.bOverride_ColorGainMidtones = true;
+		Settings.ColorGainMidtones = FVector4(Profile.MidtoneGain);
+
+		Settings.bOverride_Sharpen = true;
+		Settings.Sharpen = Profile.Sharpen;
+		Settings.bOverride_BloomIntensity = true;
+		Settings.BloomIntensity = Profile.BloomIntensity;
+		Settings.bOverride_BloomThreshold = true;
+		Settings.BloomThreshold = Profile.BloomThreshold;
+		Settings.bOverride_ColorCorrectionShadowsMax = true;
+		Settings.ColorCorrectionShadowsMax = Profile.ShadowsMax;
+		Settings.bOverride_ColorCorrectionHighlightsMin = true;
+		Settings.ColorCorrectionHighlightsMin = Profile.HighlightsMin;
+	}
 }
 
 ATimeCycleSky::ATimeCycleSky()
 {
+	static ConstructorHelpers::FObjectFinder<UMaterialParameterCollection> WindowMPC(
+		TEXT("/Game/CompanyGrowth/Resources/Materials/MainMap/MPC_WindowLight.MPC_WindowLight"));
+	CaptureWindowLightMPC = WindowMPC.Object;
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = true;
+	MobileNightLook.SkyNightIntensity = 0.17f;
+	MobileNightLook.NightDirectionalIntensity = 0.07f;
+	MobileNightLook.NightDirectionalTemperature = 9000.0f;
+	MobileNightLook.NightAmbientColor =
+		FLinearColor(0.3762621284f, 0.4564110339f, 0.5775804520f);
+	MobileNightLook.NightExposureBias = 0.20f;
 
 	// Root 컴포넌트 생성
 	USceneComponent* Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
@@ -115,6 +169,71 @@ void ATimeCycleSky::BeginPlay()
 		SkyLight->MarkRenderStateDirty();
 		SkyLight->RecaptureSky(); // 정적 큐브맵 → SH 1회 빌드(씬 렌더 아님, 저비용). 이후 캡처 없음.
 	}
+	BindVisualTimeManager();
+}
+
+bool ATimeCycleSky::WithDaylightForCapture(TFunctionRef<bool()> CaptureOperation)
+{
+	if (!IsInGameThread() || !SunLight || !SkyLight || !GetWorld() || !CaptureWindowLightMPC) { return false; }
+	UExponentialHeightFogComponent* CaptureFog = bApplyOfficeFogTint ? CachedOfficeFog.Get() : nullptr;
+	// Office의 원래 낮색을 알기 전에는 밤색으로 영구 배경을 굽지 않는다.
+	if (bApplyOfficeFogTint && !CaptureFog) { return false; }
+	const FLinearColor SavedFogColor = CaptureFog ? CaptureFog->FogInscatteringLuminance : FLinearColor::White;
+	UMaterialParameterCollectionInstance* MPC = GetWorld()->GetParameterCollectionInstance(CaptureWindowLightMPC);
+	float SavedNightIntensity = 0.f;
+	if (!MPC || !MPC->GetScalarParameterValue(TEXT("Night_Intensity"), SavedNightIntensity)) { return false; }
+	const FTransform SavedSunTransform = SunLight->GetRelativeTransform();
+	const float SavedSunIntensity = SunLight->Intensity;
+	const float SavedTemperature = SunLight->Temperature;
+	const bool bSavedUseTemperature = SunLight->bUseTemperature;
+	const FColor SavedSunColor = SunLight->LightColor;
+	const float SavedSkyIntensity = SkyLight->Intensity;
+	const FColor SavedSkyColor = SkyLight->LightColor;
+	TimeCycleSkyLighting::FParameters Parameters;
+	Parameters.CurrentHour = 12.f;
+	Parameters.SunMaxIntensity = SunMaxIntensity;
+	Parameters.SkyDayIntensity = SkyDayIntensity;
+	Parameters.SolarPitch = -90.f;
+	Parameters.SunAzimuth = SunAzimuth;
+	Parameters.BaseSkyColor = BaseSkyColor;
+	const TimeCycleSkyLighting::FState Day = TimeCycleSkyLighting::Calculate(Parameters);
+	SunLight->SetIntensity(Day.DirectionalIntensity);
+	SunLight->SetUseTemperature(true);
+	SunLight->SetTemperature(Day.DirectionalTemperature);
+	SunLight->SetLightColor(FLinearColor::White);
+	SunLight->SetRelativeRotation(FRotator(Day.DirectionalPitch, Day.DirectionalYaw, 0.f));
+	SkyLight->SetIntensity(Day.SkyIntensity);
+	SkyLight->SetLightColor(Day.SkyColor);
+	MPC->SetScalarParameterValue(TEXT("Night_Intensity"), 0.f);
+	if (CaptureFog) { CaptureFog->SetFogInscatteringColor(OfficeDayFogColor); }
+	const bool bCaptured = CaptureOperation();
+	// 모든 캡처가 낮 조명을 소비한 뒤 같은 프레임 안에서 원래 렌더 상태로 복원한다.
+	FlushRenderingCommands();
+	SunLight->SetRelativeTransform(SavedSunTransform);
+	SunLight->SetIntensity(SavedSunIntensity);
+	SunLight->SetUseTemperature(bSavedUseTemperature);
+	SunLight->SetTemperature(SavedTemperature);
+	SunLight->LightColor = SavedSunColor;
+	SunLight->MarkRenderStateDirty();
+	SkyLight->SetIntensity(SavedSkyIntensity);
+	SkyLight->LightColor = SavedSkyColor;
+	SkyLight->MarkRenderStateDirty();
+	MPC->SetScalarParameterValue(TEXT("Night_Intensity"), SavedNightIntensity);
+	if (CaptureFog) { CaptureFog->SetFogInscatteringColor(SavedFogColor); }
+	GetWorld()->SendAllEndOfFrameUpdates();
+	FlushRenderingCommands();
+	return bCaptured;
+}
+
+void ATimeCycleSky::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (ATimeCycleManager* BoundManager = BoundVisualTimeManager.Get())
+	{
+		BoundManager->OnVisualTimeChanged.RemoveDynamic(this, &ATimeCycleSky::HandleVisualTimeChanged);
+	}
+	BoundVisualTimeManager.Reset();
+	RestoreOfficeFogTint();
+	Super::EndPlay(EndPlayReason);
 }
 
 FTimeCycleSkyDayLook ATimeCycleSky::GetDayLook() const
@@ -128,6 +247,14 @@ FTimeCycleSkyDayLook ATimeCycleSky::GetDayLook() const
 
 FTimeCycleSkyNightLook ATimeCycleSky::GetNightLook() const
 {
+	UWorld* SkyWorld = GetWorld();
+	if (SkyWorld
+		&& SkyWorld->IsGameWorld()
+		&& SkyWorld->GetFeatureLevel() == ERHIFeatureLevel::ES3_1)
+	{
+		return MobileNightLook;
+	}
+
 	FTimeCycleSkyNightLook Look;
 	Look.SkyNightIntensity = SkyNightIntensity;
 	Look.NightDirectionalIntensity = NightDirectionalIntensity;
@@ -135,6 +262,38 @@ FTimeCycleSkyNightLook ATimeCycleSky::GetNightLook() const
 	Look.NightAmbientColor = NightAmbientColor;
 	Look.NightExposureBias = NightExposureBias;
 	return Look;
+}
+
+float ATimeCycleSky::GetTwilightApexHour(bool bDawn) const
+{
+	// 밤 경계는 시계가 단일 소스다. 매니저가 없으면 Tick 과 같은 폴백을 쓴다.
+	float SunRiseHour = 7.0f;
+	float SunSetHour = 19.0f;
+	if (ATimeCycleManager* Manager = GetTimeCycleManager())
+	{
+		const FTimeCycleCode RiseCode = Manager->GetSunRiseTime();
+		const FTimeCycleCode SetCode = Manager->GetSunSetTime();
+		SunRiseHour = RiseCode.Hours + RiseCode.Minutes / 60.0f;
+		SunSetHour = SetCode.Hours + SetCode.Minutes / 60.0f;
+	}
+
+	const float Apex = FMath::Clamp(TwilightWarmApex, 0.01f, 0.99f);
+	if (bDawn)
+	{
+		const float Blend = FMath::Max(0.01f, DawnBlendHours);
+		const float Span = Blend + TimeCycleSkyLighting::ClampDawnLeadHours(
+			PreSunriseTwilightHours,
+			SunRiseHour,
+			Blend);
+		// 여명 구간은 SunRise 에서 끝나므로 정점은 끝에서 (1-Apex) 만큼 앞이다.
+		return SunRiseHour - Span * (1.0f - Apex);
+	}
+
+	const float Blend = FMath::Max(0.01f, DuskBlendHours);
+	const float Span = Blend + TimeCycleSkyLighting::ClampDuskTailHours(
+		PostSunsetTwilightHours,
+		SunSetHour);
+	return (SunSetHour - Blend) + Span * Apex;
 }
 
 bool ATimeCycleSky::ApplyTransientNightLook(const FTimeCycleSkyNightLook& NewLook)
@@ -146,14 +305,38 @@ bool ATimeCycleSky::ApplyTransientNightLook(const FTimeCycleSkyNightLook& NewLoo
 		return false;
 	}
 
-	SkyNightIntensity = NewLook.SkyNightIntensity;
-	NightDirectionalIntensity = NewLook.NightDirectionalIntensity;
-	NightDirectionalTemperature = NewLook.NightDirectionalTemperature;
-	NightAmbientColor = NewLook.NightAmbientColor;
-	NightExposureBias = NewLook.NightExposureBias;
+	if (SkyWorld->GetFeatureLevel() == ERHIFeatureLevel::ES3_1)
+	{
+		MobileNightLook = NewLook;
+	}
+	else
+	{
+		SkyNightIntensity = NewLook.SkyNightIntensity;
+		NightDirectionalIntensity = NewLook.NightDirectionalIntensity;
+		NightDirectionalTemperature = NewLook.NightDirectionalTemperature;
+		NightAmbientColor = NewLook.NightAmbientColor;
+		NightExposureBias = NewLook.NightExposureBias;
+	}
 	return true;
 #else
 	(void)NewLook;
+	return false;
+#endif
+}
+
+bool ATimeCycleSky::ApplyTransientSunAzimuth(float NewAzimuth)
+{
+#if WITH_EDITOR
+	UWorld* SkyWorld = GetWorld();
+	if (!HasAuthority() || !SkyWorld || !SkyWorld->IsGameWorld() || !FMath::IsFinite(NewAzimuth))
+	{
+		return false;
+	}
+
+	SunAzimuth = TimeCycleSkyLighting::NormalizeSunAzimuth(NewAzimuth);
+	return true;
+#else
+	(void)NewAzimuth;
 	return false;
 #endif
 }
@@ -237,6 +420,127 @@ ATimeCycleManager* ATimeCycleSky::GetTimeCycleManager() const
 	return TimeCycleManager;
 }
 
+void ATimeCycleSky::BindVisualTimeManager()
+{
+	ATimeCycleManager* Manager = GetTimeCycleManager();
+	if (BoundVisualTimeManager.Get() == Manager) { return; }
+	if (ATimeCycleManager* PreviousManager = BoundVisualTimeManager.Get())
+	{
+		PreviousManager->OnVisualTimeChanged.RemoveDynamic(this, &ATimeCycleSky::HandleVisualTimeChanged);
+	}
+	BoundVisualTimeManager = Manager;
+	if (Manager && GetWorld() && GetWorld()->IsGameWorld())
+	{
+		Manager->OnVisualTimeChanged.AddUniqueDynamic(this, &ATimeCycleSky::HandleVisualTimeChanged);
+	}
+}
+
+void ATimeCycleSky::HandleVisualTimeChanged()
+{
+	UpdateVisualLighting();
+}
+
+APostProcessVolume* ATimeCycleSky::GetUnboundPostProcessVolume()
+{
+	if (APostProcessVolume* CachedVolume = CachedPPV.Get())
+	{
+		if (CachedVolume->bUnbound)
+		{
+			return CachedVolume;
+		}
+	}
+
+	CachedPPV.Reset();
+	UWorld* SkyWorld = GetWorld();
+	if (!SkyWorld)
+	{
+		return nullptr;
+	}
+
+	for (TActorIterator<APostProcessVolume> It(SkyWorld); It; ++It)
+	{
+		if (It->bUnbound)
+		{
+			CachedPPV = *It;
+			return *It;
+		}
+	}
+
+	return nullptr;
+}
+
+void ATimeCycleSky::UpdateE6ReflectionCaptureVisibility(bool bShouldBeVisible)
+{
+	UReflectionCaptureComponent* CaptureComponent = CachedE6ReflectionCapture.Get();
+	if (!CaptureComponent)
+	{
+		UWorld* SkyWorld = GetWorld();
+		if (!SkyWorld)
+		{
+			return;
+		}
+
+		for (TActorIterator<ASphereReflectionCapture> It(SkyWorld); It; ++It)
+		{
+			UReflectionCaptureComponent* Candidate = It->GetCaptureComponent();
+			if (Candidate
+				&& Candidate->ReflectionSourceType == EReflectionSourceType::SpecifiedCubemap
+				&& Candidate->Cubemap
+				&& Candidate->Cubemap->GetPathName() == E6ReflectionCubemapPath)
+			{
+				CachedE6ReflectionCapture = Candidate;
+				CaptureComponent = Candidate;
+				break;
+			}
+		}
+	}
+
+	if (CaptureComponent && CaptureComponent->IsVisible() != bShouldBeVisible)
+	{
+		CaptureComponent->SetVisibility(bShouldBeVisible, true);
+	}
+}
+
+void ATimeCycleSky::UpdateOfficeFogTint(float DayAlpha)
+{
+	if (!bApplyOfficeFogTint)
+	{
+		RestoreOfficeFogTint();
+		return;
+	}
+	UExponentialHeightFogComponent* FogComponent = CachedOfficeFog.Get();
+	if (!FogComponent)
+	{
+		for (TActorIterator<AExponentialHeightFog> It(GetWorld()); It; ++It)
+		{
+			FogComponent = It->GetComponent();
+			if (FogComponent)
+			{
+				CachedOfficeFog = FogComponent;
+				OfficeDayFogColor = FogComponent->FogInscatteringLuminance;
+				break;
+			}
+		}
+	}
+	if (FogComponent)
+	{
+		const FLinearColor FogColor = FMath::Lerp(OfficeNightFogColor, OfficeDayFogColor, FMath::Clamp(DayAlpha, 0.f, 1.f));
+		if (!FogComponent->FogInscatteringLuminance.Equals(FogColor, 0.001f))
+		{
+			FogComponent->SetFogInscatteringColor(FogColor);
+		}
+	}
+}
+
+void ATimeCycleSky::RestoreOfficeFogTint()
+{
+	if (UExponentialHeightFogComponent* FogComponent = CachedOfficeFog.Get())
+	{
+		FogComponent->SetFogInscatteringColor(OfficeDayFogColor);
+	}
+	CachedOfficeFog.Reset();
+}
+
 float ATimeCycleSky::GetEditorPreviewSunPitch() const
 {
 #if WITH_EDITOR
@@ -259,7 +563,12 @@ void ATimeCycleSky::Tick(float DeltaTime)
 	UpdateAccumulator += DeltaTime;
 	if (UpdateAccumulator < UpdateInterval) return;
 	UpdateAccumulator = 0.0f;
+	BindVisualTimeManager();
+	UpdateVisualLighting();
+}
 
+void ATimeCycleSky::UpdateVisualLighting()
+{
 	ATimeCycleManager* Manager = GetTimeCycleManager();
 
 	float CurrentHour = 0.0f;
@@ -281,13 +590,13 @@ void ATimeCycleSky::Tick(float DeltaTime)
 		{
 			return;
 		}
-		CurrentTime = Manager->GetCurrentTime();
+		CurrentTime = Manager->GetVisualTime();
 		CurrentHour = CurrentTime.Hours + (CurrentTime.Minutes / 60.0f);
 	}
 
 	// 밤 경계는 시계(단일 소스)의 일출/일몰에서 파생. 매니저 없으면(에디터 프리뷰 등) 안전 폴백.
 	float SunRiseHour = 7.0f;
-	float SunSetHour = 20.0f;
+	float SunSetHour = 19.0f;
 	if (Manager)
 	{
 		const FTimeCycleCode RiseCode = Manager->GetSunRiseTime();
@@ -296,25 +605,48 @@ void ATimeCycleSky::Tick(float DeltaTime)
 		SunSetHour = SetCode.Hours + SetCode.Minutes / 60.0f;
 	}
 
+	USkyAtmosphereComponent* SkyAtmosphere = nullptr;
+	if (GetWorld()->IsGameWorld())
+	{
+		for (TActorIterator<ASkyAtmosphere> It(GetWorld()); It; ++It)
+		{
+			USkyAtmosphereComponent* AtmosphereComponent = It->GetComponent();
+			if (AtmosphereComponent && AtmosphereComponent->IsRegistered() && AtmosphereComponent->ShouldRender())
+			{
+				SkyAtmosphere = AtmosphereComponent;
+				break;
+			}
+		}
+	}
+
 	TimeCycleSkyLighting::FParameters LightingParameters;
 	LightingParameters.CurrentHour = CurrentHour;
 	LightingParameters.SunRiseHour = SunRiseHour;
 	LightingParameters.SunSetHour = SunSetHour;
 	LightingParameters.DawnBlendHours = DawnBlendHours;
 	LightingParameters.DuskBlendHours = DuskBlendHours;
+	LightingParameters.DuskDirectionalIntensityScale = DuskDirectionalIntensityScale;
+	LightingParameters.DuskMinimumDirectionalElevation = DuskMinimumDirectionalElevation;
+	LightingParameters.PostSunsetTwilightHours = PostSunsetTwilightHours;
+	LightingParameters.PreSunriseTwilightHours = PreSunriseTwilightHours;
+	LightingParameters.TwilightWarmApex = TwilightWarmApex;
+	LightingParameters.bSmoothTwilightRamp = bSmoothTwilightRamp;
+	LightingParameters.bContinuousAtmosphereTwilight = SkyAtmosphere != nullptr;
 	LightingParameters.SunMaxIntensity = SunMaxIntensity;
-	LightingParameters.NightDirectionalIntensity = NightDirectionalIntensity;
+	const FTimeCycleSkyNightLook EffectiveNightLook = GetNightLook();
+	LightingParameters.NightDirectionalIntensity = EffectiveNightLook.NightDirectionalIntensity;
 	LightingParameters.DayDirectionalTemperature = 6500.0f;
 	LightingParameters.TransitionDirectionalTemperature = 1800.0f;
-	LightingParameters.NightDirectionalTemperature = NightDirectionalTemperature;
+	LightingParameters.NightDirectionalTemperature = EffectiveNightLook.NightDirectionalTemperature;
 	LightingParameters.SolarPitch = GetCycleSunPitch(CurrentTime);
-	LightingParameters.SkyNightIntensity = SkyNightIntensity;
+	LightingParameters.SunAzimuth = SunAzimuth;
+	LightingParameters.SkyNightIntensity = EffectiveNightLook.SkyNightIntensity;
 	LightingParameters.SkyDayIntensity = SkyDayIntensity;
-	LightingParameters.NightAmbientColor = NightAmbientColor;
+	LightingParameters.NightAmbientColor = EffectiveNightLook.NightAmbientColor;
 	LightingParameters.BaseSkyColor = BaseSkyColor;
 	LightingParameters.DuskAmbientColor = DuskAmbientColor;
 	LightingParameters.DuskAmbientStrength = DuskAmbientStrength;
-	LightingParameters.NightExposureBias = NightExposureBias;
+	LightingParameters.NightExposureBias = EffectiveNightLook.NightExposureBias;
 	LightingParameters.DayExposureBias = DayExposureBias;
 
 	const TimeCycleSkyLighting::FState LightingState =
@@ -323,10 +655,15 @@ void ATimeCycleSky::Tick(float DeltaTime)
 		LightingState.DirectionalPitch,
 		LastSunPitch,
 		0.01f);
+	const bool bAzimuthChanged = !FMath::IsNearlyEqual(
+		LightingState.DirectionalYaw,
+		LastSunAzimuth,
+		0.01f);
 
 	if (SunLight)
 	{
-		if (!FMath::IsNearlyEqual(LightingState.DirectionalIntensity, LastSunIntensity, 0.001f))
+		if (!FMath::IsNearlyEqual(LightingState.DirectionalIntensity, LastSunIntensity, 0.001f)
+			|| (LightingState.DirectionalIntensity == 0.0f && LastSunIntensity != 0.0f))
 		{
 			SunLight->SetIntensity(LightingState.DirectionalIntensity);
 			LastSunIntensity = LightingState.DirectionalIntensity;
@@ -336,21 +673,46 @@ void ATimeCycleSky::Tick(float DeltaTime)
 			SunLight->Temperature = LightingState.DirectionalTemperature;
 			LastSunTemperature = LightingState.DirectionalTemperature;
 		}
-		if (bPitchChanged)
+		if (bPitchChanged || bAzimuthChanged)
 		{
-			SunLight->SetRelativeRotation(FRotator(LightingState.DirectionalPitch, 0.0f, 0.0f));
+			SunLight->SetRelativeRotation(FRotator(
+				LightingState.DirectionalPitch,
+				LightingState.DirectionalYaw,
+				0.0f));
 		}
 
 		UWorld* SkyWorld = GetWorld();
 		if (SkyWorld && SkyWorld->IsGameWorld())
 		{
 			const bool bWasAtmosphereSunLight = SunLight->IsUsedAsAtmosphereSunLight();
-			const bool bShouldBeAtmosphereSunLight =
-				TimeCycleSkyLighting::ShouldEnableAtmosphereSunLight(
+			const bool bShouldBeAtmosphereSunLight = SkyAtmosphere
+				? LightingState.DayAlpha > 0.0f
+				: TimeCycleSkyLighting::ShouldEnableAtmosphereSunLight(
 					LightingParameters.SolarPitch,
 					bWasAtmosphereSunLight);
+			if (SkyAtmosphere && bShouldBeAtmosphereSunLight)
+			{
+				// 대기는 실제 공전을 따르되 황혼 최소 고도가 있으면 직접광의 지평선 감쇠도 보정한다.
+				FVector AtmosphereDirection = -FRotator(
+					LightingState.AtmospherePitch, LightingState.DirectionalYaw, 0.0f).Vector();
+				if (const USceneComponent* SunParentComponent = SunLight->GetAttachParent())
+				{
+					AtmosphereDirection = SunParentComponent->GetComponentTransform().TransformVectorNoScale(AtmosphereDirection);
+				}
+				const int32 AtmosphereIndex = SunLight->AtmosphereSunLightIndex;
+				if (!SkyAtmosphere->IsAtmosphereLightDirectionOverriden(AtmosphereIndex)
+					|| !SkyAtmosphere->GetOverridenAtmosphereLightDirection(AtmosphereIndex).Equals(AtmosphereDirection, 0.0001))
+				{
+					SkyAtmosphere->OverrideAtmosphereLightDirection(AtmosphereIndex, AtmosphereDirection);
+				}
+			}
 			if (bShouldBeAtmosphereSunLight != bWasAtmosphereSunLight)
 			{
+				if (SkyAtmosphere)
+				{
+					SunLight->SetIntensity(LightingState.DirectionalIntensity);
+					LastSunIntensity = LightingState.DirectionalIntensity;
+				}
 				SunLight->SetAtmosphereSunLight(bShouldBeAtmosphereSunLight);
 			}
 		}
@@ -376,43 +738,81 @@ void ATimeCycleSky::Tick(float DeltaTime)
 
 	// 노출 bias: SkyLight와 같은 낮밤 알파로 보간해 전역 PPV에 주입 — 게임 월드 전용(에디터에서 레벨 dirty 방지).
 	// PPV의 저장값(bias override OFF)은 건드리지 않고 런타임에만 override ON.
-	if (GetWorld() && GetWorld()->IsGameWorld())
+	UWorld* SkyWorld = GetWorld();
+	if (SkyWorld && SkyWorld->IsGameWorld())
 	{
-		if (!FMath::IsNearlyEqual(LightingState.ExposureBias, LastExposureBias, 0.001f))
+		APostProcessVolume* PreviousPPV = CachedPPV.Get();
+		UpdateOfficeFogTint(LightingState.DayAlpha);
+		APostProcessVolume* PPV = GetUnboundPostProcessVolume();
+		if (PPV != PreviousPPV)
 		{
-			if (!CachedPPV.IsValid() && !bTriedFindPPV)
-			{
-				bTriedFindPPV = true;
-				// 전역(unbound) PPV에만 주입 — bounded 로컬 PPV에 쓰면 그 볼륨 안에서만 먹혀 낮밤 노출이 무효화됨
-				for (TActorIterator<APostProcessVolume> It(GetWorld()); It; ++It)
-				{
-					if (It->bUnbound)
-					{
-						CachedPPV = *It;
-						break;
-					}
-				}
-			}
-			if (APostProcessVolume* PPV = CachedPPV.Get())
-			{
-				PPV->Settings.bOverride_AutoExposureBias = true;
-				PPV->Settings.AutoExposureBias = LightingState.ExposureBias;
-				LastExposureBias = LightingState.ExposureBias;
+			LastExposureBias = FLT_MAX;
+			LastWarmWeight = FLT_MAX;
+			bVisualProfileNeedsRecovery = true;
+		}
 
-				// 풀스크린 노을 틴트(옵션) — WarmWeight=0이면 White라 낮/밤엔 무효(자동 복귀).
-				if (bDuskSceneTint)
+		if (PPV && !FMath::IsNearlyEqual(LightingState.ExposureBias, LastExposureBias, 0.001f))
+		{
+			PPV->Settings.bOverride_AutoExposureBias = true;
+			PPV->Settings.AutoExposureBias = LightingState.ExposureBias;
+			LastExposureBias = LightingState.ExposureBias;
+		}
+
+		// 풀스크린 노을 틴트(옵션) — WarmWeight=0이면 White라 낮/밤엔 무효(자동 복귀).
+		if (PPV && bDuskSceneTint
+			&& !FMath::IsNearlyEqual(LightingState.WarmWeight, LastWarmWeight, 0.001f))
+		{
+			PPV->Settings.bOverride_SceneColorTint = true;
+			PPV->Settings.SceneColorTint = FMath::Lerp(
+				FLinearColor::White,
+				DuskAmbientColor,
+				LightingState.WarmWeight * DuskSceneTintStrength);
+			LastWarmWeight = LightingState.WarmWeight;
+		}
+
+		if (bApplyMainMapVisualProfile && SkyWorld->GetFeatureLevel() == ERHIFeatureLevel::ES3_1)
+		{
+			const FTimeCycleSkyVisualProfile VisualProfile =
+				TimeCycleSkyVisualProfile::Calculate(
+					CurrentHour,
+					SunRiseHour,
+					SunSetHour,
+					DawnBlendHours,
+					DuskBlendHours);
+			UpdateE6ReflectionCaptureVisibility(VisualProfile.Phase != EMainMapVisualPhase::Night);
+
+			UTexture* SelectedLUT = VisualProfile.LutRole == EMainMapLutRole::DCL2
+				? DCL2ColorGradingLUT.Get()
+				: L2ColorGradingLUT.Get();
+
+			if (!PPV || !SelectedLUT)
+			{
+				bVisualProfileNeedsRecovery = true;
+			}
+			else
+			{
+				const int32 VisualPhase = static_cast<int32>(VisualProfile.Phase);
+				const bool bPhaseChanged = LastAppliedVisualPhase != VisualPhase;
+				const bool bLutChanged = LastAppliedColorGradingLUT.Get() != SelectedLUT;
+				const bool bDuskHourChanged = VisualProfile.Phase == EMainMapVisualPhase::Dusk
+					&& !FMath::IsNearlyEqual(CurrentHour, LastAppliedVisualProfileHour, KINDA_SMALL_NUMBER);
+				if (bPhaseChanged || bLutChanged || bDuskHourChanged || bVisualProfileNeedsRecovery)
 				{
-					PPV->Settings.bOverride_SceneColorTint = true;
-					PPV->Settings.SceneColorTint = FMath::Lerp(
-						FLinearColor::White,
-						DuskAmbientColor,
-						LightingState.WarmWeight * DuskSceneTintStrength);
+					ApplyMobileVisualProfile(PPV->Settings, VisualProfile, SelectedLUT);
+					LastAppliedVisualPhase = VisualPhase;
+					LastAppliedColorGradingLUT = SelectedLUT;
+					LastAppliedVisualProfileHour = CurrentHour;
+					bVisualProfileNeedsRecovery = false;
 				}
 			}
 		}
 	}
 
-	if (bPitchChanged) LastSunPitch = LightingState.DirectionalPitch;
+	if (bPitchChanged || bAzimuthChanged)
+	{
+		LastSunPitch = LightingState.DirectionalPitch;
+		LastSunAzimuth = LightingState.DirectionalYaw;
+	}
 }
 
 #if WITH_EDITOR
@@ -420,12 +820,14 @@ void ATimeCycleSky::UpdateEditorPreviewExposure(float ExposureBias)
 {
 #if WITH_EDITORONLY_DATA
 	UWorld* SkyWorld = GetWorld();
+	const FString MapPackage = SkyWorld ? SkyWorld->GetPackage()->GetName() : FString();
 	const bool bShouldEnable = SkyWorld
 		&& SkyWorld->WorldType == EWorldType::Editor
 		&& !SkyWorld->IsGameWorld()
 		&& SkyWorld->GetFeatureLevel() == ERHIFeatureLevel::ES3_1
-		&& SkyWorld->GetPackage()->GetName()
-			== TEXT("/Game/CompanyGrowth/Level/MainMap_TheRiverwalkCity");
+		&& (MapPackage == TEXT("/Game/CompanyGrowth/Level/MainMap_City")
+			|| MapPackage == TEXT("/Game/CompanyGrowth/Level/MainMap_Manhattan")
+			|| MapPackage == TEXT("/Game/CompanyGrowth/Level/MainMap_TheRiverwalkCity"));
 	if (!EditorPreviewPostProcess)
 	{
 		return;

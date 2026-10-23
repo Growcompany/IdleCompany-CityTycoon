@@ -13,7 +13,7 @@ class UImage;
  * - 좌상단: 프로필 이미지 + 레벨 + 플레이어 이름
  * - 우상단: 홈(나가기) 버튼
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UVisitModeOverlayWidget : public UUserWidget
 {
 	GENERATED_BODY()

@@ -5,7 +5,10 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Containers/Ticker.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
+#include "Enum/CompanyType.h"
+#include "Enum/QualityGrade.h"
+#include "Data/CloudEconomyData.h"
 #include "WorldFactoryManager.generated.h"
 
 class UTexture2D;
@@ -37,8 +40,16 @@ struct FWorldFactoryLineState
 	UPROPERTY(SaveGame, BlueprintReadOnly)
 	int32 LineId = 0;
 
+	// 창고 키 = (CompanyType, ProductIndex)
+	UPROPERTY(SaveGame, BlueprintReadOnly)
+	ECompanyType CompanyType = ECompanyType::None;
+
 	UPROPERTY(SaveGame, BlueprintReadOnly)
 	int32 ProductIndex = 0;
+
+	// 생산 주문서 등급 — 수령한 완제품에 찍힌다(구 WorldMapManager 라인의 StampedGrade 와 같은 규칙).
+	UPROPERTY(SaveGame, BlueprintReadOnly)
+	EQualityGrade Grade = EQualityGrade::C;
 
 	UPROPERTY(SaveGame, BlueprintReadOnly)
 	FText ProductName;
@@ -84,6 +95,10 @@ struct FCountryFactoryData
 	UPROPERTY(SaveGame, BlueprintReadOnly)
 	TMap<EWorldFactoryUpgradeType, int32> UpgradeLevels;
 
+	// (회사 타입, 제품 번호, 품질 등급)별로 아직 한 개가 되지 않은 수령 보너스.
+	UPROPERTY(SaveGame)
+	TMap<FIntVector, double> QualityBonusCarry;
+
 	// 국가별로 LineId 독립 시퀀스
 	UPROPERTY(SaveGame)
 	int32 NextLineId = 1;
@@ -110,6 +125,8 @@ public:
 		ECountryType, Country, int32, LineId);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnWorldFactoryLineClaimed,
 		ECountryType, Country, int32, LineId, int64, FinalQty);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnWorldFactoryLineRemoved,
+		ECountryType, Country, int32, LineId);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnWorldFactoryUpgradeChanged,
 		ECountryType, Country, EWorldFactoryUpgradeType, UpgradeType, int32, NewLevel);
 
@@ -122,8 +139,12 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "WorldFactory|Events")
 	FOnWorldFactoryLineCompleted OnLineCompleted;
 
+	// 수령 성공 시 해당 배치를 소진하고 라인을 비운다.
 	UPROPERTY(BlueprintAssignable, Category = "WorldFactory|Events")
 	FOnWorldFactoryLineClaimed OnLineClaimed;
+
+	UPROPERTY(BlueprintAssignable, Category = "WorldFactory|Events")
+	FOnWorldFactoryLineRemoved OnLineRemoved;
 
 	UPROPERTY(BlueprintAssignable, Category = "WorldFactory|Events")
 	FOnWorldFactoryUpgradeChanged OnUpgradeChanged;
@@ -136,19 +157,32 @@ public:
 
 	// ── 생산 라인 (Country별) ──
 	UFUNCTION(BlueprintCallable, Category = "WorldFactory")
-	int32 StartProduction(ECountryType Country, int32 ProductIndex, const FText& ProductName,
-		const TSoftObjectPtr<UTexture2D>& IconPath, float BaseRatePerSecond, int64 TargetQty);
+	int32 StartProduction(ECountryType Country, ECompanyType CompanyType, int32 ProductIndex, const FText& ProductName,
+		const TSoftObjectPtr<UTexture2D>& IconPath, float BaseRatePerSecond, int64 TargetQty,
+		EQualityGrade Grade = EQualityGrade::C);
 
 	UFUNCTION(BlueprintCallable, Category = "WorldFactory")
 	bool InstantFinishLine(ECountryType Country, int32 LineId);
+
+	int64 GetInstantFinishCost(ECountryType Country, int32 LineId) const;
+	bool IsInstantFinishPending(ECountryType Country, int32 LineId) const;
+	void RequestInstantFinish(ECountryType Country, int32 LineId, int64 MaxAcceptedCost,
+		FOnCloudEconomyOpDone Done);
 
 	// [dev 프리셋] 라인 진행도를 임의 비율로 되돌린다.
 	// 진행도의 유일한 원천이 시작 시각이라 백데이트 말고는 중간 % 를 만들 방법이 없다
 	// (StartProduction 은 항상 UtcNow 를 박고, InstantFinishLine 은 100% 로만 점프).
 	bool SeedLineProgress(ECountryType Country, int32 LineId, float ProgressRatio);
 
+	// 완료 라인의 수량을 완제품 창고에 한 번만 넣고 라인을 비운다.
 	UFUNCTION(BlueprintCallable, Category = "WorldFactory")
 	bool ClaimLine(ECountryType Country, int32 LineId);
+
+	// 수령한 실제 완제품 수량(품질 보너스 포함). 실패하거나 이미 수령한 라인은 0.
+	int64 ClaimLineAndGetQuantity(ECountryType Country, int32 LineId);
+
+	// 수령 없이 라인을 걷어낸다(현재 치트 Fac_ClearLines).
+	bool RemoveLine(ECountryType Country, int32 LineId);
 
 	UFUNCTION(BlueprintPure, Category = "WorldFactory")
 	TArray<FWorldFactoryLineState> GetActiveLines(ECountryType Country) const;
@@ -219,4 +253,6 @@ private:
 
 	bool TickInternal(float DeltaTime);
 	int32 FindLineIndexById(const FCountryFactoryData& Factory, int32 LineId) const;
+	bool BuildInstantFinishQuote(ECountryType Country, int32 LineId, int64& OutCost,
+		FCloudMeta& OutMeta) const;
 };

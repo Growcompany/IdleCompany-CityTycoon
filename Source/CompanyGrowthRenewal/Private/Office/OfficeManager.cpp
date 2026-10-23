@@ -1,6 +1,9 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "Office/OfficeManager.h"
+#include "Office/OfficeRecruitmentFlowSubsystem.h"
+#include "Office/OfficeSeatAssignmentRules.h"
+#include "Player/Components/PlacementHandler.h"
 #include "Table/OfficeStarterPresetTable.h"
 #include "Office/DecorationActor.h"
 #include "Office/WorkstationActorBase.h"
@@ -8,6 +11,8 @@
 #include "UI/Element/Building/WallSelectionWidget.h"
 #include "Office/OfficeInterior.h"
 #include "Player/OfficeCameraPawn.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Manager/ResourceItemManager.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/SaveLoadManager.h"
 #include "Manager/ProjectOperationManager.h"
@@ -20,6 +25,7 @@
 #include "Table/DecorationData.h"
 #include "Table/WorkstationCardTable.h"
 #include "Entity/Officeworker/Officeworker.h"
+#include "Engine/StaticMesh.h"
 #include "Kismet/GameplayStatics.h"
 #include "Entity/Building/BuildingBaseActor.h"
 #include "GameMode/OfficeGameMode.h"
@@ -374,6 +380,15 @@ AWorkstationActorBase* UOfficeManager::FindWorkstationByEmployeeID(int32 Employe
 
 void UOfficeManager::FillOfficeSaveData(FOfficeSaveData& OutOfficeData) const
 {
+	const AOfficeInterior* SaveInterior = OfficeInterior ? OfficeInterior : Cast<AOfficeInterior>(
+		UGameplayStatics::GetActorOfClass(GetWorld(), AOfficeInterior::StaticClass()));
+	if (!SaveInterior)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[OfficeManager] Cannot save office-local transforms without OfficeInterior"));
+		return;
+	}
+	const AOfficeCameraPawn* ActiveCamera = Cast<AOfficeCameraPawn>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0));
+	const UPlacementHandler* EditingHandler = ActiveCamera ? ActiveCamera->PlacementHandler.Get() : nullptr;
 	// Decoration 데이터 수집
 	OutOfficeData.PlacedDecorations.Empty();
 	for (ADecorationActor* Decoration : PlacedDecorations)
@@ -385,7 +400,8 @@ void UOfficeManager::FillOfficeSaveData(FOfficeSaveData& OutOfficeData) const
 
 		FDecorationSaveData DecSave;
 		DecSave.RowName = Decoration->DecorationCardTableRowName;
-		DecSave.Transform = Decoration->GetActorTransform();
+		DecSave.Transform = EditingHandler ? EditingHandler->GetCommittedOfficeTransform(Decoration) : Decoration->GetActorTransform();
+		DecSave.Transform = SaveInterior->WorldToOfficeLocalTransform(DecSave.Transform);
 		DecSave.Category = Decoration->GetCategory();
 
 		OutOfficeData.PlacedDecorations.Add(DecSave);
@@ -401,6 +417,8 @@ void UOfficeManager::FillOfficeSaveData(FOfficeSaveData& OutOfficeData) const
 		}
 
 		FWorkstationSaveData WsSave = Workstation->GetSaveData();
+		if (EditingHandler) WsSave.Transform = EditingHandler->GetCommittedOfficeTransform(Workstation);
+		WsSave.Transform = SaveInterior->WorldToOfficeLocalTransform(WsSave.Transform);
 		OutOfficeData.OfficeWorkstations.Add(WsSave);
 	}
 
@@ -410,6 +428,12 @@ void UOfficeManager::FillOfficeSaveData(FOfficeSaveData& OutOfficeData) const
 
 void UOfficeManager::ApplyOfficeSaveData(const FOfficeSaveData& OfficeData)
 {
+	CacheReferences();
+	if (!OfficeInterior)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[OfficeManager] Cannot restore office-local transforms without OfficeInterior"));
+		return;
+	}
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -456,25 +480,38 @@ void UOfficeManager::ApplyOfficeSaveData(const FOfficeSaveData& OfficeData)
 			UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] Failed to load decoration data: %s"), *DecSave.RowName.ToString());
 			continue;
 		}
+		bool bCardFound = false;
+		const FDecorationCardTable CardData = TableMgr->GetDecorationCardInfo(DecSave.RowName, bCardFound);
+		if (!bCardFound)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] Missing decoration card: %s"), *DecSave.RowName.ToString());
+			continue;
+		}
+		UStaticMesh* RestoredMesh = DecData.DecorationMesh.LoadSynchronous();
+		if (!RestoredMesh) { continue; }
+		const FBox RestoredBounds = RestoredMesh->GetBoundingBox().TransformBy(DecSave.Transform);
+		// TV 는 바닥 확장을 따라 움직이므로 정상 배치된 장식도 나중에 겹칠 수 있다 ― 버리면 다음 저장에서 영구 소실되므로 그대로 복원한다.
+		if (OfficeInterior->IsTelevisionPlacementBlocked(RestoredBounds))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] Decoration %s overlaps the fixed television after a layout change."), *DecSave.RowName.ToString());
+		}
 
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
 
 		ADecorationActor* NewDecoration = World->SpawnActor<ADecorationActor>(
 			ADecorationActor::StaticClass(),
-			DecSave.Transform,
+			OfficeInterior->OfficeLocalToWorldTransform(DecSave.Transform),
 			SpawnParams);
 
 		if (NewDecoration)
 		{
 			NewDecoration->DecorationCardTableRowName = DecSave.RowName;
-			NewDecoration->Category = DecSave.Category;
+			NewDecoration->Category = CardData.Category;
+			NewDecoration->AllowedSurface = CardData.AllowedSurface;
 
-			UStaticMesh* Mesh = DecData.DecorationMesh.LoadSynchronous();
-			if (Mesh)
-			{
-				NewDecoration->SetDecorationMesh(Mesh);
-			}
+			NewDecoration->SetDecorationMesh(RestoredMesh);
 
 			// 배열에 직접 추가 (Register 호출하지 않음)
 			PlacedDecorations.Add(NewDecoration);
@@ -492,6 +529,11 @@ void UOfficeManager::ApplyOfficeSaveData(const FOfficeSaveData& OfficeData)
 		}
 	}
 	PlacedWorkstations.Empty();
+
+	const UCGGameInstance* OfficeGameInstance = Cast<UCGGameInstance>(GI);
+	const int32 BuildingIndex = OfficeGameInstance ? OfficeGameInstance->GetCurrentManagedBuildingIndex() : INDEX_NONE;
+	TSet<int32> SeatedEmployees;
+	int32 ClearedSeatCount = 0;
 
 	// 저장 데이터에서 업무공간 복원
 	for (const FWorkstationSaveData& WsSave : OfficeData.OfficeWorkstations)
@@ -520,15 +562,21 @@ void UOfficeManager::ApplyOfficeSaveData(const FOfficeSaveData& OfficeData)
 
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnParams.TransformScaleMethod = ESpawnActorScaleMethod::OverrideRootScale;
 
+		FWorkstationSaveData WorldSave = WsSave;
+		WorldSave.Transform = OfficeInterior->OfficeLocalToWorldTransform(WsSave.Transform);
 		AWorkstationActorBase* NewWorkstation = World->SpawnActor<AWorkstationActorBase>(
 			WsClass,
-			WsSave.Transform,
+			WorldSave.Transform,
 			SpawnParams);
 
 		if (NewWorkstation)
 		{
-			NewWorkstation->RestoreFromSaveData(WsSave);
+			// 직원 매니저는 아직 복원 전이므로 같은 저장 스냅샷의 로스터로 좌석 소유권을 확인한다.
+			ClearedSeatCount += OfficeSeatAssignmentRules::ValidateSavedSeats(
+				WorldSave, OfficeData.EmployeeList, BuildingIndex, SeatedEmployees);
+			NewWorkstation->RestoreFromSaveData(WorldSave);
 
 			// 배열에 직접 추가 (Register 호출하지 않음)
 			PlacedWorkstations.Add(NewWorkstation);
@@ -536,6 +584,12 @@ void UOfficeManager::ApplyOfficeSaveData(const FOfficeSaveData& OfficeData)
 			UE_LOG(LogTemp, Log, TEXT("[OfficeManager] Restored workstation: %s at %s"),
 				*WsSave.WorkstationTypeID.ToString(), *WsSave.Transform.GetLocation().ToString());
 		}
+	}
+
+	if (ClearedSeatCount > 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] Cleared %d invalid seat assignments for Building %d"),
+			ClearedSeatCount, BuildingIndex);
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[OfficeManager] ApplyOfficeSaveData - Restored %d decorations, %d workstations"),
@@ -575,6 +629,13 @@ bool UOfficeManager::ApplyStarterPresetToData(FOfficeSaveData& OfficeData, EComp
 	{
 		return false;
 	}
+	const AOfficeInterior* Interior = ResolveOfficeInterior();
+	if (!Interior)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] StarterPreset %s: OfficeInterior 없음 — 첫 입장 시드 보류"),
+			*OfficeData.PendingStarterPreset.ToString());
+		return false;
+	}
 
 	UWorld* World = GetWorld();
 	UGameInstance* GI = World ? World->GetGameInstance() : nullptr;
@@ -597,12 +658,6 @@ bool UOfficeManager::ApplyStarterPresetToData(FOfficeSaveData& OfficeData, EComp
 
 	bool bPaletteFound = false;
 	const FIndustryMoodPaletteRow Palette = TableMgr->GetIndustryMoodPalette(Industry, bPaletteFound);
-
-	// 오피스 원점 = OfficeInterior 액터 트랜스폼 (타일/벽이 전부 이 액터의 상대 좌표)
-	AOfficeInterior* Interior = Cast<AOfficeInterior>(
-		UGameplayStatics::GetActorOfClass(World, AOfficeInterior::StaticClass()));
-	FTransform Origin = Interior ? Interior->GetActorTransform() : FTransform::Identity;
-	Origin.SetScale3D(FVector::OneVector); // 루트 스케일이 1이 아니어도 RelLocation/데코 크기가 스케일되지 않도록
 
 	UCGGameInstance* CGI = Cast<UCGGameInstance>(GI);
 	const int32 BuildingIndex = CGI ? CGI->GetCurrentManagedBuildingIndex() : 0;
@@ -644,7 +699,23 @@ bool UOfficeManager::ApplyStarterPresetToData(FOfficeSaveData& OfficeData, EComp
 		}
 
 		const FTransform Rel(FRotator(0.f, Entry.YawDeg, 0.f), Entry.RelLocation);
-		OfficeData.PlacedDecorations.Add(FDecorationSaveData(RowName, Rel * Origin, Card.Category));
+		bool bDecorationOk = false;
+		const FDecorationData DecorationData = TableMgr->GetDecorationData(RowName, bDecorationOk);
+		UStaticMesh* DecorationMesh = bDecorationOk ? DecorationData.DecorationMesh.LoadSynchronous() : nullptr;
+		if (!DecorationMesh)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] StarterPreset %s entry %d row %s: 메시 없음 — 스킵"),
+				*OfficeData.PendingStarterPreset.ToString(), i, *RowName.ToString());
+			continue;
+		}
+		const FBox DecorationBounds = DecorationMesh->GetBoundingBox().TransformBy(Rel);
+		if (Interior->IsRecruitmentEntranceBlocked(DecorationBounds) || Interior->IsTelevisionPlacementBlocked(DecorationBounds))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] StarterPreset %s entry %d row %s: 고정 설비와 겹쳐 스킵"),
+				*OfficeData.PendingStarterPreset.ToString(), i, *RowName.ToString());
+			continue;
+		}
+		OfficeData.PlacedDecorations.Add(FDecorationSaveData(RowName, Rel, Card.Category));
 		++Added;
 	}
 
@@ -665,20 +736,22 @@ bool UOfficeManager::ApplyStarterPresetToData(FOfficeSaveData& OfficeData, EComp
 		}
 
 		bool bWsOk = false;
+		FWorkstationCardTable WsCard;
 		if (!WsRow.IsNone())
 		{
-			TableMgr->GetWorkstationCardInfo(WsRow, bWsOk);
+			WsCard = TableMgr->GetWorkstationCardInfo(WsRow, bWsOk);
 		}
 
 		// 2순위: 풀이 죽은 행을 가리켰으면 프리셋 기본행으로 폴백
 		if (!bWsOk && !WsEntry.WorkstationTypeID.IsNone() && WsEntry.WorkstationTypeID != WsRow)
 		{
-			TableMgr->GetWorkstationCardInfo(WsEntry.WorkstationTypeID, bWsOk);
+			const FWorkstationCardTable PresetCard = TableMgr->GetWorkstationCardInfo(WsEntry.WorkstationTypeID, bWsOk);
 			if (bWsOk)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] StarterPreset: 업무공간 '%s' 미등록 → 프리셋 기본행 '%s' 폴백 (DT 정합 점검)"),
 					*WsRow.ToString(), *WsEntry.WorkstationTypeID.ToString());
 				WsRow = WsEntry.WorkstationTypeID;
+				WsCard = PresetCard;
 			}
 		}
 
@@ -701,13 +774,36 @@ bool UOfficeManager::ApplyStarterPresetToData(FOfficeSaveData& OfficeData, EComp
 			UE_LOG(LogTemp, Error, TEXT("[OfficeManager] StarterPreset: 업무공간 '%s' 미등록 → 임의 싱글행 '%s' 폴백. 프리셋 DT와 DT_WorkstationCard 정합을 점검하세요."),
 				*WsRow.ToString(), *FallbackSingleRow.ToString());
 			WsRow = FallbackSingleRow;
-			bWsOk = true;
+			WsCard = TableMgr->GetWorkstationCardInfo(WsRow, bWsOk);
+			if (!bWsOk)
+			{
+				break;
+			}
 		}
 
 		FWorkstationSaveData WsSave;
 		WsSave.WorkstationType = EWorkstationType::Single;
 		WsSave.WorkstationTypeID = WsRow;
-		WsSave.Transform = FTransform(FRotator(0.f, WsEntry.YawDeg, 0.f), WsEntry.RelLocation) * Origin;
+		WsSave.Transform = FTransform(FRotator(0.f, WsEntry.YawDeg, 0.f), WsEntry.RelLocation);
+		const double HalfCellSize = UPlacementHandler::OfficeGridCellSize * 0.5;
+		const FVector2D HalfSize(WsCard.GridSize.X * HalfCellSize, WsCard.GridSize.Y * HalfCellSize);
+		FBox2D WorkstationBounds(ForceInit);
+		for (const float XSign : { -1.f, 1.f })
+		{
+			for (const float YSign : { -1.f, 1.f })
+			{
+				const FVector LocalCorner(WsCard.GridCenterOffset.X + XSign * HalfSize.X,
+					WsCard.GridCenterOffset.Y + YSign * HalfSize.Y, 0.f);
+				const FVector RotatedCorner = WsSave.Transform.TransformPosition(LocalCorner);
+				WorkstationBounds += FVector2D(RotatedCorner.X, RotatedCorner.Y);
+			}
+		}
+		if (Interior->IsRecruitmentEntranceFloorBlocked(WorkstationBounds))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] StarterPreset %s workstation %d row %s: 채용 출입구와 겹쳐 스킵"),
+				*OfficeData.PendingStarterPreset.ToString(), wi, *WsRow.ToString());
+			continue;
+		}
 		WsSave.ChairStates.SetNum(1); // 빈 의자 — WorkstationInfoWidget에서 배정
 		OfficeData.OfficeWorkstations.Add(WsSave);
 		++WsAdded;
@@ -731,6 +827,12 @@ bool UOfficeManager::ApplyStarterPresetToData(FOfficeSaveData& OfficeData, EComp
 
 void UOfficeManager::SpawnDefaultDecorations()
 {
+	CacheReferences();
+	if (!OfficeInterior)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[OfficeManager] Default decorations require OfficeInterior"));
+		return;
+	}
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -766,7 +868,7 @@ void UOfficeManager::SpawnDefaultDecorations()
 	// 오른쪽 벽 중앙 고정 좌표
 	FVector Location(5.f, -400.f, 200.f);
 	FRotator Rotation(0.f, 90.f, 0.f);
-	FTransform SpawnTransform(Rotation, Location);
+	const FTransform SpawnTransform = OfficeInterior->OfficeLocalToWorldTransform(FTransform(Rotation, Location));
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -882,7 +984,7 @@ float UOfficeManager::AddToStoredRevenue(float Amount)
 
 	if (ActualAmount > 0.0f)
 	{
-		OfficeData->StoredRevenue += ActualAmount;
+		OfficeData->AccrueStoredRevenue(ActualAmount);
 	}
 
 	return ActualAmount;
@@ -896,8 +998,7 @@ float UOfficeManager::CollectStoredRevenue()
 		return 0.0f;
 	}
 
-	float CollectedAmount = OfficeData->StoredRevenue;
-	OfficeData->StoredRevenue = 0.0f;
+	float CollectedAmount = OfficeData->TakeStoredRevenue();
 
 	UE_LOG(LogTemp, Log, TEXT("[OfficeManager] Collected stored revenue: %.0f"), CollectedAmount);
 
@@ -917,6 +1018,9 @@ bool UOfficeManager::IsStoredRevenueFull() const
 
 bool UOfficeManager::SeatEmployeeAtWorkstation(AWorkstationActorBase* Workstation, int32 EmployeeID, bool bShouldSave)
 {
+	const UOfficeRecruitmentFlowSubsystem* Flow = GetWorld()->GetSubsystem<UOfficeRecruitmentFlowSubsystem>();
+	if (Flow && !Flow->IsSeatMutationAllowed()) return false;
+	const bool bDeferWorkerSpawn = Flow && Flow->ShouldDeferAssignedWorkerSpawns();
 	if (!Workstation || EmployeeID < 0)
 	{
 		return false;
@@ -940,13 +1044,24 @@ bool UOfficeManager::SeatEmployeeAtWorkstation(AWorkstationActorBase* Workstatio
 		Emp->bIsAssigned = true;
 	}
 
-	// 데이터만 갱신하면 리로드 전까지 워커가 안 보이므로 즉시 스폰+착석
-	if (Emp)
+	// 채용 입장 연출에서는 좌석만 확정하고 워커는 출발 시점에 생성한다.
+	if (Emp && !bDeferWorkerSpawn)
 	{
 		if (AOfficeGameMode* OfficeGM = Cast<AOfficeGameMode>(GetWorld()->GetAuthGameMode()))
 		{
 			OfficeGM->SpawnWorkerForAssignment(*Emp, Workstation, EmptySlot);
 		}
+	}
+
+	if (FOfficeSaveData* OfficeData = GetCurrentOfficeSaveData())
+	{
+		if (!bDeferWorkerSpawn || bShouldSave)
+		{
+			FillOfficeSaveData(*OfficeData);
+		}
+		if (UCGGameInstance* OfficeGI = Cast<UCGGameInstance>(GI))
+			if (UProjectOperationManager* Operations = OfficeGI->GetSubsystem<UProjectOperationManager>())
+				Operations->InvalidateStatBonusCache(OfficeGI->GetCurrentManagedBuildingIndex());
 	}
 
 	// ChairState 는 메모리 전용 — 명시 저장 (리로드 desync 방지)
@@ -963,7 +1078,7 @@ bool UOfficeManager::SeatEmployeeAtWorkstation(AWorkstationActorBase* Workstatio
 		MissionMgr->NotifyEmployeeSeated();
 	}
 
-	if (EmpMgr)
+	if (EmpMgr && !bDeferWorkerSpawn)
 	{
 		EmpMgr->OnEmployeeRosterChanged.Broadcast();
 	}
@@ -1006,8 +1121,10 @@ AWorkstationActorBase* UOfficeManager::AutoSeatEmployee(int32 EmployeeID, AWorks
 	return nullptr;
 }
 
-bool UOfficeManager::UnseatEmployee(AWorkstationActorBase* Workstation, int32 EmployeeID)
+bool UOfficeManager::UnseatEmployee(AWorkstationActorBase* Workstation, int32 EmployeeID, bool bShouldSave, bool bShouldBroadcast)
 {
+	if (const UOfficeRecruitmentFlowSubsystem* Flow = GetWorld()->GetSubsystem<UOfficeRecruitmentFlowSubsystem>())
+		if (!Flow->IsSeatMutationAllowed()) return false;
 	if (!Workstation || EmployeeID < 0)
 	{
 		return false;
@@ -1047,12 +1164,20 @@ bool UOfficeManager::UnseatEmployee(AWorkstationActorBase* Workstation, int32 Em
 		OfficeGM->DespawnWorkerByID(EmployeeID, Workstation);
 	}
 
-	if (USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr)
+	if (FOfficeSaveData* OfficeData = GetCurrentOfficeSaveData())
+	{
+		FillOfficeSaveData(*OfficeData);
+		if (UCGGameInstance* OfficeGI = Cast<UCGGameInstance>(GI))
+			if (UProjectOperationManager* Operations = OfficeGI->GetSubsystem<UProjectOperationManager>())
+				Operations->InvalidateStatBonusCache(OfficeGI->GetCurrentManagedBuildingIndex());
+	}
+
+	if (USaveLoadManager* SaveMgr = bShouldSave && GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr)
 	{
 		SaveMgr->SaveGameData();
 	}
 
-	if (EmpMgr)
+	if (EmpMgr && bShouldBroadcast)
 	{
 		EmpMgr->OnEmployeeRosterChanged.Broadcast();
 	}
@@ -1130,4 +1255,151 @@ TArray<int32> UOfficeManager::AutoSeatBenchedEmployees(AWorkstationActorBase* Ne
 	}
 
 	return Seated;
+}
+
+// ========== 서버 권위 확장 (office.expand) ==========
+
+namespace
+{
+	// spendRules.json 의 reason 과 바이트 단위로 같아야 한다(다르면 서버가 400)
+	const FName SpendReason_OfficeExpand(TEXT("office.expand"));
+}
+
+AOfficeInterior* UOfficeManager::ResolveOfficeInterior() const
+{
+	if (OfficeInterior)
+	{
+		return OfficeInterior;
+	}
+	UWorld* World = GetWorld();
+	return World ? Cast<AOfficeInterior>(UGameplayStatics::GetActorOfClass(World, AOfficeInterior::StaticClass())) : nullptr;
+}
+
+UCloudEconomySubsystem* UOfficeManager::GetCloudEconomy() const
+{
+	UWorld* World = GetWorld();
+	UGameInstance* GI = World ? World->GetGameInstance() : nullptr;
+	return GI ? GI->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+}
+
+FName UOfficeManager::GetExpandSpendReason()
+{
+	return SpendReason_OfficeExpand;
+}
+
+FName UOfficeManager::ExpandActionKey(EOfficeExpandDirection Direction)
+{
+	return FName(*FString::Printf(TEXT("office.expand.%d"), static_cast<int32>(Direction)));
+}
+
+int64 UOfficeManager::GetExpandCost(EOfficeExpandDirection Direction) const
+{
+	const AOfficeInterior* Interior = ResolveOfficeInterior();
+	return Interior ? Interior->GetExpandCost(Direction) : 0;
+}
+
+void UOfficeManager::RequestExpand(EOfficeExpandDirection Direction, FOnCloudEconomyOpDone Done)
+{
+	const FName ActionKey = ExpandActionKey(Direction);
+
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[OfficeManager] 확장 실패 - CloudEconomySubsystem 없음. Dir=%d"),
+			static_cast<int32>(Direction));
+		Done.ExecuteIfBound(false, CloudErr::Internal);
+		return;
+	}
+
+	// 중복 클릭 — 내가 잡은 pending 이 아니므로 풀지 않는다
+	if (!Cloud->BeginPendingAction(ActionKey))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[OfficeManager] 확장 중복 - 진행 중. Dir=%d"), static_cast<int32>(Direction));
+		Done.ExecuteIfBound(false, NAME_None);
+		return;
+	}
+
+	// 로컬 캐시로 가능 판정만 — 차감은 서버가 한다
+	const AOfficeInterior* Interior = ResolveOfficeInterior();
+	if (!Interior)
+	{
+		// 오피스 월드가 아니거나 인테리어 액터가 없다 — 재화 부족이 아니라 내부 오류다
+		UE_LOG(LogTemp, Error, TEXT("[OfficeManager] 확장 미전송 - OfficeInterior 없음. Dir=%d"),
+			static_cast<int32>(Direction));
+		FinishExpand(Direction, /*bOk=*/false, CloudErr::Internal, ActionKey, Done);
+		return;
+	}
+
+	const int64 Cost = Interior->GetExpandCost(Direction);
+	UWorld* World = GetWorld();
+	UGameInstance* GI = World ? World->GetGameInstance() : nullptr;
+	UResourceItemManager* ResMgr = GI ? GI->GetSubsystem<UResourceItemManager>() : nullptr;
+	const bool bHasDiamond = Cost > 0 && ResMgr && ResMgr->HasResource(EResourceType::Diamond, Cost);
+
+	if (!Interior->CanExpand(Direction) || !bHasDiamond)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[OfficeManager] 확장 미전송 - 로컬 판정 실패. Dir=%d Cost=%lld"),
+			static_cast<int32>(Direction), Cost);
+		// 잔액 부족만 "부족합니다" — 최대 크기 도달은 부족이 아니다
+		FinishExpand(Direction, /*bOk=*/false, bHasDiamond ? NAME_None : CloudErr::InsufficientFunds, ActionKey, Done);
+		return;
+	}
+
+	// 어느 방향의 확장이었는지는 금액만으로 복원할 수 없다 — 영수증 감사용
+	FCloudMeta Meta;
+	Meta.Add(TEXT("direction"), FCloudMetaValue::FromInt(static_cast<int32>(Direction)));
+
+	Cloud->RequestSpend(CloudCurrency::Diamond, Cost, GetExpandSpendReason(), Meta,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, Direction, ActionKey, Done](const FCloudOpResult& OpResult)
+	{
+		if (!OpResult.bOk)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[OfficeManager] office.expand 실패 - Code=%s Http=%d"),
+				*OpResult.Code.ToString(), OpResult.HttpStatus);
+		}
+
+		// 확장은 크기를 1 늘리는 것이라 bReplayed 를 보면 앱이 죽어 놓친 확장을 영구히 잃는다.
+		// 대신 CanExpand 재검사가 상한을 지킨다(이미 최대면 아래에서 false 로 떨어진다).
+		FinishExpand(Direction, OpResult.bOk, OpResult.Code, ActionKey, Done);
+	}));
+}
+
+void UOfficeManager::FinishExpand(EOfficeExpandDirection Direction, bool bOk, FName FailureCode, FName ActionKey,
+	FOnCloudEconomyOpDone Done)
+{
+	bool bApplied = false;
+
+	if (bOk)
+	{
+		AOfficeInterior* Interior = ResolveOfficeInterior();
+		bApplied = Interior
+			&& ((Direction == EOfficeExpandDirection::Left) ? Interior->ExpandLeft() : Interior->ExpandRight());
+
+		if (bApplied)
+		{
+			// 저장은 응답 뒤다 — 구 경로는 SpendResource(bShouldSave=true) 가 겸했다.
+			// SaveGameData 가 OfficeInterior 에서 TileCount 를 다시 읽어 세이브에 싣는다.
+			UWorld* World = GetWorld();
+			UGameInstance* GI = World ? World->GetGameInstance() : nullptr;
+			if (USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr)
+			{
+				SaveMgr->SaveGameData();
+			}
+		}
+		else
+		{
+			// 보석은 이미 나갔는데 확장을 못 했다 — 조용히 넘기면 플레이어가 재화만 잃는다
+			UE_LOG(LogTemp, Error, TEXT("[OfficeManager] 확장 응답은 성공인데 확장 실패. Dir=%d"),
+				static_cast<int32>(Direction));
+			FailureCode = CloudErr::Internal;
+		}
+	}
+
+	if (UCloudEconomySubsystem* Cloud = GetCloudEconomy())
+	{
+		Cloud->EndPendingAction(ActionKey);
+	}
+
+	Done.ExecuteIfBound(bApplied, bApplied ? NAME_None : FailureCode);
 }

@@ -88,3 +88,77 @@ FVector FOfficeFootprintGeometry::MakeTileCenter(const int32 TileX, const int32 
 		FirstTileCenterY - TileY * TileSizeCm,
 		FloorTileCenterZ);
 }
+
+FBox2D FOfficeFootprintGeometry::MakeExpansionCellBounds(
+	const FIntPoint Count,
+	const FIntPoint Maximum,
+	const EOfficeExpandDirection Dir,
+	const float TileSizeCm)
+{
+	if (!IsTileCountValid(Count, Maximum) || TileSizeCm <= 0.f)
+	{
+		return FBox2D(ForceInit);
+	}
+
+	const FIntPoint Next(
+		Dir == EOfficeExpandDirection::Left ? Count.X + 1 : Count.X,
+		Dir == EOfficeExpandDirection::Left ? Count.Y : Count.Y + 1);
+	if (!IsTileCountValid(Next, Maximum))
+	{
+		return FBox2D(ForceInit);
+	}
+
+	const FBox2D Current = MakeFloorBounds(Count, TileSizeCm);
+	const FBox2D Grown = MakeFloorBounds(Next, TileSizeCm);
+	if (!Current.bIsValid || !Grown.bIsValid)
+	{
+		return FBox2D(ForceInit);
+	}
+
+	// 자란 바닥에서 기존 바닥을 뺀 띠가 곧 새 칸이다.
+	return Dir == EOfficeExpandDirection::Left
+		? FBox2D(FVector2D(Current.Max.X, Grown.Min.Y), FVector2D(Grown.Max.X, Grown.Max.Y))
+		: FBox2D(FVector2D(Grown.Min.X, Grown.Min.Y), FVector2D(Grown.Max.X, Current.Min.Y));
+}
+
+FVector FOfficeFootprintGeometry::MakeExpansionCellCenter(
+	const FIntPoint Count,
+	const FIntPoint Maximum,
+	const EOfficeExpandDirection Dir,
+	const float TileSizeCm)
+{
+	const FBox2D Cell = MakeExpansionCellBounds(Count, Maximum, Dir, TileSizeCm);
+	if (!Cell.bIsValid)
+	{
+		return FVector::ZeroVector;
+	}
+
+	const FVector2D Center = Cell.GetCenter();
+	return FVector(Center.X, Center.Y, StructuralFloorZ);
+}
+
+FTransform FOfficeFootprintGeometry::MakeExpansionSegmentTransform(
+	const FTransform& Source, const EAxis::Type LocalAxis, const float SignedLocalSpan, const float AxisScale)
+{
+	const FVector SourceScale = Source.GetScale3D();
+
+	FVector AxisUnit = FVector::ZeroVector;
+	float SourceAxisScale = 1.f;
+	switch (LocalAxis)
+	{
+	case EAxis::X: AxisUnit = FVector::XAxisVector; SourceAxisScale = static_cast<float>(SourceScale.X); break;
+	case EAxis::Y: AxisUnit = FVector::YAxisVector; SourceAxisScale = static_cast<float>(SourceScale.Y); break;
+	default:       AxisUnit = FVector::ZAxisVector; SourceAxisScale = static_cast<float>(SourceScale.Z); break;
+	}
+
+	// 복제본은 원본이 이미 차지한 끝에서 시작하고, 그 축 길이만 AxisScale 배다.
+	// 밀어 놓는 거리는 AxisScale 과 무관하다 ― 띠를 줄여도 시작점은 경계에 붙어 있어야 한다.
+	FVector SegmentScale = SourceScale;
+	SegmentScale[static_cast<int32>(LocalAxis) - 1] = AxisScale;
+
+	const FVector LocalOffset = AxisUnit * (SignedLocalSpan * SourceAxisScale);
+	return FTransform(
+		Source.GetRotation(),
+		Source.GetLocation() + Source.GetRotation().RotateVector(LocalOffset),
+		SegmentScale);
+}

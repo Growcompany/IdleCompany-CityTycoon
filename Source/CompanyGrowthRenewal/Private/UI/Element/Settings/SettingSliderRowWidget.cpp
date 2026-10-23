@@ -2,14 +2,36 @@
 
 #include "UI/Element/Settings/SettingSliderRowWidget.h"
 #include "Components/Button.h"
+#include "Components/Border.h"
 #include "Components/Image.h"
 #include "Components/ProgressBar.h"
 #include "Components/Slider.h"
 #include "Components/TextBlock.h"
+#include "Global/GlobalUtilFunctions.h"
+
+void USettingSliderRowWidget::NativePreConstruct()
+{
+	Super::NativePreConstruct();
+	ApplyIconProperties();
+}
+
+void USettingSliderRowWidget::ApplyIconProperties()
+{
+	if (!IconTexture.IsNull())
+	{
+		UGlobalUtilFunctions::ApplyWidgetIcon(IconOn, IconTexture, IconSize, IconPadding, false);
+	}
+}
 
 void USettingSliderRowWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	if (ValueText && !bHasNormalValueStyle)
+	{
+		NormalValueFont = ValueText->GetFont();
+		NormalValueColor = ValueText->GetColorAndOpacity();
+		bHasNormalValueStyle = true;
+	}
 
 	if (ValueSlider)
 	{
@@ -53,9 +75,13 @@ void USettingSliderRowWidget::ConfigureSlider(const FText& InLabel, float InValu
 	{
 		FillBar->SetPercent(ClampedValue);
 	}
+	if (FillBarMuted)
+	{
+		FillBarMuted->SetPercent(ClampedValue);
+	}
 	bMuted = bInMuted;
-	RefreshValueText(ClampedValue);
 	RefreshMuteVisual();
+	RefreshValueText(ClampedValue);
 }
 
 float USettingSliderRowWidget::GetValue() const
@@ -73,6 +99,10 @@ void USettingSliderRowWidget::HandleSliderChanged(float NewValue)
 	{
 		FillBar->SetPercent(NewValue);
 	}
+	if (FillBarMuted)
+	{
+		FillBarMuted->SetPercent(NewValue);
+	}
 	RefreshValueText(NewValue);
 	OnValueChangedDelegate.Broadcast(NewValue);
 }
@@ -86,6 +116,7 @@ void USettingSliderRowWidget::HandleMuteClicked()
 {
 	bMuted = !bMuted;
 	RefreshMuteVisual();
+	RefreshValueText(GetValue());
 	OnMuteToggledDelegate.Broadcast(bMuted);
 }
 
@@ -99,14 +130,31 @@ void USettingSliderRowWidget::RefreshMuteVisual()
 	{
 		IconOff->SetVisibility(bMuted ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	}
-	const float DimAlpha = bMuted ? 0.32f : 1.0f;
+	if (IconChipOn)
+	{
+		IconChipOn->SetVisibility(bMuted ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+	if (IconChipOff)
+	{
+		IconChipOff->SetVisibility(bMuted ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (FillBar)
+	{
+		FillBar->SetVisibility(bMuted && FillBarMuted ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+	if (FillBarMuted)
+	{
+		FillBarMuted->SetVisibility(bMuted ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
 	if (ValueSlider)
 	{
-		ValueSlider->SetRenderOpacity(DimAlpha);
+		ValueSlider->SetRenderOpacity(1.0f);
 	}
 	if (ValueText)
 	{
-		ValueText->SetRenderOpacity(DimAlpha);
+		ValueText->SetRenderOpacity(1.0f);
+		ValueText->SetFont(bMuted && bOverrideMutedValueStyle ? MutedValueFont : NormalValueFont);
+		ValueText->SetColorAndOpacity(bMuted && bOverrideMutedValueStyle ? FSlateColor(MutedValueColor) : NormalValueColor);
 	}
 }
 
@@ -114,6 +162,7 @@ void USettingSliderRowWidget::RefreshValueText(float Value01)
 {
 	if (ValueText)
 	{
-		ValueText->SetText(FText::FromString(FString::Printf(TEXT("%d%%"), FMath::RoundToInt(Value01 * 100.0f))));
+		ValueText->SetText(bMuted ? FText::FromString(TEXT("끔"))
+			: FText::FromString(FString::Printf(TEXT("%d%%"), FMath::RoundToInt(Value01 * 100.0f))));
 	}
 }

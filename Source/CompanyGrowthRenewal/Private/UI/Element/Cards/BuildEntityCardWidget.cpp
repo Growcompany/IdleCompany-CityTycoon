@@ -31,6 +31,12 @@ void UBuildEntityCardWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
+	// 카드 실치수는 공유 프레임의 SizeBox 가 쥐고 있어 바깥에서 못 키운다 — 오피스 2패널과 갈라 여기서 주입.
+	if (UIE_EntityCardFrame)
+	{
+		UIE_EntityCardFrame->ApplyBuildModalLayout();
+	}
+
 	// UIManagerSubsystem을 통한 리소스 변경 구독
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
@@ -70,7 +76,8 @@ void UBuildEntityCardWidget::NativeOnListItemObjectSet(UObject* ListItemObject)
 			BuildInfo->SetBuildingStats(
 				CardData->FootprintWidthCells,
 				CardData->FootprintDepthCells,
-				CardData->NewBuildEmployees);
+				CardData->NewBuildEmployees,
+				CardData->IncomeBonusPercent);
 		}
 
 		// 크기 배지는 프레임(썸네일 우상단) 소관 — 정보 위젯이 아니라 프레임에 주입.
@@ -91,11 +98,13 @@ void UBuildEntityCardWidget::SetBuildableInfo(const FBuildableCardTable& InBuild
 
 	UAssetManager::Get().GetStreamableManager().RequestAsyncLoad(
 		IconPath,
-		FStreamableDelegate::CreateUObject(
-			this,
-			&UEntityCardWidgetBase::OnIconLoaded,
-			IconPath
-		)
+		FStreamableDelegate::CreateWeakLambda(this, [this, IconPath]()
+		{
+			if (BuildableInfo.UIIcon.ToSoftObjectPath() == IconPath)
+			{
+				OnIconLoaded(IconPath);
+			}
+		})
 	);
 
 	CheckHasConstructionCost();

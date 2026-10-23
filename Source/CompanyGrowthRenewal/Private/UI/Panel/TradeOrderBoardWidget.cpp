@@ -12,6 +12,7 @@
 #include "Components/SizeBox.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "Utils/FWidgetAnimationUtils.h"
 
 void UTradeOrderBoardWidget::NativePreConstruct()
 {
@@ -133,15 +134,14 @@ void UTradeOrderBoardWidget::NativeTick(const FGeometry& MyGeometry, float InDel
 	AnimElapsed += InDeltaTime;
 	const float Progress = FMath::Clamp(AnimElapsed / Duration, 0.0f, 1.0f);
 
-	// 방향별 easing
-	const float Eased = bAnimatingToExpand
-		? EaseOutBack(Progress, BackEaseOvershoot)
-		: EaseInQuad(Progress);
+	// 오버슈트를 높이에 걸면 넘어간 구간에서 아래 내용이 실제로 밀렸다 돌아온다 — 레이아웃 애니는 목표를 넘지 않는다
+	const float Eased = FWidgetAnimationUtils::EaseOutQuad(Progress);
 
 	const float FromH = bAnimatingToExpand ? CollapsedCardAreaHeight : ExpandedCardAreaHeight;
 	const float ToH = bAnimatingToExpand ? ExpandedCardAreaHeight : CollapsedCardAreaHeight;
 	const float CurrentH = FMath::Lerp(FromH, ToH, Eased);
 
+	checkSlow(CurrentH <= FMath::Max(ExpandedCardAreaHeight, CollapsedCardAreaHeight) + KINDA_SMALL_NUMBER);
 	CardAreaSizeBox->SetHeightOverride(CurrentH);
 
 	if (Progress >= 1.0f)
@@ -340,23 +340,6 @@ void UTradeOrderBoardWidget::OnAnimationFinished()
 void UTradeOrderBoardWidget::OnCollapseBtnClicked()
 {
 	ToggleCollapse();
-}
-
-// ── Easing 함수 ──
-
-float UTradeOrderBoardWidget::EaseOutBack(float T, float Overshoot)
-{
-	// https://easings.net/#easeOutBack
-	// f(t) = 1 + c3*(t-1)^3 + c1*(t-1)^2  where c1=overshoot, c3=c1+1
-	const float C1 = Overshoot;
-	const float C3 = C1 + 1.0f;
-	const float TMinusOne = T - 1.0f;
-	return 1.0f + C3 * TMinusOne * TMinusOne * TMinusOne + C1 * TMinusOne * TMinusOne;
-}
-
-float UTradeOrderBoardWidget::EaseInQuad(float T)
-{
-	return T * T;
 }
 
 // ── 매니저 델리게이트 핸들러 ──

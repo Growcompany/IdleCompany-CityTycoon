@@ -86,6 +86,14 @@ public:
 	// 사용: SetCrit  /  SetCrit 50  /  SetCrit -1
 	UFUNCTION(Exec) void SetCrit(float Percent = 50.f);
 
+	// 데미지 숫자(직원 작업 점수) 시각 검수 — 게임플레이 진행 없이 여러 자릿수·직능을 한 화면에 띄운다.
+	// 맵 무관(뷰포트에 직접 붙인다). bFreeze=1 이면 `cg.DamageNumber.Freeze` 를 켜 멈춘 채로 남긴다.
+	// 사용: DamageNumberDemo  /  DamageNumberDemo 0  (해제는 DamageNumberDemoClear)
+	UFUNCTION(Exec) void DamageNumberDemo(int32 bFreeze = 1);
+
+	// 위 데모가 띄운 컨테이너를 걷고 Freeze 를 해제한다.
+	UFUNCTION(Exec) void DamageNumberDemoClear();
+
 	// ========== 스테이지 관련 ==========
 
 	// 현재 Step 즉시 완료
@@ -153,6 +161,10 @@ public:
 	UFUNCTION(Exec)
 	void UnlockSkins(int32 Count = 5);
 
+	// 스킨 100인 완성 건물에 종류별 기본 스킨을 적용하고 저장한다.
+	UFUNCTION(Exec)
+	void BldDefaultSkins();
+
 	// 모든 건물 창문 조명을 운영 여부와 무관하게 항상 켠다(bOn=1, 기본) / 원래 정책(운영 중만 점등)으로 되돌린다(bOn=0).
 	// 사용: BldLightsOn  /  BldLightsOn 0
 	UFUNCTION(Exec) void BldLightsOn(int32 bOn = 1);
@@ -163,6 +175,54 @@ public:
 	// (레이아웃/스크롤 테스트용 — 존재 안 하는 인덱스라 "건물 N" 폴백).
 	// 사용: ShowOfflineReport  /  ShowOfflineReport 14  /  ShowOfflineReport 3 1  /  ShowOfflineReport 3 0 8
 	UFUNCTION(Exec) void ShowOfflineReport(int32 OfflineHours = 3, int32 bZeroGain = 0, int32 FakeRows = 0);
+
+	// ========== 사이드 컨텐츠 (기술 연구소) — 시각 검수용 ==========
+
+	/** 인덱스 음수면 세이브의 첫 보유 건물 — 사이드 컨텐츠 치트 3개가 공유한다. */
+	static int32 ResolveSideBuilding(int32 BuildingIndex, class USaveLoadManager* SaveMgr);
+
+	// [디버그] 그 건물의 기술 연구소를 띄운다. 인덱스를 안 주면 세이브의 첫 보유 건물.
+	// 상태(연구·입장권) 는 세이브가 정한다 — 상태를 바꾸려면 Challenge/SweepTraining 을
+	// 원격 파이썬으로 부를 것(둘 다 BlueprintCallable 이라 치트가 따로 필요 없다).
+	// 사용: SideOpenTraining  /  SideOpenTraining 2
+	UFUNCTION(Exec) void SideOpenTraining(int32 BuildingIndex = -1);
+
+	// [디버그] 그 건물의 출장 창을 띄운다. 인덱스를 안 주면 세이브의 첫 보유 건물.
+	// 카드 3장은 자정마다 뽑히고 슬롯 상태는 세이브가 정한다 — 진행/수령 화면을 보려면
+	// Depart/ClaimDispatch 를 원격 파이썬으로 부를 것(둘 다 BlueprintCallable).
+	// 사용: SideOpenTrip  /  SideOpenTrip 2
+	UFUNCTION(Exec) void SideOpenTrip(int32 BuildingIndex = -1);
+
+	// [디버그] 열려 있는 출장 창에서 카드를 고른다. 선발 좌석·판정 밴드는 카드가 있어야 나오는데
+	// 클릭 말고는 그 상태로 갈 길이 없어 시각 검수가 막혔다(09-26). 카드의 공개 델리게이트를
+	// 그대로 쏘므로 실제 클릭과 같은 경로다.
+	// 사용: SideSelectTripCard  /  SideSelectTripCard 2
+	UFUNCTION(Exec) void SideSelectTripCard(int32 CardSlot = 0);
+
+	// [디버그] 그 건물로 직원을 옮겨 팀 파워를 올린다(다른 건물 소속에서 뺀다). 충족(그린) 화면을 만들 때.
+	// 사용: SideFillCrew  /  SideFillCrew 2 5
+	UFUNCTION(Exec) void SideFillCrew(int32 BuildingIndex = -1, int32 Count = 3);
+
+	// [디버그] 연구·입장권을 직접 세운다(음수 = 그대로). 최종 연구 화면은 정상 플레이로 못 만든다.
+	// 사용: SideSetTraining -1 50 3   (첫 건물을 최종 연구 + 입장권 3)
+	UFUNCTION(Exec) void SideSetTraining(int32 BuildingIndex = -1, int32 CourseBest = -1, int32 Entries = -1);
+
+	// [디버그] 스카이라인 최고 층·입장권을 직접 세운다(음수 = 그대로). 100층·보스 직전 화면은 정상 플레이로 못 만든다.
+	// 최고 층을 올리면 그 아래 층 보상은 "이미 받음" 으로 처리된다 — 치트로 올렸다 내려도 두 번 받지 않는다.
+	// 사용: SideSetSkyline 39 2   (최고 39층 + 입장권 2 = 40층 보스 앞)
+	UFUNCTION(Exec) void SideSetSkyline(int32 BestFloor = -1, int32 Entries = -1);
+
+	// [디버그] 스카이라인 전용 화면을 띄운다. 메뉴 시트를 거치지 않고 바로 로비로 — 시각 검수용.
+	// 사무실 씬·결과 카드는 화면 안에서 [개발하기] 로 간다(상태는 SideSetSkyline 으로 먼저 만들 것).
+	// 사용: SideOpenSkyline
+	UFUNCTION(Exec) void SideOpenSkyline();
+
+	// 콜라보 개발 창 표시. 메뉴 타일과 같은 PromptStack 경로를 사용한다.
+	UFUNCTION(Exec) void SideOpenFusion();
+
+	// Level/RemainingSeconds 음수=유지, 0초=수령 상태, FusionKey=None=진행 슬롯만 비움.
+	// 사용: SideSetFusion game_platform 4 0
+	UFUNCTION(Exec) void SideSetFusion(FName FusionKey, int32 Level = -1, int32 RemainingSeconds = -1);
 
 	// ========== 벽돌공장 (ABrickFactory) — 트레일러 캡처용 ==========
 
@@ -295,6 +355,14 @@ public:
 	UFUNCTION(Exec)
 	void ExportStarterPreset();
 
+	// ========== 개발자 모드 ==========
+
+	// 튜토리얼을 그 자리에서 끝내고 자원(Rich)+HQ20 을 얹어 시총 게이트(국가/티어/HQ)를 통째로 연다.
+	// ★ 이 세션의 세이브가 봉인된다 — 껐다 켜면 치트도 그 뒤의 진행도 전부 사라진다(해제 불가, 앱 재시작이 해제).
+	// 사용: DevMode
+	UFUNCTION(Exec)
+	void DevMode();
+
 	// ========== 튜토리얼 (미션 점프) ==========
 
 	// 임의 미션으로 즉시 점프 (인세션, 선행상태 시드 포함 — 자원 듬뿍 + 빌딩 체크).
@@ -329,6 +397,65 @@ public:
 	UFUNCTION(Exec)
 	void ResetPanelIntro();
 
+	// ========== 라이브옵스 (공용 시계 / 퀘스트) ==========
+
+	// 서버 시각 디버그 오프셋(초, 누적). 하루 넘김 재현: ClockOffset 86400
+	UFUNCTION(Exec)
+	void ClockOffset(int64 Seconds);
+
+	// 시계 상태 로그 (동기 여부 / 서버 now / 하루·주 키 / 남은 초)
+	// 사용: ClockStatus
+	UFUNCTION(Exec)
+	void ClockStatus();
+
+	// 퀘스트 카운터 강제 보고. 사용: QuestReport RevenueCollect 5 / QuestReport ProjectLaunch
+	UFUNCTION(Exec)
+	void QuestReport(const FString& CounterName, int64 Amount = 1);
+
+	// 퀘스트 원장 초기화(일일/주간/업적 전부) + 저장. 사용: QuestReset
+	UFUNCTION(Exec)
+	void QuestReset();
+
+	// 일일/주간/업적 현재 상태 로그. 사용: QuestStatus
+	UFUNCTION(Exec)
+	void QuestStatus();
+
+	// 오늘 출석 보상 수령 시도 (서버 시간 유효 + 오늘 미수령일 때만). 사용: AttendClaim
+	UFUNCTION(Exec)
+	void AttendClaim();
+
+	// 출석 이력(순환 일차/마지막 수령 키/누계) 초기화 + 저장. 사용: AttendReset
+	UFUNCTION(Exec)
+	void AttendReset();
+
+	// 출석 현황 로그 (수령 가능 여부 / 다음 일차 / 현재 일차 / 누계). 사용: AttendStatus
+	UFUNCTION(Exec)
+	void AttendStatus();
+
+	// 테스트 우편 1통 발송 (다이아 N + 일반 채용권 5, 7일 만료). 사용: MailSend 100
+	UFUNCTION(Exec)
+	void MailSend(int32 DiamondAmount = 100);
+
+	// 우편함 비우기(수신 이력 포함) + 저장. 사용: MailClear
+	UFUNCTION(Exec)
+	void MailClear();
+
+	// 우편함 현황 로그 (통수 + 각 메일 제목/만료 시각). 사용: MailStatus
+	UFUNCTION(Exec)
+	void MailStatus();
+
+	// 라이브옵스 콘텐츠(TitleData) 강제 재요청 (10분 스로틀 무시). 사용: LiveOpsRefresh
+	UFUNCTION(Exec)
+	void LiveOpsRefresh();
+
+	// 활성 수집 이벤트 점수 가산. 사용: EventPoints EV_LaunchRush 5
+	UFUNCTION(Exec)
+	void EventPoints(const FString& EventId, int64 Amount = 1);
+
+	// 활성 이벤트 현황 로그 (유형/진행/마일스톤 + 핫타임 배율 + 공지 미읽음 수). 사용: EventStatus
+	UFUNCTION(Exec)
+	void EventStatus();
+
 	// ========== 시간대 / 낮밤 (ATimeCycleManager) ==========
 
 	// 낮으로 고정 (12:00 세팅 + 사이클 정지 → 창문/차량 라이트 OFF)
@@ -340,6 +467,16 @@ public:
 	// 사용: Night
 	UFUNCTION(Exec)
 	void Night();
+
+	// 석양(노을 정점)으로 고정 — 시각은 배치된 하늘의 황혼 노브에서 파생되므로 맵마다 다르다
+	// 사용: Dusk
+	UFUNCTION(Exec)
+	void Dusk();
+
+	// 여명(노을 정점)으로 고정 — Dusk 의 반대쪽
+	// 사용: Dawn
+	UFUNCTION(Exec)
+	void Dawn();
 
 	// 임의 시각으로 고정 (시 0~23, 분 0~59 + 사이클 정지)
 	// 사용: SetTime 18  /  SetTime 6 30
@@ -402,6 +539,35 @@ public:
 	UFUNCTION(Exec)
 	void CG_UnlockInput();
 
+	// ========== 렌더 비용 귀속 (실기기 GPU 격리) ==========
+
+	// 이름 부분일치(스태틱메시명·액터명·클래스명)로 프리미티브 컴포넌트를 숨긴다 — 쇼플래그로 못 가르는 개별 메시(하늘돔·바다판·지형·스플라인 도로)의 비용 귀속용
+	// 사용: CG_HideMesh TimeCycleSky  /  CG_HideMesh Road_Double  /  CG_HideMesh IslandTerrain
+	UFUNCTION(Exec)
+	void CG_HideMesh(const FString& NameSubstring);
+
+	// CG_HideMesh 로 숨긴 것을 같은 부분일치로 다시 표시
+	// 사용: CG_ShowMesh TimeCycleSky
+	UFUNCTION(Exec)
+	void CG_ShowMesh(const FString& NameSubstring);
+
+	// ========== 레벨 전환 오버레이 (SLevelTransitionOverlay) ==========
+
+	// 레벨 이동 없이 전환 홀드 화면(+하단 팁 밴드)을 N초간 띄운다 — 전환은 순간이라 눈으로 볼 방법이 없다
+	// 사용: CG_PreviewTransition  /  CG_PreviewTransition 10  /  CG_PreviewTransition 10 P_Desk
+	UFUNCTION(Exec)
+	void CG_PreviewTransition(float Seconds = 6.0f, FString TipKey = TEXT(""));
+
+	// 현재 도시에서 첫 튜토리얼 오프닝만 재생한다. 시청 기록과 세이브는 변경하지 않는다.
+	// 사용: CG_PreviewCityOpening
+	UFUNCTION(Exec)
+	void CG_PreviewCityOpening();
+
+	// 로드된 DT_LoadingTip 행 전체를 출력 (키/묶음/컨텍스트/가중치/글자수) — 임포트 확인 + 미리보기 키 찾기
+	// 사용: CG_ListTips
+	UFUNCTION(Exec)
+	void CG_ListTips();
+
 	// ========== 카메라 각도 (OfficeMap 전용) ==========
 
 	// 오피스 카메라 각도 프리셋 즉시 적용 (FOV 40/30 고정, 피치만 변화)
@@ -413,6 +579,20 @@ public:
 	// 사용: CamBand -44 -58 40 30
 	UFUNCTION(Exec)
 	void CamBand(float InPitch, float OutPitch, float InFOV = 40.f, float OutFOV = 30.f);
+
+	// 현재 오피스 카메라 포즈와 floor 기준 참조 프레임을 한 줄 로그로 출력 (상태 변경 없음)
+	// 사용: CamPose
+	UFUNCTION(Exec)
+	void CamPose();
+
+	// ========== 카메라 측정 (맵 무관) ==========
+
+	// 현재 카메라가 **실제로 보는 범위**를 로그로 출력 (상태 변경 없음).
+	// 줌을 손으로 움직이며 찍어 Min/MaxZoomDistance 를 정할 때 쓴다 —
+	// 팔길이는 카메라 거리가 아니고(SocketOffset 후퇴), 수직 화각은 FOV 가 아니라서(MaintainYFOV)
+	// 손계산이 어긋나기 쉽다. 사용: CamInfo
+	UFUNCTION(Exec)
+	void CamInfo();
 
 	// ========== 직원 이동 속도 / 로코모션 (OfficeMap 전용) ==========
 
@@ -438,6 +618,13 @@ public:
 	// StepSeconds 생략 시 15초(DefaultStepDuration) 기준. 사용: BoltStatus  /  BoltStatus 30
 	UFUNCTION(Exec)
 	void BoltStatus(float StepSeconds = 15.f);
+
+	// ========== 직원 얼굴 (AFunnyOfficeworker 얼굴 판) ==========
+
+	// 사무실 전 직원 표정을 EWorkerFaceExpression 번호로 고정 — 16표정 그림을 실제 화면에서 훑는다. -1 = 해제(상태 표정 복귀).
+	// 사용: Face_Set 9  /  Face_Set -1
+	UFUNCTION(Exec)
+	void Face_Set(int32 ExpressionIndex);
 
 	// ========== 프로젝트 진척 / 도감 (UOfficeStageProgressManager, OfficeMap 전용) ==========
 

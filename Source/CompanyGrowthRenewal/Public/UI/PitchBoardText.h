@@ -1,5 +1,6 @@
 #pragma once
 #include "CoreMinimal.h"
+#include "Global/KoreanJosa.h"
 
 /**
  * 기획 보드·판정 밴드 카드의 순수 문구/판정 로직. 위젯·매니저 의존 0 — 테스트가 곧 문구 계약이다.
@@ -7,24 +8,13 @@
  */
 namespace PitchBoardText
 {
-	// 마지막 글자가 한글 완성형이고 받침이 있으면 true. 라틴/숫자 = false("QA가").
-	inline bool HasBatchim(const FString& Word)
-	{
-		if (Word.IsEmpty()) { return false; }
-		const TCHAR C = Word[Word.Len() - 1];
-		if (C < 0xAC00 || C > 0xD7A3) { return false; }
-		return ((C - 0xAC00) % 28) != 0;
-	}
+	// 받침 판정은 KoreanJosa 단일 진실 — 직능명은 한글/라틴뿐이라 동작이 같다
+	inline bool HasBatchim(const FString& Word) { return KoreanJosa::HasBatchim(Word); }
 
 	inline FText MakeShortageSentence(const FText& DisciplineName)
 	{
 		const FString N = DisciplineName.ToString();
 		return FText::FromString(N + (HasBatchim(N) ? TEXT("이") : TEXT("가")) + TEXT(" 부족합니다"));
-	}
-
-	inline FText MakeShortageWord(const FText& DisciplineName)
-	{
-		return FText::FromString(DisciplineName.ToString() + TEXT(" 부족"));
 	}
 
 	inline FString NextGradeLetter(const FString& Grade)

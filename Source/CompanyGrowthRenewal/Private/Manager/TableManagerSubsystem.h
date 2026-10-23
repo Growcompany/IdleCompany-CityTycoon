@@ -13,13 +13,19 @@
 #include "Enum/ResourceType.h"
 #include "Table/InteractableInfo.h"
 #include "Table/BuildingData.h"
-#include "Table/CharacterAppearanceTable.h"
 #include "Table/WorkerCosmeticTable.h"
+#include "Table/FunnyWorkerCosmeticTable.h"
+#include "Table/FunnyPartPoolTable.h"
+#include "Table/FunnyWardrobeTable.h"
+#include "Table/FunnyGarmentStyleTable.h"
+#include "Table/FunnyExpressionTable.h"
+#include "Table/FFunnyFaceStyleTable.h"
 #include "Table/ResourceInfo.h"
 #include "Table/BuildingSkinData.h"
 #include "Table/BuildingLightData.h"
 #include "Entity/Officeworker/Officeworker.h"
 #include "Table/DecorationCardTable.h"
+#include "Table/DecorationCatalogTable.h"
 #include "Table/DecorationData.h"
 #include "Table/WorkstationCardTable.h"
 #include "Table/WorkstationTable.h"
@@ -42,7 +48,20 @@
 #include "Table/HQLevelData.h"
 #include "Table/MissionTable.h"
 #include "Table/GoalTable.h"
+#include "Table/QuestTable.h"
+#include "Table/AttendanceTable.h"
+#include "Table/BusinessTripCardTable.h"
+#include "Table/CompanyFeatureUnlockTable.h"
+#include "Table/SideDungeonLootTable.h"
+#include "Table/SkylineFloorTable.h"
+#include "Table/TrainingCourseTable.h"
+#include "Table/TrainingTopicTable.h"
+#include "Table/FusionProjectTable.h"
+#include "Table/LiveOpsTables.h"
 #include "Table/PanelIntroTable.h"
+#include "Table/HelpTable.h"
+#include "Table/CloudErrorTextTable.h"
+#include "Table/LoadingTipTable.h"
 #include "Table/MenuUnlockData.h"
 #include "Table/ProfileImageData.h"
 #include "Table/ProductRecipeTable.h"
@@ -54,15 +73,18 @@
 #include "Table/StepDisplayNameTable.h"
 #include "Table/DisciplineDisplayTable.h"
 #include "Table/UIVFXTexTable.h"
+#include "Table/PanelThemeTable.h"
 #include "Table/LaunchLootBandTable.h"
 #include "Table/ShopItemTable.h"
 #include "Table/LaunchLootTable.h"
 #include "Table/TradeOrderBalanceTable.h"
 #include "Table/MarketBalanceTable.h"
+#include "Table/InstantFinishBalanceTable.h"
 #include "Data/BuildingEnhancementData.h"
 #include "Data/WorldFactoryUpgradeData.h"
 #include "Data/MineUpgradeData.h"
 #include "Data/FactoryUpgradeData.h"
+#include "Table/FactoryAppearanceTable.h"
 #include "Table/BuildingTraitTable.h"
 #include "Table/BuildingTraitSetBonusTable.h"
 #include "Enum/BuildingTraitCategory.h"
@@ -71,6 +93,9 @@
 #include "Table/CityPlotData.h"
 #include "Table/CityDressingData.h"
 #include "Table/CityCompanyData.h"
+#include "Table/EmployeeEquipmentTable.h"
+#include "Table/GachaBoxVisualTable.h"
+#include "Table/GachaIconBoundsTable.h"
 #include "TableManagerSubsystem.generated.h"
 
 UCLASS()
@@ -80,6 +105,30 @@ class COMPANYGROWTHRENEWAL_API UTableManagerSubsystem : public UGameInstanceSubs
 
 public:
     UTableManagerSubsystem();
+
+    const TMap<FName, FDecorationCatalogRow>& GetDecorationCatalog() const { return DecorationCatalog; }
+
+    const TMap<FName, FEmployeeEquipmentDefinitionRow>& GetEmployeeEquipmentDefinitions() const { return EmployeeEquipmentDefinitions; }
+    const FEmployeeEquipmentDefinitionRow* FindEmployeeEquipmentDefinition(FName Id) const { return EmployeeEquipmentDefinitions.Find(Id); }
+    const TMap<FName, FEmployeeEquipmentEffectRow>& GetEmployeeEquipmentEffects() const { return EmployeeEquipmentEffects; }
+    const FEmployeeEquipmentEffectRow* FindEmployeeEquipmentEffect(FName Id) const { return EmployeeEquipmentEffects.Find(Id); }
+    const TMap<FName, FEmployeeEquipmentAppearanceRow>& GetEmployeeEquipmentAppearances() const { return EmployeeEquipmentAppearances; }
+    const FEmployeeEquipmentAppearanceRow* FindEmployeeEquipmentAppearance(FName Id) const { return EmployeeEquipmentAppearances.Find(Id); }
+    const TMap<FName, FEmployeeEquipmentGradeRow>& GetEmployeeEquipmentGrades() const { return EmployeeEquipmentGrades; }
+    const TMap<FName, FEmployeeEquipmentSlotRow>& GetEmployeeEquipmentSlots() const { return EmployeeEquipmentSlots; }
+    const TMap<FName, FEmployeeEquipmentBannerRow>& GetEmployeeEquipmentBanners() const { return EmployeeEquipmentBanners; }
+    const FEmployeeEquipmentBannerRow* FindEmployeeEquipmentBanner(FName Id) const { return EmployeeEquipmentBanners.Find(Id); }
+    const TMap<FName, FEmployeeEquipmentEconomyRow>& GetEmployeeEquipmentEconomies() const { return EmployeeEquipmentEconomies; }
+    const FEmployeeEquipmentEconomyRow* FindEmployeeEquipmentEconomy(FName Id) const { return EmployeeEquipmentEconomies.Find(Id); }
+    const FEmployeeEquipmentEconomyRow* GetEmployeeEquipmentEconomy() const { return FindEmployeeEquipmentEconomy(TEXT("Default")); }
+    const FEmployeeEquipmentGradeRow* FindEmployeeEquipmentGrade(EEmployeeEquipmentGrade Grade) const
+    { for (const auto& Pair : EmployeeEquipmentGrades) if (Pair.Value.Grade == Grade) return &Pair.Value; return nullptr; }
+    const FEmployeeEquipmentSlotRow* FindEmployeeEquipmentSlot(EEmployeeEquipmentSlot EquipmentSlot) const
+    { for (const auto& Pair : EmployeeEquipmentSlots) if (Pair.Value.EquipmentSlot == EquipmentSlot) return &Pair.Value; return nullptr; }
+
+    // 행이 없으면 nullptr + Warning ― DT 행·쿠킹 누락이 빈 상자 그림과 로그로 바로 드러나게
+    const FGachaBoxVisualRow* GetGachaBoxVisual(EGachaBoxType BoxType) const;
+    const FGachaIconBoundsRow* GetGachaIconBounds(const FSoftObjectPath& TexturePath) const;
 
     /** Subsystem 초기화 */
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
@@ -133,17 +182,23 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Employee Names")
     UDataTable* GetFirstNameDataTable() const { return FirstNameDataTable; }
 
-    // Character Appearance Data
-    FHairPartTable* GetHairPartByName(const FString& PartName, EEmployeeGender Gender);
-    FRankClothingTable* GetClothingForRank(EEmployeeRank Rank, EEmployeeGender Gender);
-    FEyeColorTable* GetRandomEyeColor();
-    FSkinColorTable* GetRandomSkinColor();
-    FHairColorTable* GetRandomHairColor();
-    FCharacterBaseMeshTable* GetCharacterBaseMesh(EEmployeeGender Gender);
-
-    // Worker Cosmetic (AStickOfficeworker 외형: 색 + 안경). RowName = "D{dept}_R{rank}_T{tier}".
+    // Worker Cosmetic (AFunnyOfficeworker 외형: 색 + 안경). RowName = "D{dept}_R{rank}_T{tier}".
     UFUNCTION(BlueprintCallable, Category = "Worker Cosmetic")
     FWorkerCosmeticTable GetWorkerCosmeticData(FName RowName, bool& bOutSuccess) const;
+
+    // Funny Worker (파츠 메시 픽 + 슬롯 틴트). DT 미생성 상태에서도 안전하게 빈 결과로 degrade 한다.
+    FFunnyWorkerCosmeticTable GetFunnyWorkerCosmeticData(FName RowName, bool& bOutSuccess) const;
+    TArray<FFunnyPartPoolTable> GetFunnyPartPool(EFunnyPartSlot PartSlot, EEmployeeGender Gender) const;
+    const FFunnyPartPoolTable* FindFunnyPartRow(FName RowId) const { return FunnyPartRowsById.Find(RowId); }
+    // 평상복 색 — 부서가 아니라 EmployeeID 로 뽑는다. 풀이 비면 폴백색을 돌려준다.
+    FLinearColor PickWardrobeColor(EFunnyWardrobeCategory Category, int32 EmployeeID) const;
+    // 의상 존 파라미터 — 행이 없으면 nullptr 이고 호출부는 단색으로 떨어진다.
+    const FFunnyGarmentStyleTable* FindGarmentStyle(FName MeshName) const { return FunnyGarmentStyles.Find(MeshName); }
+    // 표정 → 얼굴 판 칸. 행이 없으면 nullptr (표정마다 Warning 1회 — DT 재임포트 누락이 바로 보이게).
+    const FFunnyExpressionTable* GetFunnyExpressionFace(EWorkerFaceExpression Expression) const;
+    const TArray<FFunnyFaceStyleTable>& GetFunnyFaceStyles() const { return FunnyFaceStyles; }
+    // 런타임 캐시와 에디터 프리뷰가 동일한 행 검증 및 정렬을 사용한다.
+    static bool BuildFunnyFaceStyles(const UDataTable* DataTable, TArray<FFunnyFaceStyleTable>& OutStyles);
 
     // Resource Data
     UFUNCTION(BlueprintCallable, Category = "Resource")
@@ -222,6 +277,8 @@ public:
     /** 책상 선형 업그레이드 행. 누락 시 nullptr이며 코드 폴백을 만들지 않는다. */
     const FComputerSetupLevelData* FindWorkstationSetupLevelData(EComputerSetupLevel Level) const;
 
+    const FWorkstationUpgradeDefinition* FindWorkstationUpgradeDefinition(EWorkstationUpgradeType Type) const;
+
     // UI Icon Data
     UFUNCTION(BlueprintCallable, Category = "UI Icon")
     FUIIconData GetUIIconData(FName RowName, bool& bOutSuccess) const;
@@ -284,8 +341,57 @@ public:
     const TMap<FName, FGoalTable>& GetAllGoalData() const { return GoalDataMap; }
     const TArray<FName>& GetGoalRowOrder() const { return GoalRowOrder; }
 
+    // 퀘스트 원장 (DT_Quest — 일일·주간·업적). 없으면 false
+    bool GetQuestData(const FName& RowName, FQuestTable& OutData) const;
+    const TMap<FName, FQuestTable>& GetAllQuestData() const { return QuestDataMap; }
+    const TArray<FName>& GetQuestRowOrder() const { return QuestRowOrder; }
+
+    // 출장 카드 (DT_BusinessTripCard). 없으면 false
+    bool GetBusinessTripCard(const FName& CardKey, FBusinessTripCardTable& OutData) const;
+
+    /** 회사 기능 해금 행. 누락·잘못된 레벨은 false로 돌려준다. */
+    bool GetCompanyFeatureUnlock(FName FeatureKey, FCompanyFeatureUnlockTable& OutData) const;
+    const TArray<FName>& GetBusinessTripCardOrder() const { return BusinessTripCardOrder; }
+
+    bool GetFusionProject(const FName& FusionKey, FFusionProjectTable& OutData) const;
+    const TArray<FName>& GetFusionProjectOrder() const { return FusionProjectOrder; }
+
+    // 사이드 컨텐츠 드랍표 (DT_SideDungeonLoot, TableKey 별). 없으면 빈 배열
+    const TArray<FSideDungeonLootRow>& GetSideDungeonLootRows(const FName& TableKey) const;
+
+    // 기술 연구소 과정 밴드 (DT_TrainingCourse). 그 과정을 품는 밴드가 없으면 nullptr
+    const FTrainingCourseRow* FindTrainingCourseBand(int32 Course) const;
+    // 마지막 밴드의 MaxCourse — 최종 과정 수를 코드에 박지 않는다
+    int32 GetTrainingMaxCourse() const;
+
+    /** 누적 Course의 업종별 기술과 레벨. 조회 실패 시 nullptr, OutLevel=0. */
+    const FTrainingTopicRow* FindTrainingTopic(ECompanyType Company, int32 Course, int32& OutLevel) const;
+
+    // 스카이라인 층 밴드 (DT_SkylineFloor). 그 층을 품는 밴드가 없으면 nullptr
+    const FSkylineFloorRow* FindSkylineFloorBand(int32 Floor) const;
+
+    int32 GetSkylineMaxFloor() const;
+
+    // 출석 보상표 (DT_Attendance — Day 1~28). 없으면 false
+    bool GetAttendanceRow(int32 Day, FAttendanceTable& OutData) const;
+    int32 GetAttendanceRowCount() const { return AttendanceRows.Num(); }
+
+    // 라이브옵스 콘텐츠 기본값 (DT_LiveOpsEvent / Notice / Mail — DT 행 순서). TitleData 가 오면 그쪽이 덮는다
+    const TArray<FLiveOpsEventDef>& GetLiveOpsEvents() const { return LiveOpsEvents; }
+    const TArray<FLiveOpsNoticeDef>& GetLiveOpsNotices() const { return LiveOpsNotices; }
+    const TArray<FLiveOpsMailDef>& GetLiveOpsMails() const { return LiveOpsMails; }
+
     // 패널 최초 진입 코치마크 스텝 (DT_PanelIntro, StepIndex 오름차순). 미정의 패널이면 nullptr
     const TArray<FPanelIntroTable>* GetPanelIntroSteps(const FName& PanelKey) const { return PanelIntroMap.Find(PanelKey); }
+
+    // 도움말 "?" 팝오버 한 줄 (DT_Help). 미정의 키면 nullptr ― 호출자가 버튼을 숨긴다
+    const FHelpTable* GetHelpRow(const FName& HelpKey) const { return HelpMap.Find(HelpKey); }
+
+    // 서버 에러코드 → 화면 안내 문구 (DT_CloudErrorText). 미등록 코드는 공통 폴백 ― 절대 빈 FText 가 아니다
+    FText GetCloudErrorText(FName Code) const { return FCloudErrorTextRules::Resolve(CloudErrorTextMap, Code); }
+
+    // 로딩/전환 하단 팁 행 전체 (DT_LoadingTip). 추첨은 FLoadingTipRules::Pick 이 한다
+    const TArray<FLoadingTipTable>& GetLoadingTips() const { return LoadingTipRows; }
 
     // (Country, Industry) 조합으로 수요 정의 조회
     UFUNCTION(BlueprintCallable, Category = "Country|Demand")
@@ -347,16 +453,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Project")
     FText PickProjectName(ECompanyType Industry, FName Genre, FName Material) const;
 
-    // (산업, 장르, 소재) 일치 프로젝트 행 전체 반환 — 피치의 요구점수(RequiredScore_Step) 소스. 첫 매칭, 없으면 bOutSuccess=false.
-    FProjectData GetProjectByGenreMaterial(ECompanyType Industry, FName Genre, FName Material, bool& bOutSuccess) const;
-
     // 해당 산업의 모든 장르 정의(잠금 포함) — 착수 1단계 그리드(잠긴 장르도 흐리게 노출)용. UnlockTier↑·Complexity↑ 정렬.
     UFUNCTION(BlueprintCallable, Category = "Project")
     TArray<FProjectGenreRow> GetGenresForIndustry(ECompanyType Industry) const;
-
-    // 해당 산업의 소재 목록(중복 제거) — 트렌드 로테이션 풀. 프로젝트 행에서 파생(소재 전용 테이블 없음).
-    UFUNCTION(BlueprintCallable, Category = "Project")
-    TArray<FName> GetMaterialsForIndustry(ECompanyType Industry) const;
 
     // 산업별 티어 랭크 칭호 (포트폴리오/도감 헤더). 매핑 없으면 빈 FText (데이터주도 — 코드 폴백 금지).
     UFUNCTION(BlueprintCallable, Category = "Project")
@@ -386,6 +485,8 @@ public:
     // Market Balance — 시장 성장 곡선 (단일 row 캐시)
     const FMarketBalanceData& GetMarketBalance() const { return MarketBalanceCache; }
 
+    bool GetInstantFinishBalance(FName FacilityType, FInstantFinishBalanceTable& OutData) const;
+
     // Department Display Name (산업별 부서 표시명)
     // 매핑 없으면 게임 기본값으로 폴백 (DepartmentToString)
     UFUNCTION(BlueprintPure, Category = "Department")
@@ -396,6 +497,9 @@ public:
     // 매핑 없으면 빈 FText 반환 (DT 단일 진실 — 호출부에서 IsEmpty() 체크 후 알파벳 폴백 가능)
     UFUNCTION(BlueprintPure, Category = "QualityGrade")
     FText GetQualityGradeLabel(ECompanyType CompanyType, EQualityGrade Grade) const;
+
+    UFUNCTION(BlueprintCallable, Category = "QualityGrade")
+    bool GetQualityGradeDisplayData(ECompanyType CompanyType, EQualityGrade Grade, FQualityGradeDisplayRow& OutData) const;
 
     // Employee Potential / Additional Option 한국어 라벨
     UFUNCTION(BlueprintPure, Category = "Employee")
@@ -426,6 +530,10 @@ public:
     UFUNCTION(BlueprintCallable, Category = "UIVFX")
     bool GetUIVFXTexRow(FName Key, FUIVFXTexRow& OutRow) const;
 
+    // 공통 셸/헤더 팔레트. CDO 조회는 디자이너용 DT 원본, 플레이 인스턴스는 초기화한 캐시를 사용한다.
+    UFUNCTION(BlueprintCallable, Category = "UI|Panel Theme")
+    bool GetPanelThemeRow(FName Key, FPanelThemeRow& OutRow) const;
+
     // 출시 평점 판정 밴드 표시(라벨/색). Key = Low/Mid/High. 없으면 false + Warning (UI 는 기본 흰색/빈 라벨)
     bool GetLaunchLootBand(FName Key, struct FLaunchLootBandRow& OutRow) const;
 
@@ -440,6 +548,10 @@ public:
     // EItemType → 아이콘 (DT_ShopItem 역참조). 못 찾으면 nullptr + bOutFound=false.
     UFUNCTION(BlueprintCallable, Category = "Shop")
     UTexture2D* GetItemIcon(EItemType ItemType, bool& bOutFound) const;
+
+    // EItemType → 아이콘 리소스(IconMaterial 우선, 없으면 Icon 텍스처). 브러시엔 CGIconBrush::ApplyResource 로 적용.
+    UFUNCTION(BlueprintCallable, Category = "Shop")
+    UObject* GetItemIconResource(EItemType ItemType, bool& bOutFound) const;
 
     // EItemType → 상점 행(이름/아이콘/단가 등, DT_ShopItem 역참조). 첫 매치 반환. 없으면 false.
     UFUNCTION(BlueprintCallable, Category = "Shop")
@@ -484,6 +596,8 @@ public:
     // 정렬된 전체 Factory 강화 슬롯 목록 (SortOrder 오름차순)
     UFUNCTION(BlueprintCallable, Category = "Factory Upgrade")
     TArray<FFactoryUpgradeDefinition> GetAllFactoryUpgradeDefinitions() const;
+
+    const FFactoryAppearanceRow* FindFactoryAppearance(int32 Level) const;
 
     // ========== Building Trait (BUILDING_TRAIT_SYSTEM v1.1) ==========
 
@@ -542,6 +656,7 @@ public:
 private:
 #if WITH_DEV_AUTOMATION_TESTS
     friend struct FGoalTableRowOrderTestAccessor;
+    friend struct FGuideQuestTableTestAccessor;
 #endif
 
     // UI Data
@@ -607,61 +722,53 @@ private:
     UPROPERTY(EditAnywhere, Category = "Employee Names")
     UDataTable* FirstNameDataTable = nullptr;
 
-    // Character Appearance Data Tables
-    UPROPERTY(EditAnywhere, Category = "Character Appearance")
-    UDataTable* HairPartDataTable = nullptr;
-
-    UPROPERTY(EditAnywhere, Category = "Character Appearance")
-    UDataTable* RankClothingDataTable = nullptr;
-
-    UPROPERTY(EditAnywhere, Category = "Character Appearance")
-    UDataTable* HairPartGirlDataTable = nullptr;
-
-    UPROPERTY(EditAnywhere, Category = "Character Appearance")
-    UDataTable* RankClothingGirlDataTable = nullptr;
-
-    UPROPERTY(EditAnywhere, Category = "Character Appearance")
-    UDataTable* EyeColorDataTable = nullptr;
-
-    UPROPERTY(EditAnywhere, Category = "Character Appearance")
-    UDataTable* SkinColorDataTable = nullptr;
-
-    UPROPERTY(EditAnywhere, Category = "Character Appearance")
-    UDataTable* HairColorDataTable = nullptr;
-
-    UPROPERTY(EditAnywhere, Category = "Character Appearance")
-    UDataTable* CharacterBaseMeshDataTable = nullptr;
-
-    UPROPERTY()
-    TMap<FName, FHairPartTable> HairPartTable;
-
-    UPROPERTY()
-    TMap<FName, FRankClothingTable> RankClothingTable;
-
-    UPROPERTY()
-    TMap<FName, FHairPartTable> HairPartGirlTable;
-
-    UPROPERTY()
-    TMap<FName, FRankClothingTable> RankClothingGirlTable;
-
-    // Worker Cosmetic (AStickOfficeworker 외형). 로드는 생성자 ConstructorHelpers 단일 경로 — 에디터 할당 금지(프로젝트 DT 규칙).
+    // Worker Cosmetic (AFunnyOfficeworker 외형). 로드는 생성자 ConstructorHelpers 단일 경로 — 에디터 할당 금지(프로젝트 DT 규칙).
     UPROPERTY()
     UDataTable* WorkerCosmeticDataTable = nullptr;
 
     UPROPERTY()
     TMap<FName, FWorkerCosmeticTable> WorkerCosmeticTableMap;
 
+    // Funny Worker 3종. 로드는 생성자 ConstructorHelpers 단일 경로 — 에디터 할당 금지(프로젝트 DT 규칙).
     UPROPERTY()
-    TMap<FName, FEyeColorTable> EyeColorTable;
+    UDataTable* FunnyWorkerCosmeticDataTable = nullptr;
 
     UPROPERTY()
-    TMap<FName, FSkinColorTable> SkinColorTable;
+    UDataTable* FunnyPartPoolDataTable = nullptr;
 
     UPROPERTY()
-    TMap<FName, FHairColorTable> HairColorTable;
+    UDataTable* FunnyExpressionDataTable = nullptr;
 
     UPROPERTY()
-    TMap<EEmployeeGender, FCharacterBaseMeshTable> CharacterBaseMeshTable;
+    UDataTable* FunnyFaceStyleDataTable = nullptr;
+
+    UPROPERTY()
+    TArray<FFunnyFaceStyleTable> FunnyFaceStyles;
+
+    UPROPERTY()
+    TMap<FName, FFunnyWorkerCosmeticTable> FunnyWorkerCosmeticTableMap;
+
+    // 배열 순서가 곧 외형이다 — 픽커가 인덱스를 뽑으므로 RowName 정렬로 실행 간 안정성을 고정한다.
+    UPROPERTY()
+    TArray<FFunnyPartPoolTable> FunnyPartPoolRows;
+
+    UPROPERTY()
+    TMap<FName, FFunnyPartPoolTable> FunnyPartRowsById;
+
+    UPROPERTY()
+    UDataTable* FunnyWardrobeDataTable = nullptr;
+
+    // 카테고리별 (색, 가중치). 인덱스 = (int32)EFunnyWardrobeCategory.
+    TArray<TArray<TPair<FLinearColor, int32>>> FunnyWardrobeRows;
+
+    UPROPERTY()
+    UDataTable* FunnyGarmentStyleDataTable = nullptr;
+
+    TMap<FName, FFunnyGarmentStyleTable> FunnyGarmentStyles;
+
+    TMap<EWorkerFaceExpression, FFunnyExpressionTable> FunnyExpressionMap;
+
+    mutable TSet<EWorkerFaceExpression> WarnedMissingFaceExpressions;
 
     // Resource Data Table
     UPROPERTY(EditAnywhere, Category = "Resource")
@@ -687,6 +794,12 @@ private:
     // Decoration Data Tables
     UPROPERTY(EditAnywhere, Category = "Decoration")
     UDataTable* DecorationCardDataTable = nullptr;
+
+    UPROPERTY()
+    UDataTable* DecorationCatalogDataTable = nullptr;
+
+    UPROPERTY()
+    TMap<FName, FDecorationCatalogRow> DecorationCatalog;
 
     UPROPERTY(EditAnywhere, Category = "Decoration")
     UDataTable* DecorationDataDataTable = nullptr;
@@ -716,6 +829,12 @@ private:
 
     UPROPERTY()
     TMap<EComputerSetupLevel, FComputerSetupLevelData> WorkstationSetupLevelTable;
+
+    UPROPERTY()
+    UDataTable* WorkstationUpgradeDataTable = nullptr;
+
+    UPROPERTY()
+    TMap<EWorkstationUpgradeType, FWorkstationUpgradeDefinition> WorkstationUpgradeTable;
 
     // UI Icon Data Table
     UPROPERTY(EditAnywhere, Category = "UI Icon")
@@ -829,6 +948,12 @@ private:
     UPROPERTY()
     FMarketBalanceData MarketBalanceCache;
 
+    UPROPERTY()
+    UDataTable* InstantFinishBalanceDataTable = nullptr;
+
+    UPROPERTY()
+    TMap<FName, FInstantFinishBalanceTable> InstantFinishBalanceCache;
+
     // Tier Unlock Data Table
     UPROPERTY(EditAnywhere, Category = "Tier Unlock")
     UDataTable* TierUnlockDataTable = nullptr;
@@ -857,10 +982,80 @@ private:
     void InitializeGoalTable();
 
     UPROPERTY()
+    TObjectPtr<UDataTable> QuestDataTable = nullptr;
+    TMap<FName, FQuestTable> QuestDataMap;
+    TArray<FName> QuestRowOrder;
+    void InitializeQuestTables();
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> BusinessTripCardDataTable = nullptr;
+    UPROPERTY()
+    TObjectPtr<UDataTable> CompanyFeatureUnlockDataTable = nullptr;
+    TMap<FName, FCompanyFeatureUnlockTable> CompanyFeatureUnlockMap;
+    TMap<FName, FBusinessTripCardTable> BusinessTripCardMap;
+    TArray<FName> BusinessTripCardOrder;
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> FusionProjectDataTable = nullptr;
+    TMap<FName, FFusionProjectTable> FusionProjectMap;
+    TArray<FName> FusionProjectOrder;
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> SideDungeonLootDataTable = nullptr;
+    TMap<FName, TArray<FSideDungeonLootRow>> SideDungeonLootMap;
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> TrainingCourseDataTable = nullptr;
+    TArray<FTrainingCourseRow> TrainingCourseBands;   // MinCourse 오름차순
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> TrainingTopicDataTable = nullptr;
+    // UHT는 중첩 컨테이너를 반영하지 못한다. 값은 UObject 참조가 없는 행이다.
+    TMap<ECompanyType, TArray<FTrainingTopicRow>> TrainingTopicsByCompany;
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> SkylineFloorDataTable = nullptr;
+    TArray<FSkylineFloorRow> SkylineFloorBands;       // MinFloor 오름차순
+
+    void InitializeSideContentTables();
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> AttendanceDataTable = nullptr;
+    TMap<int32, FAttendanceTable> AttendanceRows;
+    void InitializeAttendanceTable();
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> LiveOpsEventDataTable = nullptr;
+    UPROPERTY()
+    TObjectPtr<UDataTable> LiveOpsNoticeDataTable = nullptr;
+    UPROPERTY()
+    TObjectPtr<UDataTable> LiveOpsMailDataTable = nullptr;
+    TArray<FLiveOpsEventDef> LiveOpsEvents;
+    TArray<FLiveOpsNoticeDef> LiveOpsNotices;
+    TArray<FLiveOpsMailDef> LiveOpsMails;
+    void InitializeLiveOpsTables();
+
+    UPROPERTY()
     TObjectPtr<UDataTable> PanelIntroDataTable = nullptr;
     // PanelKey → 스텝 배열(StepIndex 오름차순). 행 하나가 스텝 하나라 여기서 묶어 정렬해 둔다
     TMap<FName, TArray<FPanelIntroTable>> PanelIntroMap;
     void InitializePanelIntroTable();
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> HelpDataTable = nullptr;
+    TMap<FName, FHelpTable> HelpMap;
+    void InitializeHelpTable();
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> CloudErrorTextDataTable = nullptr;
+    TMap<FName, FText> CloudErrorTextMap;
+    void InitializeCloudErrorTextTable();
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> LoadingTipDataTable = nullptr;
+    // TMap 이 아니라 배열 ― 가중 추첨은 순서 있는 전수 순회가 필요하다
+    TArray<FLoadingTipTable> LoadingTipRows;
+    void InitializeLoadingTipTable();
 
     // Country Demand Data Table (Row Name = "{Country}_{Industry}")
     UPROPERTY()
@@ -900,7 +1095,7 @@ private:
 
     // 캐시: Key = FIntPoint(CompanyType, Grade)
     UPROPERTY()
-    TMap<FIntPoint, FText> QualityGradeDisplayMap;
+    TMap<FIntPoint, FQualityGradeDisplayRow> QualityGradeDisplayMap;
 
     // Employee Potential Option Display Data Table
     UPROPERTY(EditAnywhere, Category = "Employee")
@@ -952,6 +1147,14 @@ private:
 
     UPROPERTY()
     TMap<FName, FUIVFXTexRow> UIVFXTexMap;
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> PanelThemeDataTable = nullptr;
+
+    UPROPERTY()
+    TMap<FName, FPanelThemeRow> PanelThemeMap;
+
+    void InitializePanelThemeTable();
 
     // 출시 평점 판정 밴드 표시 DataTable (DT 단일 진실: 라벨/색)
     UPROPERTY()
@@ -1012,6 +1215,14 @@ private:
     TMap<EFactoryUpgradeType, FFactoryUpgradeDefinition> FactoryUpgradeDefinitionTable;
 
     void InitializeFactoryUpgradeDefinitionTable();
+
+    UPROPERTY()
+    TObjectPtr<UDataTable> FactoryAppearanceDataTable = nullptr;
+
+    UPROPERTY()
+    TMap<int32, FFactoryAppearanceRow> FactoryAppearanceTable;
+
+    void InitializeFactoryAppearanceTable();
 
     // Building Trait DataTables
     UPROPERTY()
@@ -1136,28 +1347,24 @@ private:
     void InitializeRecipeTable_Semiconductor();
 
     // 초기화 함수들
-    void InitializeHairPartTable();
-    void InitializeRankClothingTable();
-    void InitializeHairPartGirlTable();
-    void InitializeRankClothingGirlTable();
     void InitializeWorkerCosmeticTable();
-    void InitializeEyeColorTable();
-    void InitializeSkinColorTable();
-    void InitializeHairColorTable();
-    void InitializeCharacterBaseMeshTable();
+    void InitializeFunnyTables();
     void InitializeResourceTable();
     void InitializeBuildingSkinTable();
     void InitializeBuildingLightTable();
     void InitializeDecorationCardTable();
+    void InitializeDecorationCatalog();
     void InitializeDecorationDataTable();
     void InitializeWorkstationCardTable();
     void InitializeWorkstationItemSkinTable();
     void InitializeWorkstationSetupLevelTable();
+    void InitializeWorkstationUpgradeTable();
     void InitializeUIIconTable();
     void InitializeMoneyVFXTable();
     void InitializeGameProjectTable();
     void InitializeTradeOrderBalanceTable();
     void InitializeMarketBalanceTable();
+    void InitializeInstantFinishBalanceTable();
     void InitializeVFXTable();
     void InitializeTierUnlockTable();
     void InitializeCountryInfoTable();
@@ -1177,25 +1384,29 @@ private:
     void InitializeMenuUnlockTable();
     void InitializeProfileImageTable();
 
-    // 비동기 로딩 관리
-    FStreamableManager StreamableManager;
+    UPROPERTY() UDataTable* EmployeeEquipmentDefinitionDataTable = nullptr;
+    UPROPERTY() TMap<FName, FEmployeeEquipmentDefinitionRow> EmployeeEquipmentDefinitions;
+    UPROPERTY() UDataTable* EmployeeEquipmentEffectDataTable = nullptr;
+    UPROPERTY() TMap<FName, FEmployeeEquipmentEffectRow> EmployeeEquipmentEffects;
+    UPROPERTY() UDataTable* EmployeeEquipmentAppearanceDataTable = nullptr;
+    UPROPERTY() TMap<FName, FEmployeeEquipmentAppearanceRow> EmployeeEquipmentAppearances;
+    UPROPERTY() UDataTable* EmployeeEquipmentGradeDataTable = nullptr;
+    UPROPERTY() TMap<FName, FEmployeeEquipmentGradeRow> EmployeeEquipmentGrades;
+    UPROPERTY() UDataTable* EmployeeEquipmentSlotDataTable = nullptr;
+    UPROPERTY() TMap<FName, FEmployeeEquipmentSlotRow> EmployeeEquipmentSlots;
+    UPROPERTY() UDataTable* EmployeeEquipmentBannerDataTable = nullptr;
+    UPROPERTY() TMap<FName, FEmployeeEquipmentBannerRow> EmployeeEquipmentBanners;
+    UPROPERTY() UDataTable* EmployeeEquipmentEconomyDataTable = nullptr;
+    UPROPERTY() TMap<FName, FEmployeeEquipmentEconomyRow> EmployeeEquipmentEconomies;
+    void InitializeEmployeeEquipmentTables();
 
-    // Preload된 메시 참조 유지 (GC 방지)
-    UPROPERTY()
-    TArray<USkeletalMesh*> PreloadedHairMeshes;
+    friend struct FGachaBoxVisualTableTestAccessor;
+    UPROPERTY() TObjectPtr<UDataTable> GachaBoxVisualDataTable = nullptr;
+    UPROPERTY() TMap<EGachaBoxType, FGachaBoxVisualRow> GachaBoxVisualTable;
+    void InitializeGachaBoxVisualTable();
+    friend struct FGachaIconBoundsTableTestAccessor;
+    UPROPERTY() TObjectPtr<UDataTable> GachaIconBoundsDataTable = nullptr;
+    UPROPERTY() TMap<FSoftObjectPath, FGachaIconBoundsRow> GachaIconBoundsTable;
+    void InitializeGachaIconBoundsTable();
 
-    UPROPERTY()
-    TArray<USkeletalMesh*> PreloadedClothingMeshes;
-
-    // 비동기 로딩 핸들
-    TSharedPtr<FStreamableHandle> HairMeshLoadHandle;
-    TSharedPtr<FStreamableHandle> ClothingMeshLoadHandle;
-    TSharedPtr<FStreamableHandle> HairGirlMeshLoadHandle;
-    TSharedPtr<FStreamableHandle> ClothingGirlMeshLoadHandle;
-
-    // 비동기 로딩 완료 콜백
-    void OnHairMeshesLoaded();
-    void OnClothingMeshesLoaded();
-    void OnHairGirlMeshesLoaded();
-    void OnClothingGirlMeshesLoaded();
 };

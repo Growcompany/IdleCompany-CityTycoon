@@ -20,6 +20,30 @@ struct FCityDressingData : public FTableRowBase
 	FName Category = NAME_None;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing")
+	bool bForAuthoredPlots = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing")
+	bool bPlaceAlongBoundary = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing", meta = (ClampMin = "1"))
+	float BoundarySpacing = 1200.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing", meta = (ClampMin = "0"))
+	float BoundaryInset = 75.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing", meta = (ClampMin = "1"))
+	int32 ExpectedSlotCount = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing", meta = (ClampMin = "0"))
+	int32 PlotCellsPerPatch = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing", meta = (ClampMin = "1"))
+	int32 MaxPatchesPerPlot = 2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing", meta = (ClampMin = "0"))
+	int32 CullDistance = 40000;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing")
 	TSoftObjectPtr<UStaticMesh> Mesh;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "City Dressing")

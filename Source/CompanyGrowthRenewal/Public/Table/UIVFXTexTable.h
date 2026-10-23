@@ -19,11 +19,15 @@ struct FUIVFXTexRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	TSoftObjectPtr<UTexture2D> Texture;
 
-	// 브러시 ImageSize (슬롯 레이아웃 크기와 별개)
+	// 브러시 ImageSize. 연속 헤더 배경에서는 반복 무늬 크기이며 슬롯 레이아웃과 별개다.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	FVector2D ImageSize = FVector2D(64.0, 64.0);
 
 	// 기본 틴트 (linear) — 등급색 등 런타임 결정이 필요하면 소비처가 덮어씀
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	FLinearColor Tint = FLinearColor::White;
+
+	// 헤더 문양을 셀 장식 대신 연속 배경 재질로 그릴 때 사용한다.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly)
+	bool bHeaderBackgroundPattern = false;
 };

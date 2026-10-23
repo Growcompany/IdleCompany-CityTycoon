@@ -64,16 +64,15 @@ struct FProjectBoardSlot
 	UPROPERTY(BlueprintReadOnly, Category = "Board|Pitch")
 	bool bGateRisk = false;
 
-	// 이 프로젝트의 소재가 현재 트렌드인가 — EstimatedRevenue 에 이미 ×1.25 가 반영돼 있어 카드는 표기만 한다
-	UPROPERTY(BlueprintReadOnly, Category = "Board|Pitch")
-	bool bTrendMatched = false;
-
 	// 현재 팀 전망의 직능 슬롯별 예상 점수. 카드 표시용 파생값이므로 저장하지 않는다.
 	UPROPERTY(BlueprintReadOnly, Category = "Board|Pitch")
 	TArray<float> ExpectedDisciplineScores;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Board|Pitch")
 	bool bHasOutlookEstimate = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Board|Pitch")
+	bool bHasUnmodeledEquipmentEffects = false;
 
 	// "?" 웰 장르색 틴트 (DT 파생, 미정의=중립 회색)
 	UPROPERTY(BlueprintReadOnly, Category = "Board|Pitch")

@@ -16,7 +16,7 @@ class UTexture2D;
  * - 버튼, 룩박스, 아이템 등에 사용
  * - IButtonSoundInterface 상속으로 자동 사운드 재생
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UIconButtonWidget : public UCommonButtonBase, public IButtonSoundInterface
 {
 	GENERATED_BODY()

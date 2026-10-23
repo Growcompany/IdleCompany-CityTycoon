@@ -192,7 +192,7 @@ struct FAdditionalOption
 /**
  * 직원 스탯 (하이브리드 시스템)
  * - 자동 성장: BaseEfficiency (레벨당 +2%)
- * - 자유 배분: 기본 스탯 6종 (스폰 분배 + ★ 성장)
+ * - 기본 스탯 6종 (스폰 분배 + SP 투자 + ★ 성장)
  * - 잠재능력: 큐브 리롤 % 축 (메이플식, 하락 방지)
  * - 추가옵션: 전역 버프 (하락 가능)
  */
@@ -210,7 +210,7 @@ struct FEmployeeStats
 	float BaseEfficiency = 1.0f;
 
 	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-	// 2. 기본 스탯 (6종) — 스폰 시 총량 30 분배, 성장은 ★ 강화 단일 경로
+	// 2. 기본 스탯 (6종) — 스폰 시 총량 25 분배, 성장은 SP 투자와 ★ 강화
 	// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 	/** orb 배출 간격 단축 → 바닥 후 배출 개수 증가 (=DPS) */
@@ -233,9 +233,9 @@ struct FEmployeeStats
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stats")
 	int32 Stamina = 0;
 
-	/** 배출 오브가 자기 주 직능으로 나올 확률 */
+	/** 크리티컬 성과 배율 가산 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stats")
-	int32 Focus = 0;
+	int32 CritDamage = 0;
 
 	FEmployeeStats()
 		: BaseEfficiency(1.0f)
@@ -244,15 +244,15 @@ struct FEmployeeStats
 		, Composure(0)
 		, ExpGain(0)
 		, Stamina(0)
-		, Focus(0)
+		, CritDamage(0)
 	{
 	}
 };
 
 /**
- * 6스탯 효과 계수 — 단일 진실. 예전엔 각 계수가 EmployeeBehaviorComponent(private constexpr) /
+ * 기본 스탯 효과 계수 — 단일 진실. 예전엔 각 계수가 EmployeeBehaviorComponent(private constexpr) /
  * EmployeeManager(함수 안 리터럴) / ProjectOperationManager(익명 namespace) 에 흩어져 있어
- * UI가 실제 효과를 읽을 방법이 없었다(2026-07-26 스탯 재설계 후속). 여기로 이동만 — 값 변경 없음.
+ * UI가 실제 효과를 읽을 방법이 없었다(2026-07-26 스탯 재설계 후속).
  * (침착성/체력 일부 노브는 기획자 런타임 튜닝 표면인 UFatigueConfig DataAsset에 남는다 — DA_FatigueConfig 참조)
  */
 namespace EmployeeStatTuning
@@ -279,23 +279,18 @@ namespace EmployeeStatTuning
 	// 이 선을 넘기면 연출이 배경 소음이 된다 (스탯만으로는 최대 7.65%p — 상한은 버프/큐브 폭주 대비).
 	constexpr float MaxCritChance = 0.30f;
 
+	// 크리티컬 성과 — 유효값(저장값+★) 1당 크리 배율 +0.01. 잠재/장비 배율은 이 값에 가산한다.
+	constexpr float BaseCriticalMultiplier = 2.0f;
+	constexpr float CritDamageMultiplierPerPoint = 0.01f;
+	inline float CriticalMultiplier(float EffectiveCritDamage, float PotentialAdd = 0.0f)
+	{
+		return BaseCriticalMultiplier + EffectiveCritDamage * CritDamageMultiplierPerPoint + PotentialAdd;
+	}
+
 	// 경험치획득 — 유효경험치획득 1당 경험치 배율 가산 (EmployeeManager::AddExperience)
 	// 끝점 보존: 140 × 0.005 = ×1.70 (구 35 × 0.02 와 동일)
 	constexpr float ExpGainMultiplierPerPoint = 0.005f;
 
-	// 체력 — 유효체력 1당 근무/휴식 지속시간 배율 (EmployeeBehaviorComponent::GetWorkDuration/GetRestDuration)
-	// 끝점 보존: 근무 ×3.0 / 휴식 ÷2.0 (구 35 기준과 동일)
-	constexpr float WorkDurationStaminaScale = 0.0143f;
-	constexpr float RestDurationStaminaScale = 0.0073f;
-
-	// 업무집중도 — 유효값 1당 "주 직능 강제 지정" 확률 가산 (EmployeeBehaviorComponent 오브 직능 선택)
-	// ★15(유효 140) 에서 70%. 2026-08-13 구 수익보너스 슬롯을 대체 — 사무실 평균으로만 작동하던 축이라
-	// 개인 카드에 개인값을 적으면 거짓말이 됐다(직원 → 운영 수익 기여는 이때 폐지).
-	constexpr float FocusPerPoint = 0.005f;
-
-	// 주 직능 강제 지정 확률의 상한. 1.0 이면 직원 1명 사무실에서 다른 스텝 점수가 영구 0 이 되어
-	// 출시 게이트(MeetsMinimumClearScore)를 영영 못 넘는다 — 15% 를 남겨 전 스텝에 최소 유입을 보장한다.
-	constexpr float MaxFocusChance = 0.85f;
 }
 
 /**
@@ -322,8 +317,7 @@ public:
 	static int32 CalculateOverall(const FEmployeeStats& Stats);
 
 	/**
-	 * 유효 스탯 총합 (저장값 + ★ 파생 × 스탯 수). 표시용 종합은 이걸 쓸 것 —
-	 * CalculateOverall 은 저장값만이라 ★가 유일 성장 경로인 현 설계에서 "성장 안 함"으로 보인다.
+	 * 유효 스탯 총합 (저장값 + ★ 파생 × 스탯 수). 표시용 종합은 이걸 쓴다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Employee Stats")
 	static int32 CalculateEffectiveOverall(const FEmployeeStats& Stats, int32 EnhancementLevel);
@@ -336,7 +330,7 @@ public:
 	static int32 GetStatValueByIndex(const FEmployeeStats& Stats, uint8 StatIndex);
 
 	/**
-	 * 스탯 인덱스로 표시명 조회 (EEmployeeStatIndex UMETA DisplayName 이 단일 진실 — 하드코딩 금지)
+	 * 스탯 인덱스로 표시명 조회 (크리티컬 성과는 잠재옵션 DataTable 표시명 공유)
 	 * @param StatIndex 스탯 인덱스 (0~5)
 	 */
 	UFUNCTION(BlueprintPure, Category = "Employee Stats")
@@ -352,7 +346,7 @@ public:
 	static FText GetStatEffectText(uint8 StatIndex, int32 EffectiveValue);
 
 	/**
-	 * 스탯 인덱스 + 유효값 → 값 자리에 그대로 찍는 체감 단위 1개 ("0.50초" / "20.0%" / "215초").
+	 * 스탯 인덱스 + 유효값 → 값 자리에 그대로 찍는 체감 단위 1개 ("0.50초" / "20.0%" / "8.3초").
 	 * 원시 포인트는 플레이어에게 의미가 없어 카드 표면에서 감춘다 — 포인트가 필요한 표면은 GetStatValueByIndex 를 쓸 것.
 	 * @param StatIndex 스탯 인덱스 (0~5)
 	 * @param EffectiveValue 유효값 (저장값 + 강화보너스)
@@ -361,8 +355,8 @@ public:
 	static FText GetStatFeltText(uint8 StatIndex, int32 EffectiveValue);
 
 	/**
-	 * 강화분이 체감 단위로 얼마나 바뀌었는지 ("-1.31초" / "+151초"). 변화 없으면 빈 FText.
-	 * 부호는 실제 방향 그대로 — 업무속도만 음수가 이득이다.
+	 * 강화분이 체감 단위로 얼마나 바뀌었는지 ("-1.31초" / "-0.5%p"). 변화 없으면 빈 FText.
+	 * 부호는 실제 방향 그대로 — 업무속도와 침착성의 이탈 확률은 감소가 이득이다.
 	 */
 	UFUNCTION(BlueprintPure, Category = "Employee Stats")
 	static FText GetStatFeltDeltaText(uint8 StatIndex, int32 BaseValue, int32 EffectiveValue);

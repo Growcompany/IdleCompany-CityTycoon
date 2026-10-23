@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Enum/CompanyType.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/QualityGrade.h"
 #include "Enum/RawMaterialType.h"
 #include "Data/ProductionOrderData.h"
@@ -289,6 +289,9 @@ namespace WorldMapConstants
 
 	// 라인 해금 레벨 기준
 	constexpr int32 LineUnlockLevels[5] = { 1, 5, 10, 20, 50 };
+
+	// 월드맵 진입·잠금 안내·본사 해금 보상이 공유하는 HQ 레벨.
+	constexpr int32 WorldMapRequiredHQLevel = 3;
 
 	// 무역항 보너스
 	constexpr float USAPriceBonus      = 1.35f;  // 미국 +35% 단가

@@ -14,6 +14,12 @@ namespace GachaBatchMath
 		return N;
 	}
 
+	// 특성·스킨 1 op 뽑기 수 ― 1·10·30 만 보낸다. 그 밖의 수는 줄여 보내지 않고 거절한다(서버 maxPerOp = 30)
+	constexpr bool IsAllowedPullCount(int32 N)
+	{
+		return N == 1 || N == 10 || N == 30;
+	}
+
 	// 표시 정렬 — 등급 내림차순, 동률=뽑기순(stable). 반환 = 입력 인덱스 배열(슬롯 C,R1,L1,R2,L2 순서).
 	inline TArray<int32> ComputeDisplayOrder(const TArray<int32>& RarityTiers)
 	{

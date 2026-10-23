@@ -1,5 +1,6 @@
 #include "UI/HUD/PanelIntroOverlayWidget.h"
 #include "UI/HUD/GuideTooltipPlacement.h"
+#include "UI/HUD/GuideTooltipAvoidance.h"
 #include "UI/Element/Common/GuideTooltipWidget.h"
 #include "Manager/PanelIntroSubsystem.h"
 #include "Manager/TableManagerSubsystem.h"
@@ -160,6 +161,7 @@ void UPanelIntroOverlayWidget::ShowStep(int32 Index)
 		{
 			StepCursor = Index;
 			CurrentAnchor = Anchor;
+			AnchorUnresolvedSeconds = 0.f;
 
 			if (!Tooltip)
 			{
@@ -190,11 +192,17 @@ void UPanelIntroOverlayWidget::ShowStep(int32 Index)
 				}
 			}
 
+			PendingEyebrow = Step.Eyebrow;
+			PendingBody = Step.Body;
+			bContentInjectPending = true;
 			if (Tooltip)
 			{
-				Tooltip->SetContent(Step.Eyebrow, Step.Body);
+				// 앵커가 잡히기 전에 띄우면 이전 스텝 구멍 위에 새 문구가 남는다
+				Tooltip->SetVisibility(ESlateVisibility::Collapsed);
 			}
 			PendingTailDir = Step.TailDir;
+			// 이전 구멍이 화면에 있을 때만 이동 연출 ― 첫 스텝은 그 자리에 바로 뚫린다
+			HoleTransition.Retarget();
 			bTooltipPlacePending = true;
 			return;
 		}
@@ -252,6 +260,11 @@ void UPanelIntroOverlayWidget::FinishIntro()
 	RemoveFromParent();
 }
 
+void UPanelIntroOverlayWidget::AdvanceHoleTransition(FVector2D& InOutCenter, FVector2D& InOutHalf, float DeltaSeconds)
+{
+	HoleTransition.Advance(InOutCenter, InOutHalf, DeltaSeconds);
+}
+
 bool UPanelIntroOverlayWidget::ComputeAnchorRect(const UWidget* Target, FVector2D& OutCenter, FVector2D& OutSize) const
 {
 	if (!Target)
@@ -289,10 +302,40 @@ void UPanelIntroOverlayWidget::PlaceTooltip(const FVector2D& AnchorCenter, const
 
 	const FVector2D TipSize = Tooltip->GetDesiredSize();
 	const FVector2D ScreenSize = GetTickSpaceGeometry().GetLocalSize();
-	const EGuideTooltipDir TipDir = static_cast<EGuideTooltipDir>(static_cast<uint8>(Dir));
-
-	const FVector2D Pos = ComputeGuideTooltipPosition(
-		AnchorCenter, AnchorSize, TipSize, TipDir, ScreenSize, TooltipSafeMargin, TooltipGap);
+	// 패널 닫기(X)는 덮지 않고, 패널 글자는 대상 옆 자리끼리 비교할 때만 본다
+	FGuideTooltipAvoid Avoid;
+	CollectGuideTooltipAvoidRects(OwnerPanel.Get(), GetTickSpaceGeometry(), Avoid.Soft, &Avoid.Hard, &Avoid.Controls);
+	if (UUserWidget* Owner = OwnerPanel.Get())
+	{
+		// 같은 안내가 짚는 다른 부품은 덮지 않는다 ― 방금 배운 것·곧 배울 것이 말풍선 밑에 숨지 않게
+		for (int32 Index = 0; Index < Steps.Num(); ++Index)
+		{
+			FVector2D OtherCenter, OtherSize;
+			const UWidget* Other = Index != StepCursor ? Owner->GetWidgetFromName(Steps[Index].AnchorName) : nullptr;
+			if (Other && Other != CurrentAnchor.Get() && Other->IsVisible() && ComputeAnchorRect(Other, OtherCenter, OtherSize))
+			{
+				Avoid.Hard.Emplace(OtherCenter.X - OtherSize.X * 0.5, OtherCenter.Y - OtherSize.Y * 0.5,
+					OtherCenter.X + OtherSize.X * 0.5, OtherCenter.Y + OtherSize.Y * 0.5);
+			}
+		}
+		// 창 테두리에 걸치지 않는다 ― 창 안이든 밖이든 한쪽에 놓여야 떠 있는 것처럼 보이지 않는다
+		FVector2D FrameCenter, FrameSize;
+		if (const UWidget* Frame = Owner->GetWidgetFromName(TEXT("ModalFrame")); Frame && ComputeAnchorRect(Frame, FrameCenter, FrameSize))
+		{
+			constexpr double Edge = 2.0;
+			const double L = FrameCenter.X - FrameSize.X * 0.5, R = FrameCenter.X + FrameSize.X * 0.5;
+			const double T = FrameCenter.Y - FrameSize.Y * 0.5, B = FrameCenter.Y + FrameSize.Y * 0.5;
+			Avoid.Hard.Emplace(L - Edge, T, L + Edge, B);
+			Avoid.Hard.Emplace(R - Edge, T, R + Edge, B);
+			Avoid.Hard.Emplace(L, T - Edge, R, T + Edge);
+			Avoid.Hard.Emplace(L, B - Edge, R, B + Edge);
+		}
+	}
+	const FGuideTooltipLayout Placement = ResolveGuideTooltipLayoutAvoiding(
+		static_cast<EGuideTooltipDir>(static_cast<uint8>(Dir)), AnchorCenter,
+		AnchorSize + FVector2D(HolePadding * 2.f), TipSize, ScreenSize, TooltipSafeMargin, TooltipGap, Avoid);
+	const EGuideTooltipDir TipDir = Placement.Direction;
+	const FVector2D Pos = Placement.Position;
 	TipSlot->SetPosition(Pos);
 
 	// 클램프로 툴팁이 밀린 만큼 꼬리를 대상 쪽으로 되돌린다 — 안 하면 말풍선이 엉뚱한 데를 가리킨다
@@ -313,13 +356,37 @@ void UPanelIntroOverlayWidget::NativeTick(const FGeometry& MyGeometry, float InD
 	}
 	const UWidget* Anchor = CurrentAnchor.Get();
 	FVector2D Center, Size;
-	if (!Anchor || !ComputeAnchorRect(Anchor, Center, Size))
+	const bool bRectValid = Anchor && ComputeAnchorRect(Anchor, Center, Size);
+
+	switch (ResolvePanelIntroAnchorAction(
+		Anchor != nullptr, bRectValid, AnchorUnresolvedSeconds, AnchorResolveTimeout))
 	{
+	case EPanelIntroAnchorAction::Wait:
+		AnchorUnresolvedSeconds += InDeltaTime;
 		return;
+
+	case EPanelIntroAnchorAction::Skip:
+		UE_LOG(LogTemp, Warning,
+			TEXT("[PanelIntro] '%s' 스텝 %d 앵커가 화면에 없어 건너뜁니다 (조건부 Collapsed 또는 비활성 탭)"),
+			*PanelKey.ToString(), StepCursor);
+		ShowStep(StepCursor + 1);
+		return;
+
+	case EPanelIntroAnchorAction::Draw:
+		AnchorUnresolvedSeconds = 0.f;
+		if (bContentInjectPending && Tooltip && IsHoleSettled())
+		{
+			Tooltip->SetContent(PendingEyebrow, PendingBody);
+			// 탭은 전면 버튼이 받는다 ― Visible 로 올리면 그 위에서 다음으로 못 넘어간다
+			Tooltip->SetVisibility(ESlateVisibility::HitTestInvisible);
+			bContentInjectPending = false;
+		}
+		break;
 	}
 
 	const FVector2D FullSize = MyGeometry.GetLocalSize();
-	const FVector2D HoleHalf = Size * 0.5f + FVector2D(HolePadding, HolePadding);
+	FVector2D HoleHalf = Size * 0.5f + FVector2D(HolePadding, HolePadding);
+	AdvanceHoleTransition(Center, HoleHalf, InDeltaTime);
 
 	CutoutMID->SetScalarParameterValue(TEXT("Wpx"), static_cast<float>(FullSize.X));
 	CutoutMID->SetScalarParameterValue(TEXT("Hpx"), static_cast<float>(FullSize.Y));

@@ -2,6 +2,7 @@
 
 
 #include "Manager/SaveLoadManager.h"
+#include "Manager/ManufacturingDevelopmentManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Manager/EmployeeManager.h"
 #include "Manager/TableManagerSubsystem.h"
@@ -12,6 +13,13 @@
 #include "Manager/BuildingSkinManagerSubsystem.h"
 #include "Manager/ItemInventoryManager.h"
 #include "Manager/ShopManagerSubsystem.h"
+#include "Manager/QuestSubsystem.h"
+#include "Manager/AttendanceSubsystem.h"
+#include "Manager/SideContentSubsystem.h"
+#include "Manager/MailboxSubsystem.h"
+#include "Manager/LiveOpsSubsystem.h"
+#include "Manager/EmployeeEquipmentManagerSubsystem.h"
+#include "Utils/EmployeeEquipmentTransactionRules.h"
 #include "Manager/OfficeStageProgressManager.h"
 #include "Manager/ProjectOperationManager.h"
 #include "Manager/ProductionOrderManager.h"
@@ -26,6 +34,8 @@
 #include "Manager/MissionManagerSubsystem.h"
 #include "Manager/GoalBoardSubsystem.h"
 #include "Manager/PanelIntroSubsystem.h"
+#include "Manager/SettingsManagerSubsystem.h"
+#include "Manager/SoundManagerSubsystem.h"
 #include "Manager/LaunchLootManagerSubsystem.h"
 #include "Global/GlobalUtilFunctions.h"
 #include "Global/CGDevSettings.h"
@@ -38,6 +48,7 @@
 #include "Office/OfficeManager.h"
 #include "Core/CGGameInstance.h"
 #include "Data/BuildingEnhancementData.h"
+#include "Data/HQLevelUpReward.h"
 #include "EngineUtils.h"
 #include "Misc/CommandLine.h"
 #include "Utils/CF1CaptureSavePolicy.h"
@@ -75,6 +86,11 @@ void USaveLoadManager::Initialize(FSubsystemCollectionBase& Collection)
         LastMoneyValue = RMgr->GetResourceAmount(EResourceType::Money);  // Diff 기준선
         UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] ResourceItemManager OnResourceChanged 바인딩 완료 (Money 기준선 %lld)"), LastMoneyValue);
     }
+}
+
+FString USaveLoadManager::GetActiveSaveSlotName() const
+{
+	return UCGDevSettings::IsOfflineMode() ? TEXT("GameSlot") : TEXT("GameSlot_Server");
 }
 
 void USaveLoadManager::Deinitialize()
@@ -215,7 +231,7 @@ bool USaveLoadManager::ComputeOfflineGains(float OfflineSeconds, bool bApplyToSa
             continue;
         }
 
-        OfficeData.StoredRevenue += ActualGain;
+        OfficeData.AccrueStoredRevenue(ActualGain);
         OfficeData.CurrentOperation.ElapsedTime = FMath::Min(
             OfficeData.CurrentOperation.ElapsedTime + TimeProgressed,
             OfficeData.CurrentOperation.TotalOperationTime);
@@ -232,8 +248,18 @@ bool USaveLoadManager::ComputeOfflineGains(float OfflineSeconds, bool bApplyToSa
 
 void USaveLoadManager::CalculateOfflineGains(float OfflineSeconds)
 {
+	if (UManufacturingDevelopmentManager* Development = GetGameInstance()->GetSubsystem<UManufacturingDevelopmentManager>())
+	{
+		const UPlayFabManagerSubsystem* ServerTime = GetGameInstance()->GetSubsystem<UPlayFabManagerSubsystem>();
+		const FDateTime IntervalEndUtc = UCGDevSettings::IsOfflineMode()
+			? FDateTime::UtcNow() : ServerTime ? ServerTime->GetOfflineGainsIntervalEndUtc() : FDateTime();
+		Development->ApplyOfflineProgress(OfflineSeconds, IntervalEndUtc);
+	}
+    // 구독자(공장)가 이번 정산분을 올리기 전에 비운다 — 2회차 정산에 지난 값이 섞이지 않게
+    PendingOfflineBricks = 0;
+
     // 60초 미만은 네트워크/재접속 오차로 간주, 무시
-    if (OfflineSeconds < 60.0f)
+    if (OfflineSeconds < MinOfflineSettleSeconds)
     {
         UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] 오프라인 시간 짧음 (%.0f초) — 보상 스킵"), OfflineSeconds);
         OnOfflineGainsApplied.Broadcast(0.0f, OfflineSeconds);
@@ -264,14 +290,15 @@ void USaveLoadManager::CalculateOfflineGains(float OfflineSeconds)
 
     // 정산 보고는 보관만, 인라인 Broadcast 금지 (로그인 = UIBase 부재, 복귀 = Consume과 이중 표시)
     // → 두 경로 모두 UI 준비 확인 시 Consume 1회. CapReached = 12h 상한(OfflineCapSeconds) 도달
-    bHasPendingOfflineReport = (TotalGained > 0.0f || Entries.Num() > 0);
+    // 벽돌만 있고 돈은 0인 정산도 보고 대상이다 — 위 Broadcast 에서 공장이 PendingOfflineBricks 를 채웠다
+    bHasPendingOfflineReport = (TotalGained > 0.0f || Entries.Num() > 0 || PendingOfflineBricks > 0);
     PendingOfflineTotal = TotalGained;
     PendingOfflineSeconds = OfflineSeconds;
     bPendingOfflineCapReached = (OfflineSeconds >= static_cast<float>(UPlayFabManagerSubsystem::OfflineCapSeconds));
     PendingOfflineEntries = MoveTemp(Entries);
 
-    UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] 오프라인 정산 상세 보관: 금고초과 손실합=%.1f원, 캡도달=%s, 내역 %d건 (Consume 대기)"),
-        TotalLostToVaultCap, bPendingOfflineCapReached ? TEXT("Y") : TEXT("N"), PendingOfflineEntries.Num());
+    UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] 오프라인 정산 상세 보관: 금고초과 손실합=%.1f원, 캡도달=%s, 내역 %d건, 벽돌 %lld개 (Consume 대기)"),
+        TotalLostToVaultCap, bPendingOfflineCapReached ? TEXT("Y") : TEXT("N"), PendingOfflineEntries.Num(), PendingOfflineBricks);
 
     // 로그인 시 토스트 알림 (블로킹 없는 피드백) — 운영 중 빌딩이 없으면 스킵
     if (TotalGained > 0.0f)
@@ -303,14 +330,49 @@ void USaveLoadManager::CalculateOfflineGains(float OfflineSeconds)
     }
 }
 
+void USaveLoadManager::SettleLocalOfflineGains()
+{
+    if (!UCGDevSettings::IsOfflineMode() || !bInitialLoadComplete)
+    {
+        return;
+    }
+
+    USaveGame_GameData* SaveData = GetCurrentSaveData();
+    if (!SaveData)
+    {
+        return;
+    }
+
+    const FDateTime LastSaveUtc = PendingLocalOfflineLastSaveUtc.GetTicks() > 0
+        ? PendingLocalOfflineLastSaveUtc : SaveData->GameData.OfflineLastSaveUtc;
+    PendingLocalOfflineLastSaveUtc = FDateTime();
+    if (LastSaveUtc.GetTicks() <= 0) return;
+    const double ElapsedSeconds = (FDateTime::UtcNow() - LastSaveUtc).GetTotalSeconds();
+    if (ElapsedSeconds < 60.0)
+    {
+        return;
+    }
+
+    const float CappedSeconds = static_cast<float>(FMath::Min(ElapsedSeconds,
+        static_cast<double>(UPlayFabManagerSubsystem::OfflineCapSeconds)));
+    if (UPlayFabManagerSubsystem* PlayFabMgr = GetGameInstance()->GetSubsystem<UPlayFabManagerSubsystem>())
+    {
+        // 기존 정산 리스너(사무실·채광소·공장)에 동일한 경과 시간을 전달한다.
+        PlayFabMgr->OnOfflineGainsRequested.Broadcast(CappedSeconds);
+        // 채광소·공장 리스너가 사무실 리스너 뒤에 실행될 수 있으므로 마지막에 함께 저장한다.
+        SaveGameData();
+    }
+}
+
 void USaveLoadManager::DebugSetPendingOfflineReport(float InTotal, float InSeconds,
-    const TArray<FOfflineGainEntry>& InEntries, bool bInCapReached)
+    const TArray<FOfflineGainEntry>& InEntries, bool bInCapReached, int64 InBricks)
 {
     bHasPendingOfflineReport = true;
     PendingOfflineTotal = InTotal;
     PendingOfflineSeconds = InSeconds;
     bPendingOfflineCapReached = bInCapReached;
     PendingOfflineEntries = InEntries;
+    PendingOfflineBricks = InBricks;
 }
 
 void USaveLoadManager::ConsumePendingOfflineReport()
@@ -322,7 +384,7 @@ void USaveLoadManager::ConsumePendingOfflineReport()
     }
 
     // MainMap UI 준비 시점 재발화 (로그인 콜백 때 UIBase 부재로 놓친 모달)
-    OnOfflineGainsDetailed.Broadcast(PendingOfflineTotal, PendingOfflineSeconds, PendingOfflineEntries, bPendingOfflineCapReached);
+    OnOfflineGainsDetailed.Broadcast(PendingOfflineTotal, PendingOfflineSeconds, PendingOfflineEntries, bPendingOfflineCapReached, PendingOfflineBricks);
 
     // 1회성 소비 — 재바인딩/재진입으로 중복 표시되지 않도록 상태 초기화
     bHasPendingOfflineReport = false;
@@ -330,45 +392,76 @@ void USaveLoadManager::ConsumePendingOfflineReport()
     PendingOfflineSeconds = 0.0f;
     bPendingOfflineCapReached = false;
     PendingOfflineEntries.Reset();
+    PendingOfflineBricks = 0;
+}
+
+void USaveLoadManager::AddPendingOfflineBrickGain(int64 Bricks)
+{
+    if (Bricks <= 0)
+    {
+        return;
+    }
+
+    PendingOfflineBricks += Bricks;
+}
+
+float USaveLoadManager::GetOfflineCapSeconds()
+{
+    return static_cast<float>(UPlayFabManagerSubsystem::OfflineCapSeconds);
 }
 
 // 모든 저장의 단일 관문. 아래 게이트 2개 통과 후 디스크 기록
 bool USaveLoadManager::SaveGameData()
 {
-    // 데이터 초기화 중 세이브 억제
-    if (bSaveSuppressed)
+    if (bSnapshotCommitInProgress)
     {
-        UE_LOG(LogTemp, Warning, TEXT("SaveGameData blocked: data reset in progress"));
+        RequestDeferredSave();
         return false;
     }
-
-    // 최초 로드 전 저장 차단: Initialize 단계 SaveGameData가 빈 값(미션 None·빌딩 0)으로 세이브를 덮음
-    // (튜토리얼 진행 유실의 진범)
-    if (!bInitialLoadComplete)
+    if (UManufacturingDevelopmentManager* Development = GetGameInstance()->GetSubsystem<UManufacturingDevelopmentManager>())
     {
-        UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] SaveGameData 무시 — 최초 로드 완료 전(서브시스템 초기화 단계). 세이브 보호."));
-        return false;
+        Development->AccrueOnline();
     }
+    FGameSaveData Snapshot;
+    if (!BuildCurrentSnapshot(Snapshot)) return false;
+    return EmployeeEquipmentRules::CommitCandidate(bSnapshotCommitInProgress, Snapshot,
+        [this](const FGameSaveData& Value) { return PersistSnapshot(Value); },
+        [](const FGameSaveData&) {},
+        [this](const FGameSaveData&) { PublishPersistedSnapshot(); });
+}
 
-    // 기존 데이터 가져오기 (없으면 새로 생성)
-    USaveGame_GameData* SaveGameInstance = GetCurrentSaveData();
-
-    if (!SaveGameInstance)
+bool USaveLoadManager::CanCommitEquipmentTransaction() const
+{
+    if (bSnapshotCommitInProgress || bSaveSuppressed || !bInitialLoadComplete) return false;
+    const UCGGameInstance* GameInst = Cast<UCGGameInstance>(GetGameInstance());
+    if (!GameInst || GameInst->IsVisitMode()) return false;
+    UWorld* GameWorld = GetWorld();
+    if (GameWorld && GameWorld->GetMapName().Contains(TEXT("OfficeMap")))
     {
-        SaveGameInstance = Cast<USaveGame_GameData>(
-            UGameplayStatics::CreateSaveGameObject(USaveGame_GameData::StaticClass()));
-
-        // 새 게임 시작 시 기본 스킨 100 지급
-        if (SaveGameInstance)
-        {
-            FBuildingSkinInstance DefaultSkin(100);
-            SaveGameInstance->GameData.OwnedBuildingSkins.Add(DefaultSkin);
-            UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] New save file created with default skin 100"));
-        }
+        const UOfficeManager* OfficeMgr = GameWorld->GetSubsystem<UOfficeManager>();
+        if (!OfficeMgr || !OfficeMgr->IsInteriorRestored()) return false;
     }
+    return true;
+}
 
-    if (!SaveGameInstance) return false;
+bool USaveLoadManager::CommitPreparedSnapshot(const FGameSaveData& Snapshot)
+{
+    if (!CanCommitEquipmentTransaction()) return false;
+    return EmployeeEquipmentRules::CommitCandidate(bSnapshotCommitInProgress, Snapshot,
+        [this](const FGameSaveData& Value) { return PersistSnapshot(Value); },
+        [](const FGameSaveData&) {},
+        [this](const FGameSaveData&) { PublishPersistedSnapshot(); });
+}
 
+bool USaveLoadManager::BuildCurrentSnapshot(FGameSaveData& OutSnapshot)
+{
+    if (bSnapshotCommitInProgress || bSaveSuppressed || !bInitialLoadComplete) return false;
+    UCGGameInstance* CurrentGameInst = Cast<UCGGameInstance>(GetGameInstance());
+    if (CurrentGameInst && CurrentGameInst->IsVisitMode()) return false;
+    if (CurrentGameInst && !CurrentGameInst->AccrueAwayFactoryProduction()) return false;
+    USaveGame_GameData* SaveGameInstance = NewObject<USaveGame_GameData>(this);
+    if (const USaveGame_GameData* Existing = GetCurrentSaveData()) SaveGameInstance->GameData = Existing->GameData;
+    else SaveGameInstance->GameData.OwnedBuildingSkins.Add(FBuildingSkinInstance(100));
     // EmployeeManager에서 NextEmployeeID만 저장 (전역 관리)
     // 직원 목록은 건물별로 FOfficeSaveData에 저장됨
     UEmployeeManager* EmployeeManager = GetGameInstance()->GetSubsystem<UEmployeeManager>();
@@ -411,6 +504,38 @@ bool USaveLoadManager::SaveGameData()
     if (UShopManagerSubsystem* ShopMgr = GetGameInstance()->GetSubsystem<UShopManagerSubsystem>())
     {
         SaveGameInstance->GameData.ShopSaveData = ShopMgr->GetShopData();
+    }
+
+    // QuestSubsystem 퀘스트 원장 (평구조체)
+    if (UQuestSubsystem* QuestMgr = GetGameInstance()->GetSubsystem<UQuestSubsystem>())
+    {
+        SaveGameInstance->GameData.QuestSaveData = QuestMgr->GetQuestData();
+    }
+
+    // AttendanceSubsystem 출석 이력 (평구조체)
+    if (UAttendanceSubsystem* AttendMgr = GetGameInstance()->GetSubsystem<UAttendanceSubsystem>())
+    {
+        SaveGameInstance->GameData.AttendanceSaveData = AttendMgr->GetAttendanceData();
+    }
+    if (USideContentSubsystem* SideMgr = GetGameInstance()->GetSubsystem<USideContentSubsystem>())
+    {
+        SaveGameInstance->GameData.SideContentSaveData = SideMgr->GetSideContentData();
+    }
+
+    // MailboxSubsystem 우편함 (평구조체)
+    if (UMailboxSubsystem* MailMgr = GetGameInstance()->GetSubsystem<UMailboxSubsystem>())
+    {
+        SaveGameInstance->GameData.MailboxSaveData = MailMgr->GetMailboxData();
+    }
+
+    // LiveOpsSubsystem 이벤트 진행 / 읽은 공지 (평구조체)
+    if (ULiveOpsSubsystem* LiveOpsMgr = GetGameInstance()->GetSubsystem<ULiveOpsSubsystem>())
+    {
+        SaveGameInstance->GameData.LiveOpsSaveData = LiveOpsMgr->GetLiveOpsData();
+    }
+    if (const UUIManagerSubsystem* EntryUI = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+    {
+        SaveGameInstance->GameData.EntryPopupSaveData = EntryUI->GetEntryPopupData();
     }
 
     // BuildingTraitManager에서 글로벌 특성 인벤토리 가져오기
@@ -458,7 +583,11 @@ bool USaveLoadManager::SaveGameData()
                     static_cast<int64>(MAX_int32)));
             }
         }
+        SaveGameInstance->GameData.DerivedMissionLatches = MissionMgr->GetDerivedMissionLatches();
+        SaveGameInstance->GameData.DerivedMissionLatchID = SaveGameInstance->GameData.DerivedMissionLatches.Num() > 0
+            ? MissionMgr->GetActiveMissionID() : NAME_None;
         SaveGameInstance->GameData.bCurrentMissionReadyToClaim = MissionMgr->IsReadyToClaim();
+        SaveGameInstance->GameData.bCurrentMissionRevenueReceived = MissionMgr->HasReceivedTutorialRevenue();
         SaveGameInstance->GameData.bTutorialCompleted = MissionMgr->IsTutorialCompleted();
     }
 
@@ -474,12 +603,22 @@ bool USaveLoadManager::SaveGameData()
         IntroMgr->CollectSaveData(SaveGameInstance->GameData);
     }
 
+    // 그래픽·모션·오디오 설정 — 첫 실행에는 캐시가 없어 Push* 가 no-op 하므로 여기서 직접 받아간다.
+    if (USettingsManagerSubsystem* SettingsMgr = GetGameInstance()->GetSubsystem<USettingsManagerSubsystem>())
+    {
+        SettingsMgr->CollectSaveData(SaveGameInstance->GameData);
+    }
+    if (USoundManagerSubsystem* SoundMgr = GetGameInstance()->GetSubsystem<USoundManagerSubsystem>())
+    {
+        SoundMgr->CollectSaveData(SaveGameInstance->GameData);
+    }
+
     // EntityManager에서 데이터 가져오기 (MainMap에서만 업데이트)
     if (UWorld* World = GetWorld())
     {
         FString CurrentLevelName = World->GetMapName();
 
-        // MainMap에서만 Building 데이터 업데이트 (다른 레벨에서는 기존 데이터 유지)
+        // MainMap에서만 Building 데이터 업데이트 (다른 레벨에는 EntityManager 빌딩이 없어 덮어쓰면 유실)
         if (CurrentLevelName.Contains("MainMap") || CurrentLevelName.Contains("GameLevel"))
         {
             UEntityManager* EntityManager = World->GetSubsystem<UEntityManager>();
@@ -488,8 +627,17 @@ bool USaveLoadManager::SaveGameData()
                 // EntityManager가 내부 데이터를 수집하도록 요청
                 EntityManager->CollectEntityDataForSave();
 
-                // 수집된 건물 데이터를 SaveGameInstance에 복사
-                SaveGameInstance->GameData.Buildings = EntityManager->GetBuildingsData();
+                // 종료 창에서는 액터가 이미 파괴돼 수집이 0건으로 나온다 — 빈 값으로 도시를 지우지 않는다(부지 수집과 동일 규칙)
+                const TArray<FBuildingEntitySaveData>& GatheredBuildings = EntityManager->GetBuildingsData();
+                if (GatheredBuildings.Num() > 0)
+                {
+                    SaveGameInstance->GameData.Buildings = GatheredBuildings;
+                }
+                else if (SaveGameInstance->GameData.Buildings.Num() > 0)
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] 건물 수집 0건 — 기존 %d건을 유지한다(종료 경로 추정)"),
+                        SaveGameInstance->GameData.Buildings.Num());
+                }
 
                 // 건설 레벨 저장
                 SaveGameInstance->GameData.UnlockedConstructionLevel = EntityManager->GetUnlockedConstructionLevel();
@@ -499,17 +647,26 @@ bool USaveLoadManager::SaveGameData()
                     SaveGameInstance->GameData.UnlockedConstructionLevel);
             }
 
-            // Factory 데이터 수집
-            SaveGameInstance->GameData.FactoryData.Empty();
+            // Factory 데이터 수집 — 먼저 모으고 나서 교체한다. 종료 창(액터 파괴 후)에 Empty 만 남으면 공장이 사라진다.
+            TMap<FName, FFactorySaveData> GatheredFactories;
             for (TActorIterator<ABrickFactory> It(World); It; ++It)
             {
                 ABrickFactory* Factory = *It;
                 if (Factory)
                 {
                     FFactorySaveData FactoryData = Factory->GetFactoryData();
-                    SaveGameInstance->GameData.FactoryData.Add(FactoryData.FactoryID, FactoryData);
+                    GatheredFactories.Add(FactoryData.FactoryID, FactoryData);
                     UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] Saved Factory: %s"), *FactoryData.FactoryID.ToString());
                 }
+            }
+            if (GatheredFactories.Num() > 0 || SaveGameInstance->GameData.FactoryData.Num() == 0)
+            {
+                SaveGameInstance->GameData.FactoryData = MoveTemp(GatheredFactories);
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] 공장 수집 0건 — 기존 %d건을 유지한다(종료 경로 추정)"),
+                    SaveGameInstance->GameData.FactoryData.Num());
             }
 
             // 도시 부지 소유 직렬화 — SpawnedPlots 중 IsOwned() 인 것을 단일 소스로 수집한다.
@@ -565,7 +722,12 @@ bool USaveLoadManager::SaveGameData()
                     // StageProgress 데이터 수집 (WorldSubsystem이므로 World에서 가져옴)
                     UOfficeStageProgressManager* StageMgr = World->GetSubsystem<UOfficeStageProgressManager>();
                     UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] StageProgress Save - StageMgr: %s"), StageMgr ? TEXT("Valid") : TEXT("NULL"));
-                    if (StageMgr)
+                    // 스카이라인은 일반 프로젝트를 로드/진행하지 않는다. 기존 프로젝트 저장값을 보존한다.
+                    if (GameInst->GetOfficeMode() == EOfficeMode::Skyline)
+                    {
+                        UE_LOG(LogTemp, Verbose, TEXT("[SaveLoadManager] Skyline visit preserves normal StageProgress"));
+                    }
+                    else if (StageMgr)
                     {
                         OfficeData.StageProgress = StageMgr->GetProgressData();
                         UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] Saved StageProgress: Step=%d"),
@@ -603,7 +765,6 @@ bool USaveLoadManager::SaveGameData()
                 if (EmployeeManager)
                 {
                     OfficeData.EmployeeList = EmployeeManager->GetEmployeesByBuilding(ManagedBuildingIndex);
-                    OfficeData.EmployeeAppearances = EmployeeManager->GetAppearancesByBuilding(ManagedBuildingIndex);
                     UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] Saved Employees for Building %d: Count=%d"),
                         ManagedBuildingIndex, OfficeData.EmployeeList.Num());
                 }
@@ -617,11 +778,39 @@ bool USaveLoadManager::SaveGameData()
                     OfficeData.EmployeeList.Num());
             }
         }
+        else if (CurrentLevelName.Contains("RecruitmentMap"))
+        {
+            // RecruitmentMap에서 채용된 직원 데이터 저장
+            int32 ManagedBuildingIndex = GameInst ? GameInst->GetCurrentManagedBuildingIndex() : -1;
+            if (ManagedBuildingIndex >= 0 && EmployeeManager)
+            {
+                FOfficeSaveData& OfficeData = SaveGameInstance->GameData.OfficeDataMap.FindOrAdd(ManagedBuildingIndex);
+                OfficeData.EmployeeList = EmployeeManager->GetEmployeesByBuilding(ManagedBuildingIndex);
+                UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] RecruitmentMap - Employee data saved for Building %d: Count=%d"),
+                    ManagedBuildingIndex, OfficeData.EmployeeList.Num());
+            }
+        }
         else
         {
-            // 다른 레벨에서는 EntityManager를 건드리지 않음 (기존 데이터 자동 유지)
+            // MainMap 외 레벨에서는 EntityManager를 건드리지 않음 (기존 데이터 자동 유지)
             UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] SaveGameData - Skipping building update in %s, preserving existing data: %d"),
                 *CurrentLevelName, SaveGameInstance->GameData.Buildings.Num());
+        }
+    }
+
+    // 공용 교육은 현재 방문한 회사 밖의 직원도 갱신할 수 있다.
+    if (EmployeeManager)
+    {
+        for (auto& OfficePair : SaveGameInstance->GameData.OfficeDataMap)
+        {
+            for (FEmployeeInstance& SavedEmployee : OfficePair.Value.EmployeeList)
+            {
+                const FEmployeeInstance* LiveEmployee = EmployeeManager->FindEmployee(SavedEmployee.EmployeeID);
+                if (LiveEmployee && LiveEmployee->AssignedBuildingIndex == OfficePair.Key)
+                {
+                    SavedEmployee = *LiveEmployee;
+                }
+            }
         }
     }
 
@@ -694,9 +883,50 @@ bool USaveLoadManager::SaveGameData()
             SaveGameInstance->GameData.TradeOrders_Active.Num());
     }
 
-    // [Perf] DebugPrintSaveData() 제거 — 매 세이브마다 디스크에서 전체 세이브를 되읽어(LoadGameFromSlot)
-    // 직원별 로그까지 찍던 비용. 세이브는 WorldMap에서 최대 ~1Hz라 게임스레드 블로킹 I/O를 두 배로 냈음.
-    bool bSuccess = UGameplayStatics::SaveGameToSlot(SaveGameInstance, SaveSlotName, 0);
+    if (const UEmployeeEquipmentManagerSubsystem* EquipmentMgr = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>())
+        SaveGameInstance->GameData.EmployeeEquipmentState = EquipmentMgr->GetState();
+	if (CurrentGameInst)
+	{
+		CurrentGameInst->CopyAwayFactoryProductionFractions(SaveGameInstance->GameData.FactoryData);
+	}
+    OutSnapshot = SaveGameInstance->GameData;
+    return true;
+}
+
+void USaveLoadManager::LockSavesForDevMode()
+{
+    if (bDevModeSaveLocked) return;
+    bDevModeSaveLocked = true;
+
+    // 이미 예약된 지연 저장이 잠금 직후 한 번 더 디스크를 때리지 않게 같이 끊는다
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(DeferredSaveTimerHandle);
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] DevMode — 이 세션의 세이브를 봉인했다 (앱 재시작 시 해제)"));
+}
+
+bool USaveLoadManager::PersistSnapshot(const FGameSaveData& Candidate)
+{
+    if (bSaveSuppressed || !bInitialLoadComplete) return false;
+    // DevMode 치트 — 디스크만 건너뛰고 성공으로 돌려준다. false 를 주면 호출부가 "저장 실패" 롤백 경로를
+    // 타서 장비 장착/미션 완료 같은 인메모리 커밋까지 되돌아간다(세션 플레이가 망가짐).
+    if (bDevModeSaveLocked) return true;
+    const UCGGameInstance* CurrentGameInst = Cast<UCGGameInstance>(GetGameInstance());
+    if (CurrentGameInst && CurrentGameInst->IsVisitMode()) return false;
+    // 캐시 객체를 교체하면 저장 경계 너머로 GetCurrentSaveData() 포인터를 들고 있던 호출부가 고아에 쓴다.
+    USaveGame_GameData* SaveGameInstance = CachedSaveData ? CachedSaveData : NewObject<USaveGame_GameData>(this);
+    const FGameSaveData PreviousData = SaveGameInstance->GameData;
+    const FString PreviousSlot = SaveGameInstance->SaveSlotName;
+    SaveGameInstance->GameData = Candidate;
+    const FString ActiveSlot = GetActiveSaveSlotName();
+    SaveGameInstance->SaveSlotName = ActiveSlot;
+    if (UCGDevSettings::IsOfflineMode())
+    {
+        SaveGameInstance->GameData.OfflineLastSaveUtc = FDateTime::UtcNow();
+    }
+    bool bSuccess = UGameplayStatics::SaveGameToSlot(SaveGameInstance, ActiveSlot, 0);
 
     // 저장 성공 시 캐시 유지 (다른 시스템이 수정한 데이터 보존)
     if (bSuccess)
@@ -710,19 +940,60 @@ bool USaveLoadManager::SaveGameData()
             World->GetTimerManager().ClearTimer(DeferredSaveTimerHandle);
         }
 
-        // 도시 스냅샷만 업로드 (쓰로틀 적용, 60초 이내 중복 무시)
-        // 매출 점수는 랭킹 패널 진입 시에만 업로드
-        if (URankingManagerSubsystem* RankingMgr = GetGameInstance()->GetSubsystem<URankingManagerSubsystem>())
-        {
-            RankingMgr->UploadCitySnapshot();
-        }
     }
     else
     {
+        SaveGameInstance->GameData = PreviousData;
+        SaveGameInstance->SaveSlotName = PreviousSlot;
         UE_LOG(LogTemp, Error, TEXT("[SaveLoadManager] Failed to save game!"));
     }
 
     return bSuccess;
+}
+
+bool USaveLoadManager::CommitEquipmentSnapshot(const FGameSaveData& Candidate)
+{
+    return CommitEquipmentSnapshot(Candidate, []() {}, []() {});
+}
+
+void USaveLoadManager::PublishPersistedSnapshot()
+{
+    if (bLeaderboardUploadSuppressed) return;
+    // 도시 스냅샷은 전체 상태 적용 후 공개하며 기존 60초 쓰로틀을 유지한다.
+    if (URankingManagerSubsystem* RankingMgr = GetGameInstance()->GetSubsystem<URankingManagerSubsystem>())
+        RankingMgr->UploadCitySnapshot();
+}
+
+bool USaveLoadManager::CommitEquipmentSnapshot(const FGameSaveData& Candidate, TFunctionRef<void()> ApplyEmployeeState, TFunctionRef<void()> PublishEmployeeChanges)
+{
+    if (!CanCommitEquipmentTransaction()) return false;
+    UResourceItemManager* ResourceMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>();
+    UItemInventoryManager* ItemMgr = GetGameInstance()->GetSubsystem<UItemInventoryManager>();
+    UShopManagerSubsystem* ShopMgr = GetGameInstance()->GetSubsystem<UShopManagerSubsystem>();
+    UEmployeeEquipmentManagerSubsystem* EquipmentMgr = GetGameInstance()->GetSubsystem<UEmployeeEquipmentManagerSubsystem>();
+    if (!ResourceMgr || !ItemMgr || !ShopMgr || !EquipmentMgr) return false;
+    const TMap<EResourceType, int64> OldResources = ResourceMgr->GetAllResources();
+    const TMap<EItemType, int32> OldItems = ItemMgr->GetAllItems();
+    return EmployeeEquipmentRules::CommitCandidate(bSnapshotCommitInProgress, Candidate,
+        [this](const FGameSaveData& Snapshot) { return PersistSnapshot(Snapshot); },
+        [ResourceMgr, ItemMgr, ShopMgr, EquipmentMgr, ApplyEmployeeState](const FGameSaveData& Snapshot)
+        {
+            ResourceMgr->SetAllResources(Snapshot.ResourceBank, false);
+            ItemMgr->SetAllItems(Snapshot.ItemInventory, false);
+            ShopMgr->SetShopData(Snapshot.ShopSaveData);
+            EquipmentMgr->RestoreState(Snapshot.EmployeeEquipmentState);
+            ApplyEmployeeState();
+        },
+        [this, ResourceMgr, ItemMgr, ShopMgr, &OldResources, &OldItems, PublishEmployeeChanges](const FGameSaveData& Snapshot)
+        {
+            PublishEmployeeChanges();
+            for (const auto& Pair : Snapshot.ResourceBank)
+                if (OldResources.FindRef(Pair.Key) != Pair.Value) ResourceMgr->OnResourceChanged.Broadcast(Pair.Key, Pair.Value);
+            for (const auto& Pair : Snapshot.ItemInventory)
+                if (OldItems.FindRef(Pair.Key) != Pair.Value) ItemMgr->OnItemChanged.Broadcast(Pair.Key, Pair.Value, Pair.Value - OldItems.FindRef(Pair.Key));
+            ShopMgr->OnShopStockChanged.Broadcast();
+            PublishPersistedSnapshot();
+        });
 }
 
 void USaveLoadManager::RequestDeferredSave()
@@ -750,10 +1021,10 @@ void USaveLoadManager::OnDeferredSaveTimer()
 
 void USaveLoadManager::WipeAllSaveData()
 {
-    const bool bSlotDeleted = UGameplayStatics::DeleteGameInSlot(SaveSlotName, 0);
+    const bool bSlotDeleted = UGameplayStatics::DeleteGameInSlot(GetActiveSaveSlotName(), 0);
 
     // 초상화는 세이브와 같은 EmployeeID 공간을 쓴다 — 한쪽만 지우면 얼굴이 다음 플레이어에게 상속된다.
-    const FString PortraitDir = FPaths::ProjectSavedDir() / TEXT("Portraits");
+    const FString PortraitDir = FPaths::ProjectSavedDir() / UCGDevSettings::GetPortraitFolderName();
     const bool bPortraitsDeleted = IFileManager::Get().DeleteDirectory(*PortraitDir, false, true);
 
     UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] 세이브 전체 삭제 — 슬롯:%s 초상화:%s (%s)"),
@@ -764,7 +1035,8 @@ void USaveLoadManager::WipeAllSaveData()
 
 bool USaveLoadManager::LoadGameData()
 {
-    if (!UGameplayStatics::DoesSaveGameExist(SaveSlotName, 0))
+    const FString LoadSlot = GetActiveSaveSlotName();
+    if (!UGameplayStatics::DoesSaveGameExist(LoadSlot, 0))
     {
         // 저장 없는 첫 실행도 OnGameDataLoaded broadcast — Dev 빌드 자동 시나리오 적용
         // (ResourceItemManager.HandleGameDataLoaded 가 Rich/Default 등 즉시 세팅하도록).
@@ -772,11 +1044,13 @@ bool USaveLoadManager::LoadGameData()
         OnGameDataLoaded.Broadcast();
         // 신규 게임 — 복원 브로드캐스트(미션 M1 시작 등) 이후부터 저장 허용
         bInitialLoadComplete = true;
+        bLocalOfflineGainsSettledAfterLoad = true;
+        if (UManufacturingDevelopmentManager* Development = GetGameInstance()->GetSubsystem<UManufacturingDevelopmentManager>()) Development->ResetAfterLoad();
         return false;
     }
 
     USaveGame_GameData* LoadGameInstance = Cast<USaveGame_GameData>(
-        UGameplayStatics::LoadGameFromSlot(SaveSlotName, 0));
+        UGameplayStatics::LoadGameFromSlot(LoadSlot, 0));
 
     if (!LoadGameInstance)
     {
@@ -784,6 +1058,8 @@ bool USaveLoadManager::LoadGameData()
         OnGameDataLoaded.Broadcast();
         // 로드 실패 = 빈 상태로 진행 — 이후 저장 허용
         bInitialLoadComplete = true;
+        bLocalOfflineGainsSettledAfterLoad = true;
+        if (UManufacturingDevelopmentManager* Development = GetGameInstance()->GetSubsystem<UManufacturingDevelopmentManager>()) Development->ResetAfterLoad();
         return false;
     }
 
@@ -820,18 +1096,11 @@ bool USaveLoadManager::LoadGameData()
                     {
                         FOfficeSaveData& OfficeData = LoadGameInstance->GameData.OfficeDataMap.FindOrAdd(BuildingIdx);
                         OfficeData.EmployeeList.Add(Employee);
-
-                        // 외모 데이터도 마이그레이션
-                        if (const FEmployeeAppearanceData* AppData = LoadGameInstance->GameData.EmployeeAppearances.Find(Employee.EmployeeID))
-                        {
-                            OfficeData.EmployeeAppearances.Add(Employee.EmployeeID, AppData->Appearance);
-                        }
                     }
                 }
 
                 // 마이그레이션 후 전역 리스트 비우기 (다음 저장 시 정리됨)
                 LoadGameInstance->GameData.EmployeeList.Empty();
-                LoadGameInstance->GameData.EmployeeAppearances.Empty();
 
                 UE_LOG(LogTemp, Warning, TEXT("[SaveLoadManager] Migration completed"));
             }
@@ -928,6 +1197,38 @@ bool USaveLoadManager::LoadGameData()
         ShopMgr->SetShopData(LoadGameInstance->GameData.ShopSaveData);
     }
 
+    // QuestSubsystem 원장 복원 — 롤오버는 OnGameDataLoaded 에서 QuestSubsystem 이 스스로 한다
+    if (UQuestSubsystem* QuestMgr = GetGameInstance()->GetSubsystem<UQuestSubsystem>())
+    {
+        QuestMgr->SetQuestData(LoadGameInstance->GameData.QuestSaveData);
+    }
+
+    // AttendanceSubsystem 출석 이력 복원 (평구조체 — 무조건 복원)
+    if (UAttendanceSubsystem* AttendMgr = GetGameInstance()->GetSubsystem<UAttendanceSubsystem>())
+    {
+        AttendMgr->SetAttendanceData(LoadGameInstance->GameData.AttendanceSaveData);
+    }
+    if (USideContentSubsystem* SideMgr = GetGameInstance()->GetSubsystem<USideContentSubsystem>())
+    {
+        SideMgr->SetSideContentData(LoadGameInstance->GameData.SideContentSaveData);
+    }
+
+    // MailboxSubsystem 우편함 복원 — 만료 정리는 OnGameDataLoaded 에서 우편함이 스스로 한다
+    if (UMailboxSubsystem* MailMgr = GetGameInstance()->GetSubsystem<UMailboxSubsystem>())
+    {
+        MailMgr->SetMailboxData(LoadGameInstance->GameData.MailboxSaveData);
+    }
+
+    // LiveOpsSubsystem 복원 — 활성 판정·종료 회수는 OnGameDataLoaded 에서 라이브옵스가 스스로 한다
+    if (ULiveOpsSubsystem* LiveOpsMgr = GetGameInstance()->GetSubsystem<ULiveOpsSubsystem>())
+    {
+        LiveOpsMgr->SetLiveOpsData(LoadGameInstance->GameData.LiveOpsSaveData);
+    }
+    if (UUIManagerSubsystem* EntryUI = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+    {
+        EntryUI->SetEntryPopupData(LoadGameInstance->GameData.EntryPopupSaveData);
+    }
+
     // BuildingTraitManager에 글로벌 특성 인벤토리 설정
     UBuildingTraitManagerSubsystem* TraitMgr = GetGameInstance()->GetSubsystem<UBuildingTraitManagerSubsystem>();
     if (TraitMgr)
@@ -993,7 +1294,6 @@ bool USaveLoadManager::LoadGameData()
                     if (OD.EmployeeList.Num() > 0)
                     {
                         EmployeeManager->SetEmployeesForBuilding(BIdx, OD.EmployeeList);
-                        EmployeeManager->SetAppearancesForBuilding(BIdx, OD.EmployeeAppearances);
                     }
                 }
                 UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] Loaded employees for all buildings on MainMap"));
@@ -1094,7 +1394,6 @@ bool USaveLoadManager::LoadGameData()
                     if (EmployeeManager)
                     {
                         EmployeeManager->SetEmployeesForBuilding(ManagedBuildingIndex, OfficeData->EmployeeList);
-                        EmployeeManager->SetAppearancesForBuilding(ManagedBuildingIndex, OfficeData->EmployeeAppearances);
                         UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] Loaded Employees for Building %d: Count=%d"),
                             ManagedBuildingIndex, OfficeData->EmployeeList.Num());
                     }
@@ -1142,7 +1441,7 @@ bool USaveLoadManager::LoadGameData()
 
     DebugPrintSaveData();
 
-    // 캐시 설정 (로드한 데이터 재사용)
+    // 캐시 설정 — 다음 저장이 이 인스턴스를 재사용해야 런타임 매니저가 안 들고 있는 필드가 살아남는다
     CachedSaveData = LoadGameInstance;
     UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] Save data cached after load"));
 
@@ -1232,6 +1531,15 @@ bool USaveLoadManager::LoadGameData()
             LoadGameInstance->GameData.TradeOrders_Active.Num());
     }
 
+    if (UCGDevSettings::IsOfflineMode() && !bLocalOfflineGainsSettledAfterLoad)
+    {
+        bLocalOfflineGainsSettledAfterLoad = true;
+        PendingLocalOfflineLastSaveUtc = LoadGameInstance->GameData.OfflineLastSaveUtc;
+        GetGameInstance()->GetTimerManager().SetTimerForNextTick(
+            FTimerDelegate::CreateUObject(this, &USaveLoadManager::SettleLocalOfflineGains));
+    }
+
+    if (UManufacturingDevelopmentManager* Development = GetGameInstance()->GetSubsystem<UManufacturingDevelopmentManager>()) Development->ResetAfterLoad();
     return true;
 }
 
@@ -1240,10 +1548,11 @@ USaveGame_GameData* USaveLoadManager::GetCurrentSaveData()
     // 캐시가 없으면 로드
     if (!CachedSaveData)
     {
-        if (UGameplayStatics::DoesSaveGameExist(SaveSlotName, 0))
+        const FString ExistingSlot = GetActiveSaveSlotName();
+        if (UGameplayStatics::DoesSaveGameExist(ExistingSlot, 0))
         {
             CachedSaveData = Cast<USaveGame_GameData>(
-                UGameplayStatics::LoadGameFromSlot(SaveSlotName, 0));
+                UGameplayStatics::LoadGameFromSlot(ExistingSlot, 0));
 
             if (CachedSaveData)
             {
@@ -1445,33 +1754,42 @@ bool USaveLoadManager::TryLevelUpHQ()
         UResourceItemManager* ResourceMgr = GetGameInstance()->GetSubsystem<UResourceItemManager>();
         if (ResourceMgr)
         {
-            ResourceMgr->SpendResource(EResourceType::Money, NextLevelData.MoneyCost);
+            // 여기서 저장하면 레벨 기록 전에 스냅샷이 확정돼 자금만 빠진다 ― 함수 끝의 단일 저장에 맡긴다.
+            ResourceMgr->SpendResource(EResourceType::Money, NextLevelData.MoneyCost, /*bShouldSave=*/false);
         }
     }
 
     // 레벨 증가
     SaveData->GameData.HQLevel = NextLevel;
 
-    // 새로 열린 산업(RequiredHQLevel == NextLevel)당 프리미엄 채용권 1 고정 + 상위 테이블 확정 롤.
+    // 새로 열린 산업당 보상 — 본사 패널 보상 카드가 같은 규칙(HQLevelUpReward)으로 미리 보여준다.
     // OnHQLevelUp 델리게이트 구독 방식 금지 — 치트/프리셋 3곳이 직접 Broadcast 해 중복 지급된다.
-    for (uint8 TypeIdx = 1; TypeIdx < (uint8)ECompanyType::Max; ++TypeIdx)
+    for (const ECompanyType UnlockedType : HQLevelUpReward::GetIndustriesUnlockedAt(*this, NextLevel))
     {
-        const ECompanyType UnlockedType = (ECompanyType)TypeIdx;
-        if (GetIndustryRequiredHQLevel(UnlockedType) != NextLevel)
-        {
-            continue;
-        }
         if (UItemInventoryManager* ItemMgr = GetGameInstance()->GetSubsystem<UItemInventoryManager>())
         {
-            ItemMgr->AddItem(EItemType::RecruitTicketPremium, 1, /*bShouldSave=*/false);
+            ItemMgr->AddItem(HQLevelUpReward::IndustryTicketType, HQLevelUpReward::IndustryTicketAmount, /*bShouldSave=*/false);
         }
         if (ULaunchLootManagerSubsystem* Loot = GetGameInstance()->GetSubsystem<ULaunchLootManagerSubsystem>())
         {
             // 저장은 루프 뒤 SaveGameData() 한 번으로 — 켜두면 동시 해금 산업 수만큼 전체 세이브가 돈다
-            Loot->RollAndGrant(FName(TEXT("High")), Loot->GetProgressionTierContext(), /*ScaleBasis=*/0,
-                /*ExtraRolls=*/0, /*bGrant=*/true, /*bSaveAfterGrant=*/false);
+            for (int32 Roll = 0; Roll < HQLevelUpReward::IndustryLootRolls; ++Roll)
+            {
+                Loot->RollAndGrant(FName(HQLevelUpReward::IndustryLootTable), Loot->GetProgressionTierContext(), /*ScaleBasis=*/0,
+                    /*ExtraRolls=*/0, /*bGrant=*/true, /*bSaveAfterGrant=*/false);
+            }
         }
-        UE_LOG(LogTemp, Log, TEXT("[LaunchLoot] 산업 해금 보상: CompanyType=%d (HQ Lv.%d)"), TypeIdx, NextLevel);
+        UE_LOG(LogTemp, Log, TEXT("[LaunchLoot] 산업 해금 보상: CompanyType=%d (HQ Lv.%d)"), static_cast<int32>(UnlockedType), NextLevel);
+    }
+
+    // TODO: 서버 모드(출시 빌드)는 서버 인벤토리 적립 경로가 없어 로컬 AddItem 지급분이 다음 상태 동기화(BuildInventoryTarget)에서 0 으로 덮인다 ― 서버 적립 규칙 추가 후 CloudEconomy 경유로 바꿀 것.
+    if (UItemInventoryManager* ItemMgr = GetGameInstance()->GetSubsystem<UItemInventoryManager>())
+    {
+        ItemMgr->AddItem(HQLevelUpReward::LevelTraitTicketType, HQLevelUpReward::LevelTraitTicketAmount, /*bShouldSave=*/false);
+        if (HQLevelUpReward::IsMilestoneLevel(NextLevel))
+        {
+            ItemMgr->AddItem(HQLevelUpReward::MilestoneTraitTicketType, HQLevelUpReward::MilestoneTraitTicketAmount, /*bShouldSave=*/false);
+        }
     }
 
     UE_LOG(LogTemp, Log, TEXT("[SaveLoadManager] HQ LEVEL UP! Lv.%d -> Lv.%d"),
@@ -1511,6 +1829,39 @@ int32 USaveLoadManager::GetIndustryRequiredHQLevel(ECompanyType CompanyType)
 bool USaveLoadManager::IsIndustryUnlocked(ECompanyType CompanyType)
 {
     return GetHQLevel() >= GetIndustryRequiredHQLevel(CompanyType);
+}
+
+bool USaveLoadManager::IsIndustryAvailable(ECompanyType CompanyType)
+{
+    UGameInstance* GI = GetGameInstance();
+    UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+    if (!TableMgr) return true;
+
+    bool bSuccess = false;
+    const FCompanyInfoTable Info = TableMgr->GetCompanyInfo(CompanyType, bSuccess);
+    if (!bSuccess)
+    {
+        // GetIndustryRequiredHQLevel 과 같은 폴백 규율 — 닫는 쪽으로 실패하면 DT 누락이 업종을 조용히 지운다
+        UE_LOG(LogTemp, Warning, TEXT("IsIndustryAvailable: DT_CompanyInfo 행 없음 (CompanyType=%d) — 기본 가용 처리"), static_cast<int32>(CompanyType));
+        return true;
+    }
+    return Info.bAvailableAtLaunch;
+}
+
+TArray<ECompanyType> HQLevelUpReward::GetIndustriesUnlockedAt(USaveLoadManager& SaveMgr, int32 HQLevel)
+{
+    TArray<ECompanyType> Unlocked;
+    for (uint8 TypeIdx = 1; TypeIdx < static_cast<uint8>(ECompanyType::Max); ++TypeIdx)
+    {
+        const ECompanyType Type = static_cast<ECompanyType>(TypeIdx);
+        // 미가용 업종(이번 출시 범위 밖)은 보상도 주지 않는다 ― 타일이 안 보이는데 해금 보상이 나가면
+        // 지급 건수가 보이는 업종 수와 어긋난다(DT 행은 보존되므로 복귀 시 자동으로 되살아난다).
+        if (SaveMgr.GetIndustryRequiredHQLevel(Type) == HQLevel && SaveMgr.IsIndustryAvailable(Type))
+        {
+            Unlocked.Add(Type);
+        }
+    }
+    return Unlocked;
 }
 
 bool USaveLoadManager::HasNextHQLevel()

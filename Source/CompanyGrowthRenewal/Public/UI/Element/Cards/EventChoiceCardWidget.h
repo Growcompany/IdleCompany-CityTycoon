@@ -17,7 +17,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEventCardSelected, int32, ChoiceI
  * - 카드 전체가 CommonButton (클릭 시 카드 선택)
  * - WBP 위젯: IconImage / TitleText(제목) / TitleDescriptionText(이벤트 설명) / EffectDescription(효과)
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UEventChoiceCardWidget : public UCommonButtonBase
 {
 	GENERATED_BODY()

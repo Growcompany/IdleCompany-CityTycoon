@@ -4,6 +4,15 @@
 
 namespace CGRInteractableDragPolicy
 {
+inline constexpr float DragThresholdPixels = 30.0f;
+
+inline bool ShouldCancelAircraftTap(bool bAlreadyDragging, bool bValidPointerPositions,
+    const FVector2D& PressPosition, const FVector2D& ReleasePosition)
+{
+    return bAlreadyDragging || !bValidPointerPositions
+        || FVector2D::DistSquared(PressPosition, ReleasePosition) > FMath::Square(DragThresholdPixels);
+}
+
 inline bool ShouldCancelFactoryHold(
 	bool bAlreadyDragging,
 	float DragDistance,

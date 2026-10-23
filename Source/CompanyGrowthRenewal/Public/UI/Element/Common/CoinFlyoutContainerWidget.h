@@ -10,8 +10,9 @@
 class UCanvasPanel;
 class UCanvasPanelSlot;
 class UImage;
-class UTextBlock;
 class UHorizontalBox;
+class UMaterialInterface;
+class UMaterialInstanceDynamic;
 
 // 코인 도착 시 콜백 (도착한 코인 인덱스)
 DECLARE_DELEGATE_OneParam(FOnCoinArrived, int32);
@@ -34,7 +35,7 @@ public:
 	// SourceId = 스로틀 분리 키(직원 ID 등). INDEX_NONE 이면 호출자 전체가 한 게이트를 공유.
 	void SpawnStreamCoin(FVector2D StartAbsolute, FVector2D TargetAbsolute, UTexture2D* InCoinTexture, int32 SourceId = INDEX_NONE);
 
-	// 수익 텍스트 "+N" — 아이콘과 한국식 자금 축약값을 일시적 게임 피드백용 NEXON Bold로 표시한다. 코인과 같은 시작점.
+	// 수익 텍스트 "+N" — 아이콘과 한국식 자금 축약값을 Lilita One 숫자·NEXON 한글 단위로 표시한다. 코인과 같은 시작점.
 	void SpawnIncomeText(FVector2D StartAbsolute, int64 Amount, UTexture2D* InMoneyTexture, FLinearColor MoneyColor);
 
 	// 외부 콜백
@@ -98,9 +99,15 @@ private:
 	TArray<FIncomeTextData> IncomeTexts;
 	int32 StreamCoinIdCounter = 0;
 
-	// 일시적 게임 피드백 수익 텍스트용 NEXON Bold 폰트
+	// 글리프별 MID 는 마스크 텍스처를 고정하고 Money 색 램프만 갱신한다.
 	UPROPERTY()
-	UObject* IncomeFont = nullptr;
+	UMaterialInterface* IncomeGlyphMaterial = nullptr;
+	UPROPERTY()
+	TMap<int32, UMaterialInstanceDynamic*> IncomeGlyphMIDs;
+	FLinearColor CachedIncomeGlyphColor = FLinearColor::Transparent;
+
+	UMaterialInstanceDynamic* GetIncomeGlyphMID(int32 GlyphIndex, FLinearColor MoneyColor);
+	void UpdateIncomeGlyphColors(FLinearColor MoneyColor);
 	// 스폰 스로틀 시각을 SourceId(직원 ID) 별로 분리 — 단일 타이머면 먼저 틱한 직원이 계속 이겨 나머지가 침묵한다.
 	TMap<int32, float> LastStreamSpawnBySource;
 	FVector2D TargetPosition_Absolute;
@@ -146,6 +153,5 @@ private:
 	static constexpr float IncomeTextRise = 64.0f;
 	static constexpr float IncomeIconSize = 48.0f;
 	static constexpr float IncomeIconGap = 8.0f;
-	static constexpr int32 IncomeFontSize = 36;
 	static constexpr float IncomeTextFadeStart = 0.55f;
 };

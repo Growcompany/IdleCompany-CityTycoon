@@ -11,6 +11,7 @@ class UIconCardWidget;
 class UConfirmCancelWidget;
 class UBorder;
 class UImage;
+class UOverlay;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCloseReportDelegate);
 
@@ -34,9 +35,13 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Project Report|Events")
 	FOnCloseReportDelegate OnReportClosed;
 
+	// 튜토리얼이 운영 결산 창을 닫게 할 때 짚는 버튼 — 결산은 [닫기]만 두는 경우가 있어 보이는 쪽을 고른다
+	UWidget* GetCloseTargetWidget() const;
+
 protected:
 	virtual void NativePreConstruct() override;
 	virtual void NativeConstruct() override;
+	virtual void NativeOnActivated() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
 	// 공통 다이얼로그 프레임 (ConfirmCancelWidget 인스턴스)
@@ -51,6 +56,9 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* Text_QualityGrade;
 
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	UBorder* LetterPlate;
+
 	// 등급 스탬프 3층 — SDF 머티리얼. RoundedBox 는 단색뿐이라 그라데이션/글린트가 안 나온다.
 	// StampBG=세로 그라데이션 채움 / StampLine=키라인 / StampGlint=흐르는 광택
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -62,7 +70,11 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UImage* StampGlint;
 
-	// 품질 점수 텍스트
+	// 등장 연출은 이 Overlay 하나에만 건다 — 7층(BG/Line/Glint/Shade/Sheen/Shadow/StampRow)에 따로 걸면 스탬프가 분해된다
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	UOverlay* GradeStampStack;
+
+	// 결산서의 수익 배율 텍스트 (WBP 바인딩 이름 유지)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* Text_QualityScore;
 
@@ -107,13 +119,21 @@ protected:
 	UCommonTextBlock* Text_OperationTime;
 
 private:
-	// 스탬프 3층(SDF 머티리얼) + 글자 아웃라인에 등급색 주입
+	// 남아 있는 스탬프 SDF 층에 등급색 주입
 	void ApplyGradeStampColor(const FLinearColor& GradeColor);
 
 	// SDF 는 Wpx/Hpx 가 실제 위젯 크기와 같아야 코너가 정합. 위젯을 고정하는 대신 크기를 주입한다
 	// (UResourceWidget::UpdateChipMaterialSize 와 같은 패턴 — 크기 변화 시에만)
 	void UpdateStampMaterialSize();
 	FVector2D LastStampMatSize = FVector2D::ZeroVector;
+
+	// 등급 스탬프 등장 팝 (UAlertMarkWidget 과 같은 EaseOutQuad 패턴)
+	static constexpr float StampRevealDelay = 0.05f;
+	static constexpr float StampRevealDuration = 0.22f;
+	static constexpr float StampRevealStartScale = 0.90f;
+	float StampRevealElapsed = -1.f;   // 음수 = 유휴, 틱에서 조기 반환
+
+	void TickStampReveal(float InDeltaTime);
 
 	void OnDialogCancelled();
 

@@ -29,16 +29,11 @@ struct FTutorialMissionAtomicCommitRules
 		return NextMissionID.IsNone();
 	}
 
-	static bool AreAllFinalRewardsGrantable(
+	static bool AreRewardsGrantable(
 		const TArray<FMissionReward>& Rewards,
 		bool bResourceManagerAvailable,
 		bool bItemManagerAvailable)
 	{
-		if (Rewards.IsEmpty())
-		{
-			return false;
-		}
-
 		for (const FMissionReward& Reward : Rewards)
 		{
 			const bool bHasResourceReward = Reward.ResourceType != EResourceType::None;
@@ -63,22 +58,22 @@ struct FTutorialMissionAtomicCommitRules
 	}
 
 	static FTutorialRewardBroadcastDecision ResolveRewardBroadcastDecision(
-		bool bIsTerminalMission,
+		bool bRequiresDurableCommit,
 		bool bSaveSucceeded)
 	{
 		FTutorialRewardBroadcastDecision Decision;
-		Decision.bBroadcastDuringPrepare = !bIsTerminalMission;
-		Decision.bPublishRewardsAfterCommit = bIsTerminalMission && bSaveSucceeded;
+		Decision.bBroadcastDuringPrepare = !bRequiresDurableCommit;
+		Decision.bPublishRewardsAfterCommit = bRequiresDurableCommit && bSaveSucceeded;
 		return Decision;
 	}
 
 	static FTutorialMissionSaveDecision ResolveSaveDecision(
-		bool bIsTerminalMission,
+		bool bRequiresDurableCommit,
 		bool bSaveSucceeded)
 	{
 		FTutorialMissionSaveDecision Decision;
-		Decision.bCommitPreparedState = bSaveSucceeded || !bIsTerminalMission;
-		Decision.bRestoreReadyToClaim = bIsTerminalMission && !bSaveSucceeded;
+		Decision.bCommitPreparedState = bSaveSucceeded || !bRequiresDurableCommit;
+		Decision.bRestoreReadyToClaim = bRequiresDurableCommit && !bSaveSucceeded;
 		Decision.bPublishCompletionEvents = Decision.bCommitPreparedState;
 		return Decision;
 	}

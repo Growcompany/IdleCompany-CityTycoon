@@ -1,6 +1,7 @@
 #include "Manager/ProductionOrderManager.h"
 #include "Manager/SaveLoadManager.h"
 #include "Manager/WorldMapManager.h"
+#include "Data/WorldMapTypes.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Core/CGGameInstance.h"
 #include "Manager/BuildingTraitManagerSubsystem.h"
@@ -11,6 +12,13 @@
 #include "Table/TestProductionOrderTable.h"
 #include "Table/ProductRecipeTable.h"
 #include "Manager/ResourceItemManager.h"
+#include "Manager/ManufacturingDevelopmentManager.h"
+#include "Manager/MissionManagerSubsystem.h"
+#include "Manager/OfficeStageProgressManager.h"
+#include "Data/ManufacturingReservationRules.h"
+#include "Data/ProjectBoardData.h"
+#include "Table/ProjectDataTable.h"
+#include "Engine/World.h"
 #include "Engine/DataTable.h"
 
 UProductionOrderManager::UProductionOrderManager()
@@ -32,84 +40,165 @@ void UProductionOrderManager::Deinitialize()
 	UE_LOG(LogTemp, Log, TEXT("[ProductionOrderManager] Deinitialized"));
 }
 
-// ===== 주문서 생성 =====
+// ===== 생산 가능 수량 예약 =====
 
-int32 UProductionOrderManager::CreateOrder(const FStageProgressData& StageData, int32 BuildingID)
+namespace
 {
-	FProductionOrder NewOrder;
-	NewOrder.OrderID = NextOrderID++;
-	NewOrder.CompanyType = StageData.CompanyType;
-	NewOrder.ProjectIndex = StageData.ProjectNumber;
-	NewOrder.ProductID = FName(*FString::Printf(TEXT("Product_%d_%d"), StageData.ProjectNumber, StageData.StageNumber));
-	NewOrder.ProductName = StageData.ProjectName;
-	NewOrder.SourceBuildingID = BuildingID;
-	NewOrder.QualityScore = StageData.CalculateQualityScore();
-	// ProjectGrade 배율 적용 (Phase 3) — 제조업 생산주문서 품질 등급 상승
+	struct FReservationContext
 	{
-		float QualityMult = 1.0f;
-		if (UCGGameInstance* GI = UCGGameInstance::GetInstance())
+		USaveLoadManager* SaveMgr = nullptr;
+		USaveGame_GameData* SaveData = nullptr;
+		UManufacturingDevelopmentManager* Development = nullptr;
+		ECompanyType Industry = ECompanyType::None;
+		FProjectData Project;
+		FProjectTierProgress Tier;
+		TArray<double> UnitCosts;
+	};
+
+	bool ResolveReservation(UGameInstance* Instance, int32 BuildingID, int32 ProjectIndex, FReservationContext& Out)
+	{
+		if (!Instance || BuildingID < 0 || ProjectIndex <= 0) return false;
+		Out.SaveMgr = Instance->GetSubsystem<USaveLoadManager>();
+		UTableManagerSubsystem* Tables = Instance->GetSubsystem<UTableManagerSubsystem>();
+		Out.Development = Instance->GetSubsystem<UManufacturingDevelopmentManager>();
+		if (!Out.SaveMgr || !Tables || !Out.Development) return false;
+		Out.SaveData = Out.SaveMgr->GetCurrentSaveData();
+		Out.Industry = Out.SaveMgr->GetBuildingCompanyType(BuildingID);
+		if (!Out.SaveData || !IsManufacturingType(Out.Industry)) return false;
+		bool bProjectFound = false;
+		Out.Project = Tables->GetProjectData(Out.Industry, ProjectIndex, bProjectFound);
+		bool bRecipeFound = false;
+		const FProductRecipeTable Recipe = Tables->GetProductRecipe(Out.Industry, ProjectIndex, bRecipeFound);
+		if (!bProjectFound || !bRecipeFound || Out.Project.CompanyType != Out.Industry
+			|| Out.Project.ProjectIndex != ProjectIndex || Recipe.CompanyType != Out.Industry
+			|| Recipe.ProjectIndex != ProjectIndex) return false;
+
+		if (const FOfficeSaveData* Office = Out.SaveData->GameData.OfficeDataMap.Find(BuildingID))
 		{
-			if (USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>())
+			Out.Tier = Office->TierProgress;
+		}
+		if (const UCGGameInstance* Game = Cast<UCGGameInstance>(Instance))
+		{
+			if (Game->GetCurrentManagedBuildingIndex() == BuildingID && Game->GetWorld()
+				&& Game->GetWorld()->GetMapName().Contains(TEXT("OfficeMap")))
 			{
-				if (USaveGame_GameData* SaveData = SaveMgr->GetCurrentSaveData())
+				if (const UOfficeStageProgressManager* Stage = Game->GetWorld()->GetSubsystem<UOfficeStageProgressManager>())
 				{
-					for (const FBuildingEntitySaveData& B : SaveData->GameData.Buildings)
-					{
-						if (B.BuildingIndex == BuildingID)
-						{
-							const int32 Lv = B.BuildingData.EnhancementLevels.FindRef(EBuildingEnhancementType::ProjectGrade);
-							QualityMult = UBuildingEnhancementHelper::CalculateEffectMultiplier(EBuildingEnhancementType::ProjectGrade, Lv);
-							break;
-						}
-					}
+					Out.Tier = Stage->GetTierProgress();
 				}
 			}
 		}
-		// R&D 특성 — 출시 품질 배율 (강화 QualityMult 와 곱셈 결합)
-		float QualityTraitMult = 1.0f;
-		if (UCGGameInstance* QGI = UCGGameInstance::GetInstance())
+		const int32 RequiredTier = FProjectTierProgress::GetTierForProject(ProjectIndex);
+		if (RequiredTier <= 0 || RequiredTier > Out.Tier.CurrentTier) return false;
+
+		double Bonus = 0.0;
+		if (const UBuildingTraitManagerSubsystem* Traits = Instance->GetSubsystem<UBuildingTraitManagerSubsystem>())
 		{
-			if (UBuildingTraitManagerSubsystem* QTraitMgr = QGI->GetSubsystem<UBuildingTraitManagerSubsystem>())
-			{
-				QualityTraitMult = QTraitMgr->GetTraitFactor(BuildingID, EBuildingTraitTarget::Quality);
-			}
+			Bonus = Traits->GetAggregatedTraitPercent(BuildingID, EBuildingTraitTarget::ProductionCount);
 		}
-		NewOrder.QualityScore = FMath::Clamp(NewOrder.QualityScore * QualityMult * QualityTraitMult, 0.5f, 2.0f);
+		Out.UnitCosts = ManufacturingReservationRules::DiscountedCosts(Recipe.DevelopmentPointCosts, Bonus);
+		return ManufacturingReservationRules::HasValidCosts(Out.UnitCosts);
 	}
-	// 제조는 6등급 유지 — 프로젝트 4등급화(2026-07-30)는 출시 게이트 하한 논리라 게이트 없는 양산엔 적용 안 됨.
+}
+
+TArray<double> UProductionOrderManager::GetDevelopmentPointCosts(int32 BuildingID, int32 ProjectIndex) const
+{
+	FReservationContext Context;
+	return ResolveReservation(GetGameInstance(), BuildingID, ProjectIndex, Context) ? Context.UnitCosts : TArray<double>();
+}
+
+int32 UProductionOrderManager::GetMaxReservableQuantity(int32 BuildingID, int32 ProjectIndex) const
+{
+	FReservationContext Context;
+	if (!ResolveReservation(GetGameInstance(), BuildingID, ProjectIndex, Context)
+        || !Context.Tier.ClearedProjects.Contains(ProjectIndex)) return 0;
+	return ManufacturingReservationRules::MaxQuantity(
+		Context.Development->GetDisciplinePoints(BuildingID), Context.UnitCosts);
+}
+
+int32 UProductionOrderManager::ReserveProductionQuantity(int32 BuildingID, int32 ProjectIndex, int32 Quantity, FText& OutFailure)
+{
+	OutFailure = NSLOCTEXT("ManufacturingReservation", "Unavailable", "생산 수량을 확보할 수 없습니다");
+	if (bReservationInProgress || Quantity <= 0 || NextOrderID <= 0 || NextOrderID == MAX_int32) return 0;
+	TGuardValue<bool> ReservationGuard(bReservationInProgress, true);
+	UGameInstance* Instance = GetGameInstance();
+	if (const UCGGameInstance* Game = Cast<UCGGameInstance>(Instance))
+	{
+		if (Game->IsVisitMode()) return 0;
+	}
+	UManufacturingDevelopmentManager* Development = Instance ? Instance->GetSubsystem<UManufacturingDevelopmentManager>() : nullptr;
+	if (!Development) return 0;
+	Development->AccrueOnline();
+
+	FReservationContext Context;
+	if (!ResolveReservation(Instance, BuildingID, ProjectIndex, Context)) return 0;
+    if (!Context.Tier.ClearedProjects.Contains(ProjectIndex))
+    {
+        OutFailure = NSLOCTEXT("ManufacturingReservation", "ResearchRequired", "먼저 제품 개발을 완료하세요");
+        return 0;
+    }
+	const FOfficeSaveData* ExistingOffice = Context.SaveData->GameData.OfficeDataMap.Find(BuildingID);
+	const TArray<double> PreviousPoints = ExistingOffice ? ExistingOffice->ManufacturingDevelopmentPoints : TArray<double>();
+	if (!ManufacturingReservationRules::CanReserve(PreviousPoints, Context.UnitCosts, Quantity))
+	{
+		OutFailure = NSLOCTEXT("ManufacturingReservation", "InsufficientPoints", "개발 포인트가 부족합니다");
+		return 0;
+	}
+	TArray<double> RemainingPoints = PreviousPoints;
+	for (int32 Field = 0; Field < RemainingPoints.Num(); ++Field)
+	{
+		RemainingPoints[Field] -= Context.UnitCosts[Field] * static_cast<double>(Quantity);
+		if (!FMath::IsFinite(RemainingPoints[Field]) || RemainingPoints[Field] < 0.0) return 0;
+	}
+
+	float Quality = 1.0f;
+	if (const FBuildingEntitySaveData* Building = Context.SaveData->GameData.Buildings.FindByPredicate(
+		[BuildingID](const FBuildingEntitySaveData& Entry) { return Entry.BuildingIndex == BuildingID; }))
+	{
+		const int32 Level = Building->BuildingData.EnhancementLevels.FindRef(EBuildingEnhancementType::ProjectGrade);
+		Quality *= UBuildingEnhancementHelper::CalculateEffectMultiplier(EBuildingEnhancementType::ProjectGrade, Level);
+	}
+	if (const UBuildingTraitManagerSubsystem* Traits = Instance->GetSubsystem<UBuildingTraitManagerSubsystem>())
+	{
+		Quality *= Traits->GetTraitFactor(BuildingID, EBuildingTraitTarget::Quality);
+	}
+	if (!FMath::IsFinite(Quality)) return 0;
+
+	FProductionOrder NewOrder;
+	NewOrder.OrderID = NextOrderID;
+	NewOrder.CompanyType = Context.Industry;
+	NewOrder.ProjectIndex = ProjectIndex;
+	NewOrder.ProductID = FName(*FString::Printf(TEXT("Product_%d_%d"), static_cast<int32>(Context.Industry), ProjectIndex));
+	NewOrder.ProductName = Context.Project.ProjectName.ToString();
+	NewOrder.SourceBuildingID = BuildingID;
+	NewOrder.QualityScore = FMath::Clamp(Quality, 0.5f, 2.0f);
 	NewOrder.Grade = ProductionScoreToGrade(NewOrder.QualityScore);
-	NewOrder.Quantity = GetBaseProductionQuantity(NewOrder.Grade);
-	// 제조전용 특성 — 개수 가산
-	if (UCGGameInstance* ProdGI = UCGGameInstance::GetInstance())
+	NewOrder.Quantity = Quantity;
+	NewOrder.RemainingQuantity = Quantity;
+
+	FOfficeSaveData& Office = Context.SaveData->GameData.OfficeDataMap.FindOrAdd(BuildingID);
+	Office.ManufacturingDevelopmentPoints = RemainingPoints;
+	ActiveOrders.Add(NewOrder);
+	++NextOrderID;
+	if (!Context.SaveMgr->SaveGameData())
 	{
-		if (UBuildingTraitManagerSubsystem* ProdTraitMgr = ProdGI->GetSubsystem<UBuildingTraitManagerSubsystem>())
-		{
-			NewOrder.Quantity += FMath::RoundToInt(ProdTraitMgr->GetAggregatedTraitPercent(BuildingID, EBuildingTraitTarget::ProductionCount));
-		}
+		ActiveOrders.Pop();
+		--NextOrderID;
+        FOfficeSaveData& Restore = Context.SaveData->GameData.OfficeDataMap.FindChecked(BuildingID);
+        for (int32 Field = 0; Field < PreviousPoints.Num(); ++Field)
+        {
+            Restore.ManufacturingDevelopmentPoints[Field] += PreviousPoints[Field] - RemainingPoints[Field];
+        }
+		return 0;
 	}
-	NewOrder.RemainingQuantity = NewOrder.Quantity;
 
-	int32 OrderIndex = ActiveOrders.Add(NewOrder);
-
+	Context.Development->OnPointsChanged.Broadcast(BuildingID);
 	OnOrderCreated.Broadcast(BuildingID, NewOrder);
-
-	// 제조업 회사면 월드맵 공장 큐에 자동 추가 (자동 배정 활성화 나라는 즉시 라인에 배정됨)
-	if (IsManufacturingType(NewOrder.CompanyType))
+	if (UMissionManagerSubsystem* Missions = Instance->GetSubsystem<UMissionManagerSubsystem>())
 	{
-		if (UWorldMapManager* WorldMapMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UWorldMapManager>() : nullptr)
-		{
-			WorldMapMgr->EnqueueProductionOrder(NewOrder);
-			UE_LOG(LogTemp, Log, TEXT("[ProductionOrderManager] Enqueued to WorldMap: OrderID=%d"), NewOrder.OrderID);
-		}
+		Missions->NotifyReserveManufacturingProduct(NewOrder.Quantity);
 	}
-
-	UE_LOG(LogTemp, Log, TEXT("[ProductionOrderManager] Created Order: ID=%d, Product=%s, Qty=%d, Grade=%s, Building=%d"),
-		NewOrder.OrderID,
-		*NewOrder.ProductName,
-		NewOrder.Quantity,
-		*QualityGradeToAlphabetString(NewOrder.Grade),
-		BuildingID);
-
+	OutFailure = FText::GetEmpty();
 	return NewOrder.OrderID;
 }
 
@@ -232,32 +321,32 @@ FProductionOrder* UProductionOrderManager::GetOrderByID(int32 OrderID)
 
 int32 UProductionOrderManager::GetTotalRemainingQuantityByBuilding(int32 BuildingID) const
 {
-	int32 Total = 0;
+	int64 Total = 0;
 	for (const FProductionOrder& Order : ActiveOrders)
 	{
 		if (Order.SourceBuildingID == BuildingID)
 		{
-			Total += Order.RemainingQuantity;
+			Total += FMath::Max(0, Order.RemainingQuantity);
 		}
 	}
-	return Total;
+	return static_cast<int32>(FMath::Min<int64>(Total, MAX_int32));
 }
 
 int32 UProductionOrderManager::GetTotalRemainingQuantity() const
 {
-	int32 Total = 0;
+	int64 Total = 0;
 	for (const FProductionOrder& Order : ActiveOrders)
 	{
-		Total += Order.RemainingQuantity;
+		Total += FMath::Max(0, Order.RemainingQuantity);
 	}
-	return Total;
+	return static_cast<int32>(FMath::Min<int64>(Total, MAX_int32));
 }
 
 int32 UProductionOrderManager::GetMaxProducible(const FProductionOrder& Order,
-	EResourceType& OutBottleneck, bool& bOutMaterialBound) const
+	EResourceType& OutBottleneck, bool& bOutSupplyBound) const
 {
 	OutBottleneck = EResourceType::None;
-	bOutMaterialBound = false;
+	bOutSupplyBound = false;
 
 	const int32 OrderCap = FMath::Max(0, Order.RemainingQuantity);
 	if (OrderCap <= 0) return 0;
@@ -282,6 +371,20 @@ int32 UProductionOrderManager::GetMaxProducible(const FProductionOrder& Order,
 	TArray<TPair<EResourceType, int32>> Materials;
 	Recipe.CollectMaterials(Materials);
 
+	// 제품 입력(칩) 상한 — 재료와 별개 축이다. 제품이 더 빠듯하면 자원을 병목으로 지목하면 안 된다
+	// ("광석을 캐라"는 틀린 안내가 나간다).
+	int32 ProductCap = MAX_int32;
+	{
+		int32 NeedIndex = 0;
+		int32 NeedQty = 0;
+		if (Recipe.GetProductInput(NeedIndex, NeedQty))
+		{
+			UWorldMapManager* WorldMap = GI->GetSubsystem<UWorldMapManager>();
+			const int64 Have = WorldMap ? WorldMap->GetProductAmount(MakeProductKey(Order.CompanyType, NeedIndex)) : 0;
+			ProductCap = static_cast<int32>(FMath::Min<int64>(Have / NeedQty, MAX_int32));
+		}
+	}
+
 	int32 MaterialCap = MAX_int32;
 	double TightestRatio = TNumericLimits<double>::Max();
 
@@ -302,19 +405,42 @@ int32 UProductionOrderManager::GetMaxProducible(const FProductionOrder& Order,
 		}
 	}
 
-	// 재료 0종 = 무료 주문(의도된 디자인). 주문서 잔여만 상한.
+	// 재료 0종 = 무료 주문(의도된 디자인). 주문서 잔여와 제품 상한만 상한.
 	if (Materials.Num() == 0)
 	{
-		OutBottleneck = EResourceType::None;
-		return OrderCap;
+		return ArbitrateProducibleCap(MAX_int32, ProductCap, OrderCap, OutBottleneck, bOutSupplyBound);
 	}
 
-	bOutMaterialBound = (MaterialCap < OrderCap);
-	if (!bOutMaterialBound)
-	{
-		OutBottleneck = EResourceType::None;
-	}
-	return FMath::Min(MaterialCap, OrderCap);
+	return ArbitrateProducibleCap(MaterialCap, ProductCap, OrderCap, OutBottleneck, bOutSupplyBound);
+}
+
+bool UProductionOrderManager::IsProductInputShort(const FProductionOrder& Order, int32 DesiredQty,
+	int32& OutNeededProjectIndex, int32& OutShortBy) const
+{
+	OutNeededProjectIndex = 0;
+	OutShortBy = 0;
+	if (DesiredQty <= 0) return false;
+
+	UGameInstance* GI = GetGameInstance();
+	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	UWorldMapManager* WorldMap = GI ? GI->GetSubsystem<UWorldMapManager>() : nullptr;
+	if (!TableMgr || !WorldMap) return false;
+
+	bool bRecipeOk = false;
+	const FProductRecipeTable Recipe = TableMgr->GetProductRecipe(Order.CompanyType, Order.ProjectIndex, bRecipeOk);
+	if (!bRecipeOk) return false;
+
+	int32 NeedIndex = 0;
+	int32 NeedQty = 0;
+	if (!Recipe.GetProductInput(NeedIndex, NeedQty)) return false;
+
+	const int64 Required = static_cast<int64>(NeedQty) * static_cast<int64>(DesiredQty);
+	const int64 Have = WorldMap->GetProductAmount(MakeProductKey(Order.CompanyType, NeedIndex));
+	if (Have >= Required) return false;
+
+	OutNeededProjectIndex = NeedIndex;
+	OutShortBy = static_cast<int32>(FMath::Min<int64>(Required - Have, MAX_int32));
+	return true;
 }
 
 // ===== 수량 소비 =====
@@ -405,10 +531,5 @@ void UProductionOrderManager::LoadOrdersFromSave()
 		UE_LOG(LogTemp, Log, TEXT("[ProductionOrderManager] Purged %d stale test-seed orders from save"), PurgedSeeds);
 	}
 
-	const int32 TestSpawned = SpawnTestOrdersFromTable();
-	if (TestSpawned > 0)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[ProductionOrderManager] Auto-spawned %d test orders on load"), TestSpawned);
-	}
 #endif
 }

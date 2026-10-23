@@ -87,7 +87,7 @@ void UTraitDetailPopupWidget::ConfigureForTrait(FName InTraitID, int32 InBuildin
 		}
 		HeaderCard->SetItemID(InTraitID);
 	}
-	// 헤더 카드 배경 = 등급별 Trait 버튼 스타일 (슬롯 EquippedCard 와 동일)
+	// 헤더 카드 배경 = 등급별 Trait 버튼 스타일
 	if (HeaderCard)
 	{
 		if (TSubclassOf<UCommonButtonStyle>* StylePtr = RarityStyleMap.Find(Row.Rarity))
@@ -96,57 +96,25 @@ void UTraitDetailPopupWidget::ConfigureForTrait(FName InTraitID, int32 InBuildin
 		}
 	}
 
-	// 이름 / 등급 / 분야
+	// 이름 / 등급 / 분류·분야
 	if (NameText) NameText->SetText(Row.DisplayName);
-	if (RarityText)
-	{
-		RarityText->SetText(FText::FromString(FLootBoxRarityUtility::GetKoreanName(Row.Rarity)));
-		// 등급 이름을 등급색으로 (런타임 SetColorAndOpacity 는 스타일 UpdateFromStyle 이후라 유지됨)
-		RarityText->SetColorAndOpacity(FSlateColor(FLootBoxRarityUtility::GetRarityColor(Row.Rarity)));
-	}
-	if (CategoryText)
-	{
-		// 이 두 분야의 표시명(제조전용/프로젝트전용)은 제약 그 자체라 전용 칩과 같은 말을 반복한다 → 칩에 맡기고 숨김
-		const bool bCategoryIsRequirement =
-			(Row.Category == EBuildingTraitCategory::Manufacturing || Row.Category == EBuildingTraitCategory::Project);
-		if (bCategoryIsRequirement)
-		{
-			CategoryText->SetVisibility(ESlateVisibility::Collapsed);
-		}
-		else
-		{
-			// 표시명 SOT = BuildingTraitCategory.h (⚠ UMETA 는 에디터 전용 — 패키징 빌드에서 "Revenue"/"Efficiency" 로 떨어진다)
-			CategoryText->SetText(GetBuildingTraitCategoryDisplayName(Row.Category));
-			CategoryText->SetVisibility(ESlateVisibility::HitTestInvisible);
-		}
-	}
-	ApplyRequirementChip(Row.RequiredType);
-
-	// 등급색 주입 — 칩 필 A0.16 / 링 A0.45 / 글로우 A0.5 (런타임 데이터 주입)
 	const FLinearColor RarityColor = FLootBoxRarityUtility::GetRarityColor(Row.Rarity);
-	if (RarityChipBorder)
-	{
-		FSlateBrush ChipBrush = RarityChipBorder->Background;
-		ChipBrush.TintColor = FSlateColor(FLinearColor(RarityColor.R, RarityColor.G, RarityColor.B, 0.16f));
-		ChipBrush.OutlineSettings.Color = FSlateColor(FLinearColor(RarityColor.R, RarityColor.G, RarityColor.B, 0.45f));
-		RarityChipBorder->SetBrush(ChipBrush);
-	}
+	// 런타임 SetColorAndOpacity 는 스타일 UpdateFromStyle 이후라 유지됨
+	RarityText->SetText(FText::FromString(FLootBoxRarityUtility::GetKoreanName(Row.Rarity)));
+	RarityText->SetColorAndOpacity(FSlateColor(RarityColor));
+	ApplyMetaLine(Row.RequiredType);
 	if (HeaderGlow)
 	{
 		HeaderGlow->SetColorAndOpacity(FLinearColor(RarityColor.R, RarityColor.G, RarityColor.B, 0.5f));
 	}
 
-	// 효과 한 줄(카드와 동일 문구) + 상세 설명 문장 (섹션 배경 플레이트째 토글 — 비면 통째로 숨김)
+	// 효과 = 대상 이름 + 수치(카드 캡션과 같은 함수) / 아래 설명 문장(비면 접음)
 	const EBuildingTraitTarget EffectTarget = GetTargetForCategory(Row.Category);
-	if (DescText) DescText->SetText(FormatTraitEffectText(EffectTarget, Row.BaseEffect));
-	{
-		const FText DetailText = GetTraitTargetDetailText(EffectTarget, Row.BaseEffect);
-		const bool bHasDetail = !DetailText.IsEmpty();
-		if (EffectDetailText && bHasDetail) EffectDetailText->SetText(DetailText);
-		const ESlateVisibility DetailVis = bHasDetail ? ESlateVisibility::Visible : ESlateVisibility::Collapsed;
-		if (EffectDetailSection)   EffectDetailSection->SetVisibility(DetailVis);
-		else if (EffectDetailText) EffectDetailText->SetVisibility(DetailVis);
-	}
+	EffectTargetText->SetText(GetTraitTargetDisplayName(EffectTarget));
+	EffectValueText->SetText(FormatTraitEffectValueText(EffectTarget, Row.BaseEffect));
+	const FText DetailText = GetTraitTargetDetailText(EffectTarget, Row.BaseEffect);
+	EffectDetailText->SetText(DetailText);
+	EffectDetailText->SetVisibility(DetailText.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
 
 	// 모드 분기 (인벤토리 = 장착 / 슬롯 = 해제)
 	const bool bEquippedMode = (InEquippedSlotIndex >= 0);
@@ -157,10 +125,15 @@ void UTraitDetailPopupWidget::ConfigureForTrait(FName InTraitID, int32 InBuildin
 	{
 		bCanEquip = TraitMgr->CanEquipTraitToBuilding(InBuildingIndex, InTraitID);
 	}
+	bCurrentCanEquip = bCanEquip;
+	if (TargetSlotHintText)
+	{
+		TargetSlotHintText->SetVisibility(ESlateVisibility::Collapsed);
+	}
 	const bool bShowRestriction = (!bEquippedMode && !bCanEquip);
 	if (RestrictionText)
 	{
-		RestrictionText->SetText(FText::FromString(TEXT("이 건물 업종에는 장착할 수 없는 특성입니다")));
+		RestrictionText->SetText(FText::FromString(TEXT("이 건물 업종에는 장착할 수 없습니다")));
 	}
 	if (RestrictionSection)
 	{
@@ -189,29 +162,47 @@ void UTraitDetailPopupWidget::ConfigureForTrait(FName InTraitID, int32 InBuildin
 	BuildSetBonusPreview(Row, InBuildingIndex);
 }
 
-void UTraitDetailPopupWidget::SetTargetSlotHint(const FText& InHint)
+void UTraitDetailPopupWidget::SetEquipTarget(int32 TargetSlotIndex, bool bSwap, bool bNoUnlockedSlot)
 {
-	if (!TargetSlotHintText) return;
-	TargetSlotHintText->SetText(InHint);
-	TargetSlotHintText->SetVisibility(InHint.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
-}
+	if (!EquipButton || !bCurrentCanEquip) return;
 
-void UTraitDetailPopupWidget::ApplyRequirementChip(EBuildingTraitRequirement InRequirement)
-{
-	FText ChipText;
-	switch (InRequirement)
+	const bool bHasTarget = (TargetSlotIndex != INDEX_NONE);
+	EquipButton->SetIsEnabled(bHasTarget);
+	if (bHasTarget)
 	{
-	case EBuildingTraitRequirement::Manufacturing: ChipText = FText::FromString(TEXT("제조 전용"));   break;
-	case EBuildingTraitRequirement::Project:       ChipText = FText::FromString(TEXT("프로젝트 전용")); break;
-	default:                                       ChipText = FText::FromString(TEXT("공통"));         break;
+		const FText SlotNo = FText::AsNumber(TargetSlotIndex + 1);
+		EquipButton->SetButtonText(bSwap
+			? FText::Format(NSLOCTEXT("TraitDetail", "EquipSwap", "{0}번 슬롯과 교체"), SlotNo)
+			: FText::Format(NSLOCTEXT("TraitDetail", "EquipTo", "{0}번 슬롯에 장착"), SlotNo));
+	}
+	else
+	{
+		EquipButton->SetButtonText(bNoUnlockedSlot
+			? NSLOCTEXT("TraitDetail", "EquipNoUnlocked", "슬롯 해금 필요")
+			: NSLOCTEXT("TraitDetail", "EquipFull", "빈 슬롯 없음"));
 	}
 
-	if (RequirementText) { RequirementText->SetText(ChipText); }
+	if (TargetSlotHintText)
+	{
+		TargetSlotHintText->SetText(bNoUnlockedSlot
+			? NSLOCTEXT("TraitDetail", "HintNoUnlocked", "위의 잠긴 칸을 눌러 슬롯을 먼저 해금하세요.")
+			: NSLOCTEXT("TraitDetail", "HintFull", "장착 칸이 모두 찼습니다. 바꿀 칸을 먼저 누르세요."));
+		TargetSlotHintText->SetVisibility(bHasTarget ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+}
 
-	// 3상태 상시 표시 — 침묵하면 "제약 없음"과 "칩을 못 봤음"이 구분되지 않는다.
-	// 저작본이 Collapsed 를 들고 있어도(구 paste) 런타임에 켜지도록 매번 명시한다.
-	if (RequirementChipBorder)  { RequirementChipBorder->SetVisibility(ESlateVisibility::HitTestInvisible); }
-	else if (RequirementText)   { RequirementText->SetVisibility(ESlateVisibility::HitTestInvisible); }
+void UTraitDetailPopupWidget::ApplyMetaLine(EBuildingTraitRequirement InRequirement)
+{
+	FText ReqText;
+	switch (InRequirement)
+	{
+	case EBuildingTraitRequirement::Manufacturing: ReqText = FText::FromString(TEXT("제조 전용"));   break;
+	case EBuildingTraitRequirement::Project:       ReqText = FText::FromString(TEXT("프로젝트 전용")); break;
+	default:                                       ReqText = FText::FromString(TEXT("공통"));         break;
+	}
+	RequirementText->SetText(ReqText);
+	// 3상태 상시 표시 — 침묵하면 "제약 없음"과 "못 봤음"이 구분되지 않는다
+	RequirementText->SetVisibility(ESlateVisibility::HitTestInvisible);
 }
 
 void UTraitDetailPopupWidget::BuildSetBonusPreview(const FBuildingTraitTableRow& Row, int32 BuildingIndex)
@@ -251,7 +242,7 @@ void UTraitDetailPopupWidget::BuildSetBonusPreview(const FBuildingTraitTableRow&
 	if (SetBonusNameText)
 	{
 		// 구조화 트리: 세트명 + 진행 도트/카운트 + 2·3세트 행(달성=활성색)
-		SetBonusNameText->SetText(CatName);
+		SetBonusNameText->SetText(FText::Format(NSLOCTEXT("TraitDetail", "SetName", "{0} 세트"), CatName));
 		if (SetBonusProgressText)
 		{
 			SetBonusProgressText->SetText(FText::FromString(
@@ -265,9 +256,8 @@ void UTraitDetailPopupWidget::BuildSetBonusPreview(const FBuildingTraitTableRow&
 			if (!LineText) return;
 			if (!bHas) { LineText->SetVisibility(ESlateVisibility::Collapsed); return; }
 			LineText->SetVisibility(ESlateVisibility::HitTestInvisible);
-			LineText->SetText(FText::FromString(
-				FString::Printf(TEXT("%d세트 · %s"), Req,
-					*FormatTraitEffectText(GetTargetForCategory(Bonus.Category), Bonus.BonusValue).ToString())));
+			LineText->SetText(FText::FromString(FString::Printf(TEXT("%d세트 %s"), Req,
+				*FormatTraitEffectText(GetTargetForCategory(Bonus.Category), Bonus.BonusValue).ToString())));
 			LineText->SetColorAndOpacity(FSlateColor(SameCategoryCount >= Req ? ActiveCol : MutedCol));
 		};
 		FillLine(SetBonus2Text, bHas2, 2, Bonus2);

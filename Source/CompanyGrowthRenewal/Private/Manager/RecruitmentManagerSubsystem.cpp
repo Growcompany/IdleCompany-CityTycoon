@@ -3,7 +3,7 @@
 #include "Manager/RecruitmentManagerSubsystem.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "Manager/EmployeeManager.h"
-#include "Entity/Officeworker/StickOfficeworker.h"  // ResolveGachaTier (코스메틱 등급)
+#include "Entity/Officeworker/FunnyOfficeworker.h"  // ResolveGachaTier (코스메틱 등급)
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/SaveLoadManager.h"
 #include "Manager/ResourceItemManager.h"
@@ -22,6 +22,20 @@
 #include "Table/BuildingData.h"
 #include "Table/MissionTable.h"
 #include "Utils/GachaBatchMath.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Data/CloudEconomyData.h"
+#include "Dom/JsonObject.h"
+
+namespace
+{
+	// 서버 카탈로그 reason ― `consumeRules.json`/`spendRules.json` 과 바이트 단위로 같아야 한다(다르면 400)
+	const FName ConsumeReason_RecruitPull(TEXT("recruit.pull"));
+	const FName SpendReason_RecruitAdvanced(TEXT("gacha.recruit.advanced"));
+	const FName SpendReason_RecruitPremium(TEXT("gacha.recruit.premium"));
+
+	// `/wallet/spend` 프리미엄은 meta.count 만큼 마일리지를 준다. 다이아는 단일 전용이라 항상 1
+	const int32 PremiumSpendMileageCount = 1;
+}
 
 void URecruitmentManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -54,12 +68,13 @@ UTableManagerSubsystem* URecruitmentManagerSubsystem::GetTableManager() const
 	return TableManager;
 }
 
-void URecruitmentManagerSubsystem::SaveGameData()
+bool URecruitmentManagerSubsystem::SaveGameData()
 {
 	if (USaveLoadManager* SaveMgr = GetGameInstance()->GetSubsystem<USaveLoadManager>())
 	{
-		SaveMgr->SaveGameData();
+		return SaveMgr->SaveGameData();
 	}
+	return false;
 }
 
 int32 URecruitmentManagerSubsystem::GetTotalPermanentEmployeeCapacity(bool& bOutComplete) const
@@ -108,7 +123,7 @@ int32 URecruitmentManagerSubsystem::GetTotalPermanentEmployeeCapacity(bool& bOut
 	return static_cast<int32>(TotalCapacity);
 }
 
-int32 URecruitmentManagerSubsystem::ReconcilePermanentCapacityTickets(bool bShouldSave)
+int32 URecruitmentManagerSubsystem::ReconcilePermanentCapacityTickets(bool bShouldSave, bool bShowRewardToast)
 {
 	UGameInstance* GameInstance = GetGameInstance();
 	USaveLoadManager* SaveMgr = GameInstance ? GameInstance->GetSubsystem<USaveLoadManager>() : nullptr;
@@ -143,14 +158,17 @@ int32 URecruitmentManagerSubsystem::ReconcilePermanentCapacityTickets(bool bShou
 		SaveGameData();
 	}
 
-	FMissionReward TicketReward;
-	TicketReward.ItemType = EItemType::RecruitTicketNormal;
-	TicketReward.ItemAmount = Decision.GrantCount;
-	const TArray<FMissionReward> Rewards{TicketReward};
-	const FText ToastTitle = NSLOCTEXT("RecruitCapacity", "GrantToast", "일반 채용권 획득");
-	if (UUIManagerSubsystem* UIManager = GameInstance->GetSubsystem<UUIManagerSubsystem>())
+	if (bShowRewardToast)
 	{
-		UIManager->ShowRewardToast(Rewards, ToastTitle, true);
+		FMissionReward TicketReward;
+		TicketReward.ItemType = EItemType::RecruitTicketNormal;
+		TicketReward.ItemAmount = Decision.GrantCount;
+		const TArray<FMissionReward> Rewards{TicketReward};
+		const FText ToastTitle = NSLOCTEXT("RecruitCapacity", "GrantToast", "일반 채용권 획득");
+		if (UUIManagerSubsystem* UIManager = GameInstance->GetSubsystem<UUIManagerSubsystem>())
+		{
+			UIManager->ShowRewardToast(Rewards, ToastTitle, true);
+		}
 	}
 
 	UE_LOG(LogTemp, Log,
@@ -279,6 +297,20 @@ bool URecruitmentManagerSubsystem::ExecuteGachaPull(EGachaTier Tier, int32 Build
 		return false;
 	}
 
+	ApplyLocalPullEffect(Tier, BuildingIndex, OutResult, /*bGrantMileage=*/true, EProductionDiscipline::Count);
+
+	// 세이브는 로컬 효과 뒤 1회
+	if (bShouldSave)
+	{
+		SaveGameData();
+	}
+
+	return true;
+}
+
+void URecruitmentManagerSubsystem::ApplyLocalPullEffect(EGachaTier Tier, int32 BuildingIndex, FGachaResultData& OutResult,
+	bool bGrantMileage, EProductionDiscipline PrimaryDiscipline)
+{
 	// 3. HR 파워 계산
 	int32 HRPower = GetHRPower(BuildingIndex);
 
@@ -286,7 +318,7 @@ bool URecruitmentManagerSubsystem::ExecuteGachaPull(EGachaTier Tier, int32 Build
 	ELootBoxRarity PotentialRarity = RollPotentialRarity(Tier, HRPower);
 
 	// 5. 직원 인스턴스 생성 (+0 인턴)
-	FEmployeeInstance NewEmployee = GenerateGachaEmployee(PotentialRarity, BuildingIndex);
+	FEmployeeInstance NewEmployee = GenerateGachaEmployee(PotentialRarity, BuildingIndex, PrimaryDiscipline);
 
 	// 6. Pity 카운터 업데이트 — Legendary 획득 시에만 리셋 — RECRUITMENT_SYSTEM v2.2 정합
 	bool bWasPity = false;
@@ -310,8 +342,11 @@ bool URecruitmentManagerSubsystem::ExecuteGachaPull(EGachaTier Tier, int32 Build
 		}
 
 		// 7. 마일리지 적립 (프리미엄 전용)
-		GachaData.Mileage.CurrentPoints++;
-		OnMileageChanged.Broadcast(GachaData.Mileage.CurrentPoints);
+		if (bGrantMileage)
+		{
+			GachaData.Mileage.CurrentPoints++;
+			OnMileageChanged.Broadcast(GachaData.Mileage.CurrentPoints);
+		}
 	}
 
 	// 8. 결과 구성
@@ -327,13 +362,10 @@ bool URecruitmentManagerSubsystem::ExecuteGachaPull(EGachaTier Tier, int32 Build
 	{
 		EmpMgr->CaptureEmployeePortrait(
 			FString::FromInt(NewEmployee.EmployeeID),
-			NewEmployee.Appearance,
 			UEmployeeTypeHelper::GetRankFromEnhancementLevel(NewEmployee.EnhancementLevel),
 			NewEmployee.Gender,
-			NewEmployee.Appearance.HairCombinationType,
-			NewEmployee.Appearance.HairRandomSeed,
 			NewEmployee.Department,
-			AStickOfficeworker::ResolveGachaTier(NewEmployee)
+			AFunnyOfficeworker::ResolveGachaTier(NewEmployee)
 		);
 	}
 
@@ -343,14 +375,224 @@ bool URecruitmentManagerSubsystem::ExecuteGachaPull(EGachaTier Tier, int32 Build
 
 	// 9. 델리게이트 브로드캐스트
 	OnGachaPullCompleted.Broadcast(OutResult);
+}
 
-	// 10. 세이브
-	if (bShouldSave)
+// ===== 서버 권위 뽑기 =====
+
+UCloudEconomySubsystem* URecruitmentManagerSubsystem::GetCloudEconomy() const
+{
+	UGameInstance* GI = GetGameInstance();
+	return GI ? GI->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+}
+
+EGachaPullRoute URecruitmentManagerSubsystem::ResolvePullRoute(bool bHasTicket, bool bAllowDiamond)
+{
+	if (bHasTicket)
 	{
+		return EGachaPullRoute::Ticket;
+	}
+	return bAllowDiamond ? EGachaPullRoute::Diamond : EGachaPullRoute::None;
+}
+
+int32 URecruitmentManagerSubsystem::ResolveRollCount(int32 Requested, int32 ServerAmount)
+{
+	return FMath::Clamp(ServerAmount, 0, FMath::Max(0, Requested));
+}
+
+bool URecruitmentManagerSubsystem::ShouldFallbackToDiamond(int32 HttpStatus, FName Code, bool bAllowDiamondFallback)
+{
+	return bAllowDiamondFallback && HttpStatus == 409 && Code == CloudErr::InsufficientItems;
+}
+
+bool URecruitmentManagerSubsystem::ShouldSkipLocalEffect(bool bReplayed)
+{
+	return bReplayed;
+}
+
+bool URecruitmentManagerSubsystem::ShouldGrantLocalMileage(bool bServerAuthoritative)
+{
+	return !bServerAuthoritative;
+}
+
+bool URecruitmentManagerSubsystem::AllowsDiamondFallback(EGachaTier Tier, int32 RequestedCount)
+{
+	return RequestedCount == 1 && !GachaSpendReason(Tier).IsNone();
+}
+
+FName URecruitmentManagerSubsystem::GachaActionKey(EGachaTier Tier)
+{
+	return FName(*FString::Printf(TEXT("gacha.recruit.tier%d"), static_cast<int32>(Tier)));
+}
+
+FName URecruitmentManagerSubsystem::GachaSpendReason(EGachaTier Tier)
+{
+	switch (Tier)
+	{
+	case EGachaTier::Advanced:
+		return SpendReason_RecruitAdvanced;
+	case EGachaTier::Premium:
+		return SpendReason_RecruitPremium;
+	default:
+		// 일반은 채용권 전용 ― 다이아 경로가 없다
+		return NAME_None;
+	}
+}
+
+void URecruitmentManagerSubsystem::RequestGachaPull(EGachaTier Tier, int32 BuildingIndex, int32 RequestedCount,
+	FOnGachaPullDone Done, EProductionDiscipline PrimaryDiscipline, bool bAllowDiamondFallback)
+{
+	if (static_cast<uint8>(PrimaryDiscipline) > static_cast<uint8>(EProductionDiscipline::Count))
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RecruitmentManager] Invalid primary discipline for gacha pull: %d"),
+			static_cast<int32>(PrimaryDiscipline));
+		Done.ExecuteIfBound(false, TArray<FGachaResultData>());
+		return;
+	}
+
+	const int32 Count = FMath::Clamp(RequestedCount, 1, GachaBatchMath::MaxBatchPull);
+	const FName ActionKey = GachaActionKey(Tier);
+
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[RecruitmentManager] 뽑기 실패 - CloudEconomySubsystem 없음. Tier=%d"),
+			static_cast<int32>(Tier));
+		Done.ExecuteIfBound(false, TArray<FGachaResultData>());
+		return;
+	}
+
+	// 중복 클릭 ― 내가 잡은 pending 이 아니므로 풀지 않는다
+	if (!Cloud->BeginPendingAction(ActionKey))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[RecruitmentManager] 뽑기 요청 중복 - 진행 중. Tier=%d"), static_cast<int32>(Tier));
+		Done.ExecuteIfBound(false, TArray<FGachaResultData>());
+		return;
+	}
+
+	// ① 로컬 캐시로 경로만 고른다 ― 차감은 서버가 한다
+	const bool bAllowDiamond = bAllowDiamondFallback && AllowsDiamondFallback(Tier, Count);
+	UItemInventoryManager* ItemMgr = GetGameInstance()->GetSubsystem<UItemInventoryManager>();
+	const bool bHasTicket = ItemMgr && ItemMgr->HasItem(GetTicketTypeForTier(Tier), Count);
+
+	switch (ResolvePullRoute(bHasTicket, bAllowDiamond))
+	{
+	case EGachaPullRoute::Ticket:
+		SendConsumeThenRoll(Tier, BuildingIndex, Count, ActionKey, bAllowDiamond, Done, PrimaryDiscipline);
+		break;
+	case EGachaPullRoute::Diamond:
+		SendSpendThenRoll(Tier, BuildingIndex, ActionKey, Done, PrimaryDiscipline);
+		break;
+	default:
+		UE_LOG(LogTemp, Log, TEXT("[RecruitmentManager] 뽑기 요청 미전송 - 티켓·다이아 모두 불가. Tier=%d Count=%d"),
+			static_cast<int32>(Tier), Count);
+		FinishServerPull(Tier, BuildingIndex, /*bOk=*/false, /*Rolls=*/0, /*bReplayed=*/false, ActionKey, Done, PrimaryDiscipline);
+		break;
+	}
+}
+
+void URecruitmentManagerSubsystem::SendConsumeThenRoll(EGachaTier Tier, int32 BuildingIndex, int32 RequestedCount,
+	FName ActionKey, bool bAllowDiamond, FOnGachaPullDone Done, EProductionDiscipline PrimaryDiscipline)
+{
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		FinishServerPull(Tier, BuildingIndex, /*bOk=*/false, /*Rolls=*/0, /*bReplayed=*/false, ActionKey, Done, PrimaryDiscipline);
+		return;
+	}
+
+	const FName ItemName = FCloudEconomyData::ItemTypeToName(GetTicketTypeForTier(Tier));
+
+	// 응답 전에 서브시스템이 내려가면 CreateLambda 는 죽은 this 를 만진다
+	Cloud->RequestConsume(ConsumeReason_RecruitPull, ItemName, RequestedCount,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, Tier, BuildingIndex, RequestedCount, ActionKey, bAllowDiamond, Done, PrimaryDiscipline](const FCloudOpResult& OpResult)
+	{
+		if (!OpResult.bOk)
+		{
+			// 409 만 폴백한다 ― 타임아웃에서 폴백하면 티켓과 다이아를 둘 다 낸다(새 opId 라 멱등이 못 막는다)
+			if (ShouldFallbackToDiamond(OpResult.HttpStatus, OpResult.Code, bAllowDiamond))
+			{
+				// pending 을 이어받는다 ― 풀고 다시 잡으면 그 틈에 두 번째 클릭이 들어온다
+				SendSpendThenRoll(Tier, BuildingIndex, ActionKey, Done, PrimaryDiscipline);
+				return;
+			}
+			FinishServerPull(Tier, BuildingIndex, /*bOk=*/false, /*Rolls=*/0, OpResult.bReplayed, ActionKey, Done, PrimaryDiscipline);
+			return;
+		}
+
+		// 요청값이 아니라 서버가 인정한 수량만큼 돌린다
+		int32 ServerAmount = 0;
+		if (OpResult.Result.IsValid())
+		{
+			OpResult.Result->TryGetNumberField(TEXT("amount"), ServerAmount);
+		}
+
+		FinishServerPull(Tier, BuildingIndex, /*bOk=*/true, ResolveRollCount(RequestedCount, ServerAmount),
+			OpResult.bReplayed, ActionKey, Done, PrimaryDiscipline);
+	}));
+}
+
+void URecruitmentManagerSubsystem::SendSpendThenRoll(EGachaTier Tier, int32 BuildingIndex, FName ActionKey,
+	FOnGachaPullDone Done, EProductionDiscipline PrimaryDiscipline)
+{
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	const FName Reason = GachaSpendReason(Tier);
+	const int32 Cost = GetDiamondCost(Tier);
+	if (!Cloud || Reason.IsNone() || Cost <= 0)
+	{
+		FinishServerPull(Tier, BuildingIndex, /*bOk=*/false, /*Rolls=*/0, /*bReplayed=*/false, ActionKey, Done, PrimaryDiscipline);
+		return;
+	}
+
+	// 프리미엄만 부수효과가 있다 ― meta.count 가 없으면 서버가 400 을 준다
+	FCloudMeta Meta;
+	if (Reason == SpendReason_RecruitPremium)
+	{
+		Meta.Add(TEXT("count"), FCloudMetaValue::FromInt(PremiumSpendMileageCount));
+	}
+
+	Cloud->RequestSpend(CloudCurrency::Diamond, Cost, Reason, Meta,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, Tier, BuildingIndex, ActionKey, Done, PrimaryDiscipline](const FCloudOpResult& OpResult)
+	{
+		if (!OpResult.bOk)
+		{
+			FinishServerPull(Tier, BuildingIndex, /*bOk=*/false, /*Rolls=*/0, OpResult.bReplayed, ActionKey, Done, PrimaryDiscipline);
+			return;
+		}
+
+		// 다이아 경로는 단일 뽑기 전용이다(배치는 bAllowDiamondFallback=false)
+		FinishServerPull(Tier, BuildingIndex, /*bOk=*/true, /*Rolls=*/1, OpResult.bReplayed, ActionKey, Done, PrimaryDiscipline);
+	}));
+}
+
+void URecruitmentManagerSubsystem::FinishServerPull(EGachaTier Tier, int32 BuildingIndex, bool bOk, int32 Rolls,
+	bool bReplayed, FName ActionKey, FOnGachaPullDone Done, EProductionDiscipline PrimaryDiscipline)
+{
+	TArray<FGachaResultData> Results;
+
+	if (bOk && !ShouldSkipLocalEffect(bReplayed) && Rolls > 0)
+	{
+		// 마일리지는 서버가 적립하고 이 콜백 전에 지갑이 적용됐다 ― 로컬이 또 올리면 이중 계상이다
+		const bool bGrantMileage = ShouldGrantLocalMileage(/*bServerAuthoritative=*/true);
+
+		Results.Reserve(Rolls);
+		for (int32 i = 0; i < Rolls; ++i)
+		{
+			FGachaResultData Rolled;
+			ApplyLocalPullEffect(Tier, BuildingIndex, Rolled, bGrantMileage, PrimaryDiscipline);
+			Results.Add(Rolled);
+		}
+
 		SaveGameData();
 	}
 
-	return true;
+	if (UCloudEconomySubsystem* Cloud = GetCloudEconomy())
+	{
+		Cloud->EndPendingAction(ActionKey);
+	}
+
+	Done.ExecuteIfBound(bOk, Results);
 }
 
 int32 URecruitmentManagerSubsystem::GetFreeCapacity(int32 BuildingIndex) const
@@ -402,6 +644,12 @@ bool URecruitmentManagerSubsystem::ExecuteGachaPullBatch(EGachaTier Tier, int32 
 bool URecruitmentManagerSubsystem::ConfirmGachaHire(const FGachaResultData& ResultData, AWorkstationActorBase* PreferredWorkstation,
 	bool bShouldSave)
 {
+	return ConfirmGachaHireInternal(ResultData, PreferredWorkstation, bShouldSave, false);
+}
+
+bool URecruitmentManagerSubsystem::ConfirmGachaHireInternal(const FGachaResultData& ResultData,
+	AWorkstationActorBase* PreferredWorkstation, bool bShouldSave, bool bBatchHire)
+{
 	UEmployeeManager* EmpManager = GetEmployeeManager();
 	if (!EmpManager)
 	{
@@ -413,7 +661,7 @@ bool URecruitmentManagerSubsystem::ConfirmGachaHire(const FGachaResultData& Resu
 
 	// pull-to-pool: 좌석을 점유하지 않고 건물 미배치 풀에 적립.
 	// (좌석 배정은 책상 패널(WorkstationInfoWidget)에서 별도로 수행 → 좌석수 카운터도 거기서 관리)
-	if (!EmpManager->HireEmployeeFromCard(ResultData.ResultEmployee, BuildingIndex, bShouldSave))
+	if (!EmpManager->HireEmployeeFromCardInternal(ResultData.ResultEmployee, BuildingIndex, bShouldSave, bBatchHire))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[RecruitmentManager] ConfirmGachaHire failed - HireEmployeeFromCard returned false"));
 		return false;
@@ -448,18 +696,61 @@ bool URecruitmentManagerSubsystem::ConfirmGachaHire(const FGachaResultData& Resu
 }
 
 bool URecruitmentManagerSubsystem::ConfirmGachaHireBatch(const TArray<FGachaResultData>& Results,
-	AWorkstationActorBase* PreferredWorkstation, int32& OutSeatedCount, int32& OutBenchedCount)
+	AWorkstationActorBase* PreferredWorkstation, int32& OutSeatedCount, int32& OutBenchedCount,
+	bool bAllowPortraitCaptureInProgress)
 {
 	OutSeatedCount = 0;
 	OutBenchedCount = 0;
 
 	UEmployeeManager* EmpMgr = GetEmployeeManager();
+	if (!EmpMgr || Results.IsEmpty())
+	{
+		return false;
+	}
+
+	// 사진 큐는 ID와 외형값을 복사해 보관한다. 오피스는 사진 완료보다 채용 저장을 우선한다.
+	if (!bAllowPortraitCaptureInProgress && EmpMgr->IsPortraitCapturing())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[RecruitmentManager] Batch hire blocked: portrait capture in progress"));
+		return false;
+	}
+
+	TMap<int32, int32> RequestedByBuilding;
+	TSet<int32> EmployeeIDs;
+	for (const FGachaResultData& Result : Results)
+	{
+		const int32 EmployeeID = Result.ResultEmployee.EmployeeID;
+		if (EmployeeIDs.Contains(EmployeeID) || EmpMgr->GetEmployeeData(EmployeeID))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RecruitmentManager] Batch hire blocked: duplicate employee ID %d"), EmployeeID);
+			return false;
+		}
+		EmployeeIDs.Add(EmployeeID);
+		++RequestedByBuilding.FindOrAdd(Result.TargetBuildingIndex);
+	}
+	for (const TPair<int32, int32>& Request : RequestedByBuilding)
+	{
+		const int32 CurrentCount = EmpMgr->GetEmployeeCountInBuilding(Request.Key);
+		const int32 Capacity = EmpMgr->GetBuildingEmployeeCapacity(Request.Key);
+		if (Capacity <= 0 || Request.Value > Capacity - CurrentCount)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[RecruitmentManager] Batch hire blocked: building %d capacity %d/%d, requested %d"),
+				Request.Key, CurrentCount, Capacity, Request.Value);
+			if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
+			{
+				UIMgr->ShowNotification(UEmployeeManager::GetCapacityFullMessage(), 3.0f, ENotificationType::Failed);
+			}
+			return false;
+		}
+	}
+
 	bool bAll = true;
 
 	for (int32 i = 0; i < Results.Num(); ++i)
 	{
 		// 뽑기 순서 = 사번 순서 (카드 ID NO 표시와 일치해야 함)
-		if (!ConfirmGachaHire(Results[i], i == 0 ? PreferredWorkstation : nullptr, /*bShouldSave=*/false))
+		if (!ConfirmGachaHireInternal(Results[i], i == 0 ? PreferredWorkstation : nullptr,
+			/*bShouldSave=*/false, /*bBatchHire=*/true))
 		{
 			bAll = false;
 			continue;
@@ -478,9 +769,11 @@ bool URecruitmentManagerSubsystem::ConfirmGachaHireBatch(const TArray<FGachaResu
 
 	if (OutSeatedCount + OutBenchedCount > 0)
 	{
-		SaveGameData();
+		// 저장 실패에도 이미 바뀐 메모리 로스터는 즉시 갱신한다.
+		EmpMgr->OnEmployeeRosterChanged.Broadcast();
+		return SaveGameData() && bAll;
 	}
-	return bAll;
+	return false;
 }
 
 int32 URecruitmentManagerSubsystem::GetTotalHiredCount(int32 BuildingIndex) const
@@ -656,12 +949,11 @@ TArray<TPair<ELootBoxRarity, float>> URecruitmentManagerSubsystem::GetProbabilit
 	}
 	case EGachaTier::Premium:
 	{
-		// 프리미엄 뽑기 (천장=Legendary, Mythic 불가 → 큐브 전용)
-		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Common,    0.25f));
-		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Unusual,   0.40f));
-		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Rare,      0.22f));
-		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Epic,      0.12f));
-		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Legendary, 0.01f));
+		// 프리미엄 뽑기 (천장=Legendary, Common 없음, Mythic 불가 → 큐브 전용, RECRUITMENT_SYSTEM.md 표 일치)
+		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Unusual,   0.15f));
+		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Rare,      0.40f));
+		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Epic,      0.30f));
+		Table.Add(TPair<ELootBoxRarity, float>(ELootBoxRarity::Legendary, 0.15f));
 		break;
 	}
 	}
@@ -787,26 +1079,37 @@ void URecruitmentManagerSubsystem::SeedForcedPrimaryDisciplines(const TArray<EPr
 	ForcedPrimaryQueue = InDisciplines;
 }
 
-FEmployeeInstance URecruitmentManagerSubsystem::GenerateGachaEmployee(ELootBoxRarity PotentialRarity, int32 BuildingIndex)
+FEmployeeInstance URecruitmentManagerSubsystem::GenerateGachaEmployee(ELootBoxRarity PotentialRarity, int32 BuildingIndex,
+	EProductionDiscipline PrimaryDiscipline)
 {
 	FEmployeeInstance NewEmployee;
 
 	UEmployeeManager* EmpManager = GetEmployeeManager();
+	const int32 DisciplineCount = EmpManager
+		? GetDisciplineCountForCompany(EmpManager->GetCompanyTypeForBuilding(BuildingIndex))
+		: static_cast<int32>(EProductionDiscipline::Count);
 
 	// 고유 ID 생성
 	NewEmployee.EmployeeID = EmpManager ? EmpManager->AllocateNextInstanceID() : FMath::RandRange(10000, 99999);
 
-	// 생산 직능 프로필 롤 — 주 직능 랜덤(6) + 등급비례 총량, 부서는 argmax 파생.
-	EProductionDiscipline PrimaryDisc =
-		static_cast<EProductionDiscipline>(FMath::RandRange(0, static_cast<int32>(EProductionDiscipline::Count) - 1));
-	if (ForcedPrimaryQueue.Num() > 0)
+	// 생산 직능 프로필 롤 — 산업별 3/6 활성 분야 안에서 선택한다.
+	EProductionDiscipline PrimaryDisc = PrimaryDiscipline;
+	if (PrimaryDisc == EProductionDiscipline::Count && ForcedPrimaryQueue.Num() > 0)
 	{
 		PrimaryDisc = ForcedPrimaryQueue[0];
 		ForcedPrimaryQueue.RemoveAt(0);
 	}
-	NewEmployee.DisciplinePoints = MakeDisciplineProfile(PrimaryDisc, PotentialRarity);
+	else if (PrimaryDisc == EProductionDiscipline::Count)
+	{
+		PrimaryDisc = static_cast<EProductionDiscipline>(
+			FMath::RandRange(0, DisciplineCount - 1));
+	}
+	else if (static_cast<int32>(PrimaryDisc) >= DisciplineCount)
+	{
+		PrimaryDisc = static_cast<EProductionDiscipline>(static_cast<int32>(PrimaryDisc) % DisciplineCount);
+	}
+	NewEmployee.DisciplinePoints = MakeDisciplineProfile(PrimaryDisc, PotentialRarity, DisciplineCount);
 	SyncDerivedDepartment(NewEmployee);
-	NewEmployee.InvestedDisciplinePoints.Init(0, static_cast<int32>(EProductionDiscipline::Count));
 
 	// 성별 랜덤
 	NewEmployee.Gender = FMath::RandBool() ? EEmployeeGender::Male : EEmployeeGender::Female;
@@ -814,7 +1117,6 @@ FEmployeeInstance URecruitmentManagerSubsystem::GenerateGachaEmployee(ELootBoxRa
 	// +0 인턴 (가챠 직원은 항상 +0에서 시작)
 	NewEmployee.EnhancementLevel = 0;
 	NewEmployee.Level = 1;
-	NewEmployee.Experience = 0.f;
 
 	// 고용일 설정
 	NewEmployee.HiredDate = FDateTime::Now();
@@ -838,13 +1140,9 @@ FEmployeeInstance URecruitmentManagerSubsystem::GenerateGachaEmployee(ELootBoxRa
 		}
 	}
 
-	// 이름 및 외모 생성
+	// 이름 생성
 	if (EmpManager)
 	{
-		EEmployeeRank Rank = UEmployeeTypeHelper::GetRankFromEnhancementLevel(0);
-		NewEmployee.Appearance = EmpManager->GenerateRandomAppearance(Rank, NewEmployee.Gender);
-		// HairRandomSeed: GenerateRandomAppearance 가 0 으로 두므로 직접 랜덤화 (정규 채용 HireEmployee 와 동일)
-		NewEmployee.Appearance.HairRandomSeed = FMath::Rand();
 		NewEmployee.EmployeeName = EmpManager->GenerateRandomName(NewEmployee.SpawnRarity);
 	}
 	else

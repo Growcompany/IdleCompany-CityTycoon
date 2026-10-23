@@ -2,6 +2,7 @@
 
 #include "UI/Element/Trade/CountrySellRowWidget.h"
 #include "Manager/CountryMarketManager.h"
+#include "Manager/SaveLoadManager.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/TradePort.h"
 #include "Table/CountryInfoTable.h"
@@ -112,11 +113,17 @@ void UCountrySellRowWidget::SetData(ECountryType InCountry, ECompanyType InIndus
 		int32 Count = 0;
 		if (MarketMgr)
 		{
+			// 미가용 업종(이번 출시 범위 밖) 셀은 평균에서 뺀다 ― 열리지 않는 업종의 수요까지 섞으면
+			// 11국 비교가 틀어진다. 매니저를 못 찾으면 전부 더한다(평균이 사라지는 쪽이 더 나쁘다).
+			UGameInstance* GI = GetGameInstance();
+			USaveLoadManager* SaveMgr = GI ? GI->GetSubsystem<USaveLoadManager>() : nullptr;
+
 			const TArray<FCountryMarketState> AllStates = MarketMgr->GetAllStates();
 			for (const FCountryMarketState& S : AllStates)
 			{
 				if (S.Country == Country)
 				{
+					if (SaveMgr && !SaveMgr->IsIndustryAvailable(S.Industry)) continue;
 					TotalRatio += S.GetRatio();
 					++Count;
 				}

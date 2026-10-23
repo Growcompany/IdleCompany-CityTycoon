@@ -46,6 +46,10 @@ struct FProjectReportData
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Report")
 	EQualityGrade QualityGrade = EQualityGrade::C;
 
+	// 출시 때 확정한 품질 수익 배율
+	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Report")
+	float QualityRevenueMultiplier = 1.0f;
+
 	// 직능별 결산 표시 — 활성 직능 순서(출시 제외). 병렬 배열, [i]=i번째 활성 직능.
 	// 표시명은 담지 않는다 — 라벨 SOT 는 DT_DisciplineDisplay(GetDisciplineDisplayName) 하나뿐이다.
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Report")
@@ -60,7 +64,7 @@ struct FProjectReportData
 
 	// 총 수익
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Report")
-	float TotalRevenueEarned = 0.0f;
+	double TotalRevenueEarned = 0.0;
 
 	// 총 운영 시간
 	UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Report")
@@ -79,7 +83,8 @@ struct FProjectReportData
 		, BuildingID(0)
 		, QualityScore(1.0f)
 		, QualityGrade(EQualityGrade::C)
-		, TotalRevenueEarned(0.0f)
+		, QualityRevenueMultiplier(1.0f)
+		, TotalRevenueEarned(0.0)
 		, TotalOperationTime(0.0f)
 		, MarketCapGained(0)
 	{

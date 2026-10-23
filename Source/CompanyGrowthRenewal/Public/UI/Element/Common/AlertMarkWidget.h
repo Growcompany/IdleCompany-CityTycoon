@@ -50,6 +50,13 @@ protected:
 	TObjectPtr<UTexture2D> Tex_LargeGreen = nullptr;
 
 	virtual void NativePreConstruct() override;
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+
+	// 등장 팝. 소비처(InGameLayer/MenuPanel)가 5초 주기 재평가로 Show 를 반복 호출하므로
+	// 숨김->보임 전이에서만 재생한다 — 안 그러면 도트가 상시 깜빡인다.
+	static constexpr float PopStartScale = 0.70f;
+	static constexpr float PopDuration = 0.18f;
+	float PopElapsed = -1.f;
 
 public:
 	UFUNCTION(BlueprintCallable, Category = "AlertMark")

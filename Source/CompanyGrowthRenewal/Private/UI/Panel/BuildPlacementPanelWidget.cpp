@@ -15,6 +15,8 @@
 #include "Player/OfficeCameraPawn.h"
 #include "Player/Components/PlacementHandler.h"
 #include "Entity/Building/BuildingBaseActor.h"
+#include "Entity/Factory/BrickFactory.h"
+#include "UI/Panel/FactoryPanelWidget.h"
 #include "UI/Panel/BuildingManagePanelWidget.h"
 #include "Components/Button.h"
 #include "Table/ConstructionCost.h"
@@ -28,6 +30,10 @@
 #include "Enum/WidgetType.h"
 #include "Enum/ResourceType.h"
 #include "Blueprint/UserWidget.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
+#include "Engine/Texture2D.h"
 
 void UBuildPlacementPanelWidget::NativeConstruct()
 {
@@ -35,7 +41,7 @@ void UBuildPlacementPanelWidget::NativeConstruct()
 
 	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr)
 	{
-		MissionMgr->RegisterBuildPlacementPanel(this);
+		if (!bIsOfficeEditMode) MissionMgr->RegisterBuildPlacementPanel(this);
 	}
 
 	UCGGameInstance* GameInstance = Cast<UCGGameInstance>(GetGameInstance());
@@ -74,9 +80,15 @@ void UBuildPlacementPanelWidget::NativeConstruct()
 	}
 
 	// 건물 배치 시작 시 카메라 줌인 (기존 FocusOnBuildingForPlacement 재사용)
-	if (Player && Player->PlacementHandler)
+	if (!bIsOfficeEditMode && Player && Player->PlacementHandler)
 	{
 		Player->PlacementHandler->BeginPlacementZoom();
+	}
+	if (bIsOfficeEditMode)
+	{
+		BuildOfficeRemoveButton();
+		if (RemoveButton) RemoveButton->OnClicked.AddDynamic(this, &ThisClass::OnRemoveButtonClicked);
+		RefreshOfficeEditSelection();
 	}
 }
 
@@ -89,7 +101,7 @@ void UBuildPlacementPanelWidget::NativeDestruct()
 {
 	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr)
 	{
-		MissionMgr->UnregisterBuildPlacementPanel(this);
+		if (!bIsOfficeEditMode) MissionMgr->UnregisterBuildPlacementPanel(this);
 	}
 
 	Super::NativeDestruct();
@@ -105,6 +117,7 @@ void UBuildPlacementPanelWidget::NativeDestruct()
 	{
 		CancelButton->OnClicked.RemoveAll(this);
 	}
+	if (RemoveButton) RemoveButton->OnClicked.RemoveAll(this);
 	if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
 		UIMgr->OnUIResourceChanged.Remove(ResourceChangedHandle);
@@ -118,6 +131,13 @@ UWidget* UBuildPlacementPanelWidget::GetPlaceButtonWidget() const
 
 void UBuildPlacementPanelWidget::OnPlaceButtonClicked()
 {
+	if (bIsOfficeEditMode)
+	{
+		if (AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(Player))
+			if (!OfficePawn->ConfirmOfficeEditSelection())
+				OnOfficePlacementFeedback.Broadcast(FText::FromString(TEXT("배치할 수 없는 위치입니다. 위치를 옮겨주세요.")));
+		return;
+	}
 	if (!Player)
 	{
 		return;
@@ -216,7 +236,7 @@ void UBuildPlacementPanelWidget::OnPlaceButtonClicked()
 					bool bNameOk = false;
 					const FResourceInfo ResInfo = TableMgr ? TableMgr->GetResourceInfo(MissingType, bNameOk) : FResourceInfo();
 					const FText Msg = FText::Format(
-						NSLOCTEXT("Notification", "BuildNotEnoughResource", "{0}이(가) 부족합니다"), ResInfo.DisplayName);
+						NSLOCTEXT("Notification", "BuildNotEnoughResource", "{0}|hpp(이,가) 부족합니다"), ResInfo.DisplayName);
 					UIMgr->ShowNotification(Msg, 3.0f, ENotificationType::Warning);
 				}
 				return;
@@ -258,6 +278,11 @@ void UBuildPlacementPanelWidget::OnPlaceButtonClicked()
 
 void UBuildPlacementPanelWidget::OnRotateButtonClicked()
 {
+	if (bIsOfficeEditMode)
+	{
+		if (AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(Player)) OfficePawn->RotateOfficeEditSelection();
+		return;
+	}
 	if (Player)
 	{
 		Player->PlacementHandler->RotatePlacementEntity();
@@ -266,6 +291,11 @@ void UBuildPlacementPanelWidget::OnRotateButtonClicked()
 
 void UBuildPlacementPanelWidget::OnCancelButtonClicked()
 {
+	if (bIsOfficeEditMode)
+	{
+		if (AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(Player)) OfficePawn->CancelOfficeEditSelection();
+		return;
+	}
 	if (!Player)
 	{
 		DeactivateWidget();
@@ -278,8 +308,31 @@ void UBuildPlacementPanelWidget::OnCancelButtonClicked()
 		// CancelBuildingMove 가 PlacementTargetEntity 를 null 로 리셋하므로, 대상 건물을 먼저 확보한 뒤 취소한다.
 		AInteractableBaseActor* TargetEntity = Player->PlacementHandler->GetPlacementTargetEntity();
 		ABuildingBaseActor* ExistingBuilding = Cast<ABuildingBaseActor>(TargetEntity);
+		ABrickFactory* ExistingFactory = Cast<ABrickFactory>(TargetEntity);
 
 		Player->PlacementHandler->CancelBuildingMove();
+		Player->EndBuildingRelocation();
+		DeactivateWidget();
+		if (ExistingFactory)
+		{
+			UGameInstance* FactoryGameInstance = GetGameInstance();
+			UUIManagerSubsystem* FactoryUIManager = FactoryGameInstance
+				? FactoryGameInstance->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+			UTableManagerSubsystem* FactoryTableManager = FactoryGameInstance
+				? FactoryGameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+			UUIBase* FactoryUIBase = FactoryUIManager ? FactoryUIManager->GetUIBase() : nullptr;
+			TSubclassOf<UUserWidget> FactoryPanelClass = FactoryTableManager
+				? FactoryTableManager->GetWidgetClass(EWidgetType::FactoryPanel) : nullptr;
+			if (FactoryUIBase && FactoryPanelClass)
+			{
+				if (UFactoryPanelWidget* FactoryPanel = Cast<UFactoryPanelWidget>(
+					FactoryUIBase->PushBottomClass(FactoryPanelClass.Get())))
+				{
+					FactoryPanel->SetFactory(ExistingFactory);
+				}
+			}
+			return;
+		}
 
 		UGameInstance* GameInstance = GetGameInstance();
 		if (GameInstance)
@@ -295,14 +348,11 @@ void UBuildPlacementPanelWidget::OnCancelButtonClicked()
 					UUIBase* UIBase = UIManager->GetUIBase();
 					if (UIBase)
 					{
-						DeactivateWidget();
-
 						UCommonActivatableWidget* PushedWidget = UIBase->PushBottomClass(ManagePanelClass.Get());
 						UBuildingManagePanelWidget* ManagePanel = Cast<UBuildingManagePanelWidget>(PushedWidget);
 						if (ManagePanel && ExistingBuilding)
 						{
 							ManagePanel->SetTargetBuilding(ExistingBuilding);
-							Player->EndBuildingRelocation();
 
 							AMainMapPlayerController* MainPC = Cast<AMainMapPlayerController>(Player->GetController());
 							if (MainPC)
@@ -352,7 +402,7 @@ void UBuildPlacementPanelWidget::OnCancelButtonClicked()
 				TSubclassOf<UUserWidget> BuildPanelClass = TableMgr->GetWidgetClass(EWidgetType::BuildPanel);
 				if (BuildPanelClass)
 				{
-					UIMgr->GetUIBase()->PushBottomClass(BuildPanelClass.Get());
+					if (!UIMgr->GetUIBase()->PushBottomClass(BuildPanelClass.Get())) return;
 
 					AMainMapPlayerController* MainPC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController());
 					if (MainPC)
@@ -440,6 +490,7 @@ void UBuildPlacementPanelWidget::SpendDecorationCost() const
 
 bool UBuildPlacementPanelWidget::CanAffordCurrent() const
 {
+	if (bIsOfficeEditMode) return true;
 	if (bIsWorkstationMode)
 	{
 		return true;
@@ -479,7 +530,7 @@ bool UBuildPlacementPanelWidget::TryAffordCurrent() const
 	bool bNameOk = false;
 	const FResourceInfo ResInfo = TableMgr ? TableMgr->GetResourceInfo(MissingType, bNameOk) : FResourceInfo();
 	const FText Msg = FText::Format(
-		NSLOCTEXT("Notification", "BuildNotEnoughResource", "{0}이(가) 부족합니다"), ResInfo.DisplayName);
+		NSLOCTEXT("Notification", "BuildNotEnoughResource", "{0}|hpp(이,가) 부족합니다"), ResInfo.DisplayName);
 	UIMgr->ShowNotification(Msg, 3.0f, ENotificationType::Warning);
 
 	return false;
@@ -500,4 +551,57 @@ void UBuildPlacementPanelWidget::CloseOfficePlacementUI()
 	// CommonUI 는 표시 중인 위젯의 제거를 전환 완료 후로 미루므로, 연속 pop 은 같은 위젯을 두 번 겨냥하고
 	// 두 번째는 아무 일도 하지 않는다(RemoveWidget 의 IsActivated() 분기).
 	DeactivateWidget();
+}
+
+void UBuildPlacementPanelWidget::SetOfficeEditMode(AOfficeCameraPawn* OfficePawn)
+{
+	bIsOfficeEditMode = true;
+	Player = OfficePawn;
+}
+
+void UBuildPlacementPanelWidget::BuildOfficeRemoveButton()
+{
+	if (RemoveButton || !CancelButton || !RemoveIcon || !WidgetTree) return;
+	UHorizontalBox* ActionRow = Cast<UHorizontalBox>(CancelButton->GetParent());
+	if (!ActionRow) return;
+	RemoveButton = WidgetTree->ConstructWidget<UButton>(UButton::StaticClass(), TEXT("OfficeRemoveButton"));
+	FButtonStyle RemoveStyle = CancelButton->GetStyle();
+	RemoveStyle.Normal.SetResourceObject(RemoveIcon);
+	RemoveStyle.Hovered.SetResourceObject(RemoveIcon);
+	RemoveStyle.Pressed.SetResourceObject(RemoveIcon);
+	RemoveStyle.Disabled.SetResourceObject(RemoveIcon);
+	auto Shade = [this](float Scale, float Alpha)
+	{
+		return FSlateColor(FLinearColor(RemoveIconTint.R * Scale, RemoveIconTint.G * Scale, RemoveIconTint.B * Scale, Alpha));
+	};
+	RemoveStyle.Normal.TintColor = Shade(1.0f, 1.0f);
+	RemoveStyle.Hovered.TintColor = Shade(1.18f, 1.0f);
+	RemoveStyle.Pressed.TintColor = Shade(0.82f, 1.0f);
+	RemoveStyle.Disabled.TintColor = Shade(0.55f, 0.55f);
+	RemoveButton->SetStyle(RemoveStyle);
+	RemoveButton->SetToolTipText(FText::FromString(TEXT("장식 제거")));
+	UHorizontalBoxSlot* RemoveSlot = ActionRow->AddChildToHorizontalBox(RemoveButton);
+	if (const UHorizontalBoxSlot* CancelSlot = Cast<UHorizontalBoxSlot>(CancelButton->Slot))
+	{
+		RemoveSlot->SetPadding(CancelSlot->GetPadding());
+		RemoveSlot->SetSize(CancelSlot->GetSize());
+		RemoveSlot->SetHorizontalAlignment(CancelSlot->GetHorizontalAlignment());
+		RemoveSlot->SetVerticalAlignment(CancelSlot->GetVerticalAlignment());
+	}
+}
+
+void UBuildPlacementPanelWidget::RefreshOfficeEditSelection()
+{
+	if (const AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(Player))
+	{
+		if (RemoveButton) RemoveButton->SetVisibility(OfficePawn->CanRemoveOfficeEditSelection()
+			? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+	}
+}
+
+void UBuildPlacementPanelWidget::OnRemoveButtonClicked()
+{
+	if (AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(Player))
+		if (!OfficePawn->RemoveOfficeEditSelection())
+			OnOfficePlacementFeedback.Broadcast(FText::FromString(TEXT("선택한 장식을 제거할 수 없습니다.")));
 }

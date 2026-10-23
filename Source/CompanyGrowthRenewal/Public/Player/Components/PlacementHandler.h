@@ -27,6 +27,7 @@ class AOfficeInterior;
 class UStaticMeshComponent;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class UProceduralMeshComponent;
 
 
 struct FInputActionValue;
@@ -42,7 +43,7 @@ enum class EPlacementMode : uint8
 };
 
 // 접촉 자석의 후보 대상 — 월드 축정렬 점유 사각형.
-// MainMap 은 DT 격자 칸수로, 오피스는 액터 실측 bounds 로 채운다(둘 다 월드 축정렬이라 규약이 같다).
+// 도시는 논리 칸수의 공통 footprint로, 오피스는 액터 실측 bounds로 채운다.
 struct FNeighborFootprint
 {
 	FVector2D Center = FVector2D::ZeroVector;
@@ -103,7 +104,7 @@ private:
 	// (Z/스케일은 절대 건드리지 않는다 — 호출자가 X/Y 만 사용.)
 	bool ComputePlotPlacement(const FVector& InWorldPos, FVector& OutSnappedPos, bool& bOutValidCell, FName& OutResolvedPlotId) const;
 
-	// 신규 프리뷰 생성 직후 1회만 실행하는 bounded 탐색. 화면 중앙에 가까운 소유 부지부터 검사하고,
+	// 신규 프리뷰 생성 직후 1회만 실행하는 bounded 탐색. 카메라 초점 XY에 가까운 소유 부지부터 검사하고,
 	// 각 부지 안의 제한된 footprint-aware 후보를 ComputePlotPlacement 권위로 검증한다.
 	bool TryFindInitialPlotPlacement(const FVector& DesiredWorldPos, FVector& OutPlacementPos, FName& OutPlotId) const;
 
@@ -138,10 +139,46 @@ public:
 		float SnapDistance, float Gap, bool bAlreadyOverlapping);
 
 private:
-	// 오피스 바닥 배치(책상/장식) 좌표 = 5유닛 격자 + 접촉 자석.
+	// 책상은 바닥 로컬 25cm 격자, 장식은 5유닛 격자 + 접촉 자석.
 	// ⚠ TrackMovePlacement 무인자/월드좌표 두 경로가 **반드시** 이걸 함께 써야 한다.
 	// 한쪽에만 자석을 넣으면 다음 틱에 다른 쪽이 커서에서 다시 계산해 덮어써서 자석이 통째로 사라진다.
 	FVector ComputeOfficeFloorPosition(const FVector& InWorldPos) const;
+	// 신규/연속 책상 프리뷰를 가까운 유효 격자로 옮긴다. 빈 곳이 없으면 원래 위치의 불가 표시를 유지한다.
+	void PositionWorkstationPreview(const FVector& DesiredWorldPosition);
+
+	// DT 점유 사각형이 스냅/검증/표시의 공통 기준이다.
+	void UpdateOfficeGridPreview();
+	void HideOfficeGridPreview();
+	void UpdateOfficeOccupiedPreview();
+	TArray<FVector> OfficeOccupiedVertices;
+	float OfficeOccupiedRefreshElapsed = 0.f;
+	TWeakObjectPtr<AActor> OfficeOccupiedSelection;
+	int32 OfficeOccupiedRegisteredCount = INDEX_NONE;
+	bool IsOfficeWorkstationFootprintValid() const;
+	bool IsOfficeWorkstationFootprintValid(const FBox2D& PreviewRect, TArrayView<const FBox2D> BlockingRects) const;
+	void GetOfficeWorkstationBlockingFootprints(TArray<FBox2D>& OutRects) const;
+	bool IsOfficeFloorCoveringPlacementValid() const;
+	bool IsOfficeEntrancePlacementValid() const;
+	bool bOfficeEditSession = false;
+	bool bExistingOfficeMoveActive = false;
+	TWeakObjectPtr<AActor> OfficeMoveActor;
+	FTransform OfficeMoveOriginalTransform;
+	TArray<FName> OfficeMoveOriginalTags;
+	ECollisionResponse OfficeMoveOriginalTraceResponse = ECR_Ignore;
+	void SyncOfficeMoveSeatedWorkers();
+
+	UPROPERTY()
+	TObjectPtr<UProceduralMeshComponent> OfficeGridMesh = nullptr;
+	UPROPERTY()
+	TObjectPtr<UStaticMeshComponent> OfficeFootprintMesh = nullptr;
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> OfficeFootprintMaterial = nullptr;
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> OfficeFootprintOutlineMaterial = nullptr;
+	FBox2D OfficeFootprintOutlineRect = FBox2D(ForceInit);
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> OfficeGuideBaseMaterial = nullptr;
+	FIntPoint OfficeGridTileCount = FIntPoint::ZeroValue;
 
 	// 오피스 바닥 배치(책상/장식)를 이웃 가구·벽에 접촉시킨 XY. 자석 꺼짐/대상 없음이면 입력 그대로.
 	FVector2D ApplyOfficeContactSnap(const FVector2D& InXY) const;
@@ -185,18 +222,32 @@ private:
 	UPROPERTY()
 	TObjectPtr<UMaterialInterface> PlotHighlightBaseMaterial = nullptr;
 
+	// 부지 건설 인디케이터 전용(테두리만 차오름). 오피스 책상/장식은 M_Placeable 을 그대로 쓰므로
+	// 그 머티리얼은 건드리지 않는다 — 공유 자산이라 거기를 바꾸면 오피스까지 바뀐다.
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> PlotEdgeBaseMaterial = nullptr;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> PlotEdgeMID = nullptr;
+
+	// 인디케이터 머티리얼을 부지용/기본으로 전환한다.
+	void ApplyPlacementIndicatorMaterial(bool bUsePlotEdge);
+
 	// MainMap 부지 건설 세션의 footprint 사각형 1개를 갱신·표시. 유효한 부지가 없으면 현재 위치에 빨강으로 표시.
 	// (스냅 위치/유효성은 ComputePlotPlacement 산출값(ActorLocation 스냅 + bPlotPlacementValid) 소비만, 재계산 안 함.)
 	void UpdatePlotFootprintPreview();
 
 	// footprint 사각형 숨김(배치 종료/비부지모드).
+	// 소유 부지 외곽 테두리 일괄 토글 — footprint 프리뷰와 생명주기를 묶는다.
+	void SetOwnedPlotOutlines(bool bVisible);
+
 	void HidePlotFootprintPreview();
 
 	// 건물 위 배치 마커의 표시/원복은 모든 신규·이동 종료 경로가 공유한다.
 	void BeginPlacementFeedback();
 	void EndPlacementFeedback();
 
-	// 빈 부지 소품은 기존 footprint 권위(PendingPlotId + 회전 반영 칸수)를 그대로 소비한다.
+	// 빈 부지 소품은 배치 판정과 같은 footprint(PendingPlotId + 공통 칸 사각형)를 소비한다.
 	void UpdateVacantPlotDressingPreview();
 	void ClearVacantPlotDressingPreview();
 	void RefreshVacantPlotDressingPlots(FName FirstPlotId, FName SecondPlotId) const;
@@ -228,6 +279,7 @@ private:
 	FVector StoredMove;
 	FVector TargetHandle;
 	void UpdateBuildAsset();
+	bool ComputeCanDrop();
 
 	bool IsPlacementGrounded();           // [Perf] 위치/모드 변화 없으면 캐시 반환하는 얇은 래퍼
 	bool ComputeIsPlacementGrounded();    // 실제 9 LineTrace 본체(래퍼에서만 호출)
@@ -322,7 +374,7 @@ public:
 
 	// 부지 건설 세션 시작 + 건물 footprint 칸수 설정 (BeginBuild 경유, SetPendingCompanyType 미러).
 	// InSeedPlotId 는 "탭한 부지"(초기 프리뷰 시작 위치 시드)일 뿐, 실제 배치 대상은 매 프레임 호버 부지로 동적 판정된다.
-	// 전역 [건설] 버튼은 InSeedPlotId = None 으로 호출(초기 프리뷰는 뷰포트 중심 밑 소유 부지로 수렴).
+	// 전역 [건설] 버튼은 InSeedPlotId = None 으로 호출(초기 프리뷰는 카메라 초점 XY 근처 소유 부지로 수렴).
 	void SetPendingPlotId(FName InSeedPlotId, int32 InFootprintWidthCells = 1, int32 InFootprintDepthCells = 1)
 	{
 		bPlotBuildSession = true;
@@ -349,11 +401,17 @@ public:
 	AInteractableBaseActor* GetPlacementTargetEntity() const { return PlacementTargetEntity; }
 
 	// 업무공간 배치
+	void SetOfficeEditSession(bool bEnabled);
+	bool BeginExistingOfficeMove(AActor* ActorToMove);
+	bool FinishExistingOfficeMove(bool bAccept);
+	FTransform GetCommittedOfficeTransform(const AActor* Actor) const;
+	static constexpr float OfficeGridCellSize = 25.f;
 	void SetWorkstationPlacementTarget(TSubclassOf<AWorkstationActorBase> WorkstationClass, FName WorkstationTypeID);
 	void ReleaseWorkstationPlacementTarget();
 	AWorkstationActorBase* GetPlacementWorkstation() const { return PlacementWorkstation; }
 	bool PlacingWorkstation(bool* bOutCapacityReached = nullptr);
 	bool IsWorkstationMode() const { return CurrentPlacementMode == EPlacementMode::Workstation; }
+	bool GetOfficeWorkstationFootprint(const AWorkstationActorBase* Workstation, FBox2D& OutFloorRect) const;
 
 	// 장식품 배치 (Grid - 바닥)
 	void SetDecorationPlacementTarget(const FDecorationCardTable& DecorationInfo);
@@ -392,9 +450,28 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Placement|Zoom")
 	void BeginPlacementZoom();
 
-	// 배치 줌인 강도 (1.0=기존 포커스와 동일, 작을수록 덜 당김 — 배치 중 주변 시야 확보)
-	UPROPERTY(EditAnywhere, Category = "Placement|Zoom", meta = (ClampMin = "0.1", ClampMax = "1.0"))
-	float PlacementZoomRatioScale = 0.5f;
+	// 부지 액터의 표면 Z. 매 프레임 경로(프리뷰 평면/마커)용 — 로그를 남기지 않는다.
+	// bOutFound 가 false 면 FallbackZ 를 그대로 돌려준 것이다.
+	float GetPlotSurfaceZ(FName PlotId, float FallbackZ, bool* bOutFound = nullptr) const;
+
+	// 오버레이 평면을 얹을 실제 바닥 Z 를 StreetSurface 채널 하향 트레이스로 잰다(씨드 Z 기준 위/아래 탐색).
+	// 채널이 무응답이면 SeedZ 를 그대로 돌려준다.
+	float TraceGroundZAt(const FVector2D& WorldXY, float SeedZ) const;
+
+	// 바닥 탐색 범위 — 부지 액터 Z 가 사람 손배치라 바닥과 수 m 어긋날 수 있어 넉넉히 둔다.
+	static constexpr float GroundProbeUpCm = 2000.f;
+	static constexpr float GroundProbeDownCm = 2000.f;
+
+	// 오버레이를 바닥 위로 띄우는 높이. 10cm 는 깊이 정밀도에 밀려 깜빡였다(Z-파이팅).
+	static constexpr float OverlayLiftCm = 40.f;
+
+	// 착지 기준 지면 Z 를 부지 액터에서 구한다(상수 가정 금지 — 지면이 Z=0 이 아닌 도시/테라스 다단 대응).
+	// 부지를 못 찾으면 FallbackZ 를 그대로 돌려주고 경고를 남긴다.
+	float ResolveLandingGroundZ(FName PlotId, float FallbackZ) const;
+
+	// 건설 배치 시작 시 실제 카메라 거리(cm). 소켓 후퇴를 포함하며 기본 줌 범위 안에서 적용한다.
+	UPROPERTY(EditAnywhere, Category = "Placement|Zoom", meta = (ClampMin = "1.0", Units = "cm"))
+	float PlacementCameraDistanceCm = 15000.f;
 
 public:
 	void SetOriginalPosition(const FVector& Position);

@@ -2,6 +2,8 @@
 
 #include "UI/Element/Cards/ItemCardWidget.h"
 #include "Components/Image.h"
+#include "UI/Element/Common/IconBrushUtils.h"
+#include "UI/Element/Common/UIIconContentBounds.h"
 #include "Components/Border.h"
 #include "Components/SizeBox.h"
 #include "Components/SizeBoxSlot.h"
@@ -10,8 +12,13 @@
 
 void UItemCardWidget::SetIcon(UTexture2D* InIcon)
 {
-	if (!EntityImage || !InIcon) return;
-	EntityImage->SetBrushFromTexture(InIcon);
+	SetIconResource(InIcon);
+}
+
+void UItemCardWidget::SetIconResource(UObject* InResource)
+{
+	CGIconBrush::ApplyResource(EntityImage, InResource);
+	ApplyIconFit();
 }
 
 void UItemCardWidget::SetLocked(bool bInLocked)
@@ -45,7 +52,7 @@ void UItemCardWidget::RefreshOutline()
 	else if (bSelected)
 	{
 		Outline->SetVisibility(ESlateVisibility::HitTestInvisible);
-		Outline->SetBrushColor(FLinearColor::White);  // 흰색 = 머터리얼 글로우 기본
+		Outline->SetBrushColor(SelectedOutlineColor);
 	}
 	else
 	{
@@ -78,6 +85,7 @@ void UItemCardWidget::SetIconSize(FVector2D NewSize)
 {
 	IconSize = NewSize;
 	ApplyIconSize();
+	ApplyIconFit();
 }
 
 void UItemCardWidget::SetCardSize(FVector2D InCardSize, FVector2D InIconSize)
@@ -86,6 +94,39 @@ void UItemCardWidget::SetCardSize(FVector2D InCardSize, FVector2D InIconSize)
 	IconSize = InIconSize;
 	ApplyCardSize();
 	ApplyIconSize();
+	ApplyIconFit();
+}
+
+void UItemCardWidget::SetIconTint(FLinearColor InTint)
+{
+	if (EntityImage) EntityImage->SetColorAndOpacity(InTint);
+}
+
+FLinearColor UItemCardWidget::GetIconTint() const
+{
+	return EntityImage ? EntityImage->GetColorAndOpacity() : FLinearColor::White;
+}
+
+void UItemCardWidget::ApplyIconFit()
+{
+	if (!bFitIconToContent || !EntityImage) return;
+
+	FVector2D Box = IconSize;
+	if (USizeBoxSlot* ImageSlot = Cast<USizeBoxSlot>(EntityImage->Slot))
+	{
+		// Fill 정렬이면 맞춘 크기가 상자 전체로 늘어나므로 가운데 정렬, 저작 패딩만큼 상자에서 뺀다
+		ImageSlot->SetHorizontalAlignment(HAlign_Center);
+		ImageSlot->SetVerticalAlignment(VAlign_Center);
+		const FMargin Pad = ImageSlot->GetPadding();
+		Box.X = FMath::Max(0.0, Box.X - static_cast<double>(Pad.Left + Pad.Right));
+		Box.Y = FMath::Max(0.0, Box.Y - static_cast<double>(Pad.Top + Pad.Bottom));
+	}
+	else if (!bWarnedIconFitSlot)
+	{
+		bWarnedIconFitSlot = true;
+		UE_LOG(LogTemp, Warning, TEXT("%s: bFitIconToContent 인데 EntityImage 부모 슬롯이 SizeBoxSlot 이 아님 ― 정렬 강제 불가, Fill 이면 아이콘이 늘어남"), *GetPathName());
+	}
+	FUIIconContentFit::Apply(EntityImage, EntityImage->GetBrush().GetResourceObject(), Box);
 }
 
 void UItemCardWidget::ApplyIconSize()

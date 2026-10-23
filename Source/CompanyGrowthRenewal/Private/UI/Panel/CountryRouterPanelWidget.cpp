@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "UI/Panel/CountryRouterPanelWidget.h"
+#include "UI/Element/Common/PanelHeaderWidget.h"
 #include "UI/Panel/CountryDetailWidget.h"
 #include "UI/Element/Cards/CountryRouterCardWidget.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
@@ -9,7 +10,6 @@
 #include "Table/CountryInfoTable.h"
 #include "Enum/WidgetType.h"
 #include "Enum/ResourceType.h"
-#include "Components/TextBlock.h"
 #include "Components/Button.h"
 #include "Components/ScrollBox.h"
 
@@ -17,9 +17,9 @@ void UCountryRouterPanelWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
-	if (CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		CloseButton->OnCloseClicked.AddDynamic(this, &UCountryRouterPanelWidget::HandleCloseClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UCountryRouterPanelWidget::HandleCloseClicked);
 	}
 	if (BackgroundBtn)
 	{
@@ -34,9 +34,9 @@ void UCountryRouterPanelWidget::NativeConstruct()
 
 void UCountryRouterPanelWidget::NativeDestruct()
 {
-	if (CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		CloseButton->OnCloseClicked.RemoveDynamic(this, &UCountryRouterPanelWidget::HandleCloseClicked);
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UCountryRouterPanelWidget::HandleCloseClicked);
 	}
 	if (BackgroundBtn)
 	{
@@ -52,9 +52,9 @@ void UCountryRouterPanelWidget::InitializeForMode(ECountryRouterMode InMode)
 	Mode = InMode;
 
 	const FModeSpec Spec = ResolveModeSpec();
-	if (TitleText)
+	if (PanelHeader)
 	{
-		TitleText->SetText(Spec.Title);
+		PanelHeader->SetTitle(Spec.Title);
 	}
 
 	RebuildCardList();

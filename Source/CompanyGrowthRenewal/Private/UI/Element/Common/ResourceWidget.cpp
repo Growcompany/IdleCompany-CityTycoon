@@ -9,6 +9,7 @@
 #include "Components/ScaleBox.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
+#include "Components/OverlaySlot.h"
 #include "Enum/ResourceType.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/Widget.h"
@@ -32,6 +33,19 @@ namespace
 	constexpr float MilestoneDuration = 0.25f;
 	// 마일스톤 사운드 최소 간격 — 치트/일괄 지급으로 여러 자릿수를 한 번에 뚫어도 1발
 	constexpr double MilestoneSoundCooldown = 1.0;
+
+	// 다이아는 한 자릿수(뽑기 -30)로 움직여 자금 기준 1000 을 그대로 쓰면 영구 무반응이 된다
+	int64 ResourceChipMinRollupDelta(EResourceType Type)
+	{
+		return Type == EResourceType::Diamond ? 5 : 1000;
+	}
+
+	// 상대 게이트 분모. 다이아는 0 = 상대 게이트 없음 — 보유가 커질수록 2% 가 커져
+	// 절대 임계(5)를 통째로 먹기 때문이다(보유 1000 이면 -19 까지 무반응이었다).
+	int64 ResourceChipRollupRelativeDivisor(EResourceType Type)
+	{
+		return Type == EResourceType::Diamond ? 0 : 50;
+	}
 }
 
 UResourceWidget::UResourceWidget(const FObjectInitializer& FOI)	: Super(FOI)
@@ -130,7 +144,7 @@ void UResourceWidget::UpdateTextColor()
 	// 구매 불가능하면 빨간색으로 표시 (최우선)
 	if (!bCanAfford)
 	{
-		NewColor = FLinearColor(1.0f, 0.0f, 0.0f, 1.0f); // 빨간색
+		NewColor = CannotAffordColor;
 	}
 	// DT_Resource.UIColor 가 단일 진실 — bUseTypeColor 시 lookup
 	else if (bUseTypeColor)
@@ -148,8 +162,20 @@ void UResourceWidget::UpdateTextColor()
 			}
 		}
 	}
+	if (bCanAfford && AmountInkOverride.A > 0.f)
+	{
+		NewColor = AmountInkOverride;
+	}
 
 	ResourceAmountText->SetColorAndOpacity(NewColor);
+}
+
+void UResourceWidget::SetAmountStyleOverride(const FLinearColor& InInk, const FString& InPrefix)
+{
+	AmountInkOverride = InInk;
+	AmountPrefix = InPrefix;
+	UpdateTextColor();
+	SetAmountText();
 }
 
 void UResourceWidget::SetCanAfford(bool bInCanAfford)
@@ -169,7 +195,15 @@ void UResourceWidget::NativeDestruct()
 	MilestoneElapsed = -1.f;
 	BumpElapsed = -1.f;
 	ShakeElapsed = -1.f;
+	DipElapsed = -1.f;
 	ApplyChipLineFlash(0.f);
+	// 구르는 중에 파괴되면 표시값이 중간에 멈춘 채 캐시된다 — 재사용 시 그 값과 비교해 델타가 틀어진다
+	if (CountUpAnim.IsPlaying())
+	{
+		CountUpAnim.Finish();
+		ResourceAmount = CountTo;
+		SetAmountText();
+	}
 	if (bFeedbackXformApplied)
 	{
 		SetRenderTransform(FWidgetTransform());
@@ -211,9 +245,23 @@ void UResourceWidget::PlayAffordShake()
 	ShakeElapsed = 0.f;
 }
 
+void UResourceWidget::PlaySpendDip()
+{
+	if (FMotionGate::IsReduced())
+	{
+		return;
+	}
+	// 홀드 연타 구매는 0.1초 간격 ― 0.18초 눌림을 매번 재시작하면 0.94 로 뚝뚝 끊겨 떨린다(PlayBump 와 같은 이유)
+	if (DipElapsed >= 0.f)
+	{
+		return;
+	}
+	DipElapsed = 0.f;
+}
+
 void UResourceWidget::UpdateFeedbackAnim(float DeltaTime)
 {
-	if (BumpElapsed < 0.f && ShakeElapsed < 0.f && MilestoneElapsed < 0.f && !bFeedbackXformApplied)
+	if (BumpElapsed < 0.f && ShakeElapsed < 0.f && MilestoneElapsed < 0.f && DipElapsed < 0.f && !bFeedbackXformApplied)
 	{
 		return;
 	}
@@ -256,6 +304,23 @@ void UResourceWidget::UpdateFeedbackAnim(float DeltaTime)
 		else
 		{
 			Xform.Translation = FVector2D(FMath::Sin(A * PI * 6.f) * 8.f * (1.f - A), 0.f);
+			bXformNeeded = true;
+		}
+	}
+
+	// 지출 눌림 = 칩 루트가 아래로 눌렸다 돌아온다. 1.0 을 넘지 않으니 클립 밖으로 나갈 일이 없다.
+	if (DipElapsed >= 0.f)
+	{
+		DipElapsed += DeltaTime;
+		const float A = FMath::Clamp(DipElapsed / SpendDipDuration, 0.f, 1.f);
+		if (A >= 1.f)
+		{
+			DipElapsed = -1.f;
+		}
+		else
+		{
+			const float DipScale = SpendDipScale + (1.f - SpendDipScale) * FWidgetAnimationUtils::EaseOutQuad(A);
+			Xform.Scale = FVector2D(DipScale, DipScale);
 			bXformNeeded = true;
 		}
 	}
@@ -332,7 +397,7 @@ float UResourceWidget::ComputeRollupDuration(int64 Delta)
 	return FMath::Clamp(0.35f + 0.08f * LogDelta, 0.35f, 0.6f);
 }
 
-bool UResourceWidget::ShouldRollup(int64 NewAmount) const
+bool UResourceWidget::IsLiveWalletChip() const
 {
 	// bShouldCalculateIconPos = HUD 등록 경로(InGameLayerWidget) — WBP 플래그 없이도 상단 HUD 칩은 롤업 대상
 	if (!bLiveCounterRollup && !bShouldCalculateIconPos)
@@ -349,18 +414,29 @@ bool UResourceWidget::ShouldRollup(int64 NewAmount) const
 		return false;
 	}
 	// 최초 채움(0 -> 실보유)은 즉시 — 레벨 진입마다 HUD 가 도는 걸 막는다
-	if (PeakDigitTier == INDEX_NONE)
+	return PeakDigitTier != INDEX_NONE;
+}
+
+bool UResourceWidget::ShouldRollup(int64 NewAmount) const
+{
+	if (!IsLiveWalletChip())
 	{
 		return false;
 	}
 
-	const int64 Delta = NewAmount - ResourceAmount;
-	if (Delta < 1000)
+	// 지출(하강)도 목돈이면 굴린다 — 획득만 굴러가면 "얻을 때만 화면이 사는" 비대칭이 남는다
+	const int64 AbsDelta = FMath::Abs(NewAmount - ResourceAmount);
+	if (AbsDelta < ResourceChipMinRollupDelta(ResourceType))
 	{
-		return false;   // 소액 유입과 하강(지출)은 즉시 대입
+		return false;   // 소액은 방향 무관 즉시 대입
 	}
-	const int64 TwoPercent = (ResourceAmount < 0 ? -ResourceAmount : ResourceAmount) / 50;
-	return Delta >= TwoPercent;
+	const int64 Divisor = ResourceChipRollupRelativeDivisor(ResourceType);
+	if (Divisor <= 0)
+	{
+		return true;   // 절대 임계는 위에서 이미 통과했다
+	}
+	const int64 Relative = (ResourceAmount < 0 ? -ResourceAmount : ResourceAmount) / Divisor;
+	return AbsDelta >= Relative;
 }
 
 void UResourceWidget::EvaluateDigitMilestone(int64 DisplayedValue)
@@ -416,6 +492,17 @@ void UResourceWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
 	UpdateChipMaterialSize(MyGeometry);
+
+	// 폭이 확정되는 첫 레이아웃과 리사이즈에만 상세도를 다시 고른다 — SetAmountText 는 값 변화에만 돌기 때문.
+	if (AmountDetail == EAmountDetail::FitToWidth)
+	{
+		const float Budget = GetAmountTextBudget();
+		if (!FMath::IsNearlyEqual(Budget, LastAmountBudget, 0.5f))
+		{
+			LastAmountBudget = Budget;
+			SetAmountText();
+		}
+	}
 
 	UpdateFeedbackAnim(InDeltaTime);
 
@@ -489,19 +576,59 @@ void UResourceWidget::SetAmountText() const
 {
 	if (IsValid(ResourceAmountText))
 	{
-		if (bShowAsFraction && ResourceMaxAmount >= 0)
+		if (!LabelOverride.IsEmpty())
+		{
+			ResourceAmountText->SetText(LabelOverride);
+		}
+		else if (bShowAsFraction && ResourceMaxAmount >= 0)
 		{
 			// 분수 형식: 현재/최대 (축약 표기). 분모(최대)는 항상 Floor — 실제 용량 표현(Ceil 비용 모드여도 분모는 올리지 않음).
 			const FString FractionStr = UGlobalUtilFunctions::AbbreviateNumber(ResourceAmount, ENumberAbbrevStyle::Auto, AmountRoundMode).ToString()
 				+ TEXT("/") + UGlobalUtilFunctions::AbbreviateNumber(ResourceMaxAmount, ENumberAbbrevStyle::Auto, ENumberRoundMode::Floor).ToString();
 			ResourceAmountText->SetText(FText::FromString(FractionStr));
 		}
+		else if (AmountDetail == EAmountDetail::FitToWidth)
+		{
+			// 칸에 들어가는 최대 자릿수까지 펼친다. 폭을 아직 모르면(0) 축약으로 두고 다음 틱에 다시 잡는다.
+			const FText Fitted = UGlobalUtilFunctions::FitAmountToWidth(
+				ResourceAmount, GetAmountTextBudget(), ResourceAmountText->GetFont(), AmountRoundMode);
+			ResourceAmountText->SetText(AmountPrefix.IsEmpty() ? Fitted : FText::FromString(AmountPrefix + Fitted.ToString()));
+		}
 		else
 		{
 			// 일반 형식: 값만 표시 (AmountRoundMode 적용 — 보유=Floor, 비용=Ceil)
-			ResourceAmountText->SetText(UGlobalUtilFunctions::AbbreviateNumber(ResourceAmount, ENumberAbbrevStyle::Auto, AmountRoundMode));
+			const FText Amount = UGlobalUtilFunctions::AbbreviateNumber(ResourceAmount, ENumberAbbrevStyle::Auto, AmountRoundMode);
+			ResourceAmountText->SetText(AmountPrefix.IsEmpty() ? Amount : FText::FromString(AmountPrefix + Amount.ToString()));
 		}
 	}
+}
+
+float UResourceWidget::GetAmountTextBudget() const
+{
+	const FGeometry& ChipGeo = GetCachedGeometry();
+	const float ChipWidth = static_cast<float>(ChipGeo.GetLocalSize().X);
+	if (ChipWidth <= 1.f)
+	{
+		return 0.f;
+	}
+
+	// 숫자 위젯 자신의 geometry 를 쓰면 Fill+오른쪽정렬일 때 폭이 숫자 길이에 되먹임된다 — 아이콘 칼럼을 기준으로 잰다.
+	const UWidget* IconColumn = SizeBox_161 ? static_cast<const UWidget*>(SizeBox_161)
+											: static_cast<const UWidget*>(ResourceImage);
+	if (!IconColumn)
+	{
+		return 0.f;
+	}
+
+	const FGeometry& IconGeo = IconColumn->GetCachedGeometry();
+	const float IconWidth = static_cast<float>(IconGeo.GetLocalSize().X);
+	if (IconWidth <= 1.f)
+	{
+		return 0.f;
+	}
+
+	const float IconRight = static_cast<float>(ChipGeo.AbsoluteToLocal(IconGeo.GetAbsolutePosition()).X) + IconWidth;
+	return FMath::Max(0.f, ChipWidth - IconRight - TextPaddingLeft - AmountTextRightInset);
 }
 
 void UResourceWidget::SetImage()
@@ -571,6 +698,17 @@ void UResourceWidget::SetResourceType(EResourceType type, bool bInUseTypeColor)
 	UpdateTextColor();
 }
 
+void UResourceWidget::SetValueSilent(int64 amount)
+{
+	if (CountUpAnim.IsPlaying())
+	{
+		CountUpAnim.Finish();
+	}
+	ResourceAmount = amount;
+	SetAmountText();
+	EvaluateDigitMilestone(ResourceAmount);
+}
+
 void UResourceWidget::SetValue(int64 amount)
 {
 	// 굴러가는 중 소액이 겹쳐 들어오면 트윈을 끊지 말고 목표만 갱신 — 매번 스냅하면 롤업이 잘려 보인다
@@ -580,9 +718,16 @@ void UResourceWidget::SetValue(int64 amount)
 		return;
 	}
 
+	// 눌림은 롤업 임계와 무관 ― 상품가는 고정이고 잔액은 계속 커지므로, 임계에 묶으면 부자에게 지출 피드백이 영구히 사라진다
+	const bool bSpend = IsLiveWalletChip() && amount < ResourceAmount;
+	if (bSpend)
+	{
+		PlaySpendDip();   // 축하가 아니라 영수증 — 스파클/글로우 없이 눌림만
+	}
+
 	if (ShouldRollup(amount))
 	{
-		SetValueAnimated(amount, ComputeRollupDuration(amount - ResourceAmount));
+		SetValueAnimated(amount, bSpend ? SpendRollDuration : ComputeRollupDuration(amount - ResourceAmount));
 		return;
 	}
 
@@ -612,6 +757,16 @@ void UResourceWidget::SetValueAnimated(int64 amount, float Duration)
 	{
 		return;
 	}
+	if (FMotionGate::IsReduced())
+	{
+		// 연출 감소: 트윈 없이 즉시 대입. 틱을 한 번도 안 거쳐도 값은 도착해야 한다
+		// (연출 감소는 연출을 끄는 스위치지 기능을 끄는 스위치가 아니다).
+		ResourceAmount = amount;
+		SetAmountText();
+		EvaluateDigitMilestone(ResourceAmount);
+		return;
+	}
+
 	CountFrom = ResourceAmount;
 	CountTo = amount;
 	CountUpAnim.Start(0.f, 1.f, Duration);
@@ -640,6 +795,66 @@ void UResourceWidget::SetItemDisplay(UTexture2D* IconTexture, int64 Count)
 	ResourceAmount = Count;
 	SetAmountText();
 	UpdateTextColor();
+}
+
+void UResourceWidget::SetLabelOverride(const FText& InLabel)
+{
+	LabelOverride = InLabel;
+	// 아이콘은 크기 상자째 접어야 빈 자리가 남지 않는다
+	UWidget* IconHost = ResourceImage;
+	if (ResourceImage && ResourceImage->GetParent() && ResourceImage->GetParent()->IsA<USizeBox>())
+	{
+		IconHost = ResourceImage->GetParent();
+	}
+	if (IconHost)
+	{
+		IconHost->SetVisibility(InLabel.IsEmpty() ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	// 문구는 아이콘이 접힌 칩 가운데에 둔다 — 숫자용 칸 설정은 보관했다가 빈 문구일 때 되돌린다.
+	// 글자가 크기 맞춤 상자(ScaleBox/SizeBox)에 싸여 있으면 그 상자의 자리를 옮긴다
+	UWidget* LabelHost = ResourceAmountText;
+	if (LabelHost && LabelHost->GetParent() && (LabelHost->GetParent()->IsA<UScaleBox>() || LabelHost->GetParent()->IsA<USizeBox>()))
+	{
+		LabelHost = LabelHost->GetParent();
+	}
+	if (UHorizontalBoxSlot* TextSlot = LabelHost ? Cast<UHorizontalBoxSlot>(LabelHost->Slot) : nullptr)
+	{
+		if (!InLabel.IsEmpty() && !bLabelSlotSaved)
+		{
+			SavedLabelSlotSize = TextSlot->GetSize();
+			SavedLabelSlotAlign = TextSlot->GetHorizontalAlignment();
+			SavedLabelSlotPadding = TextSlot->GetPadding();
+			bLabelSlotSaved = true;
+			TextSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+			TextSlot->SetHorizontalAlignment(HAlign_Center);
+			TextSlot->SetPadding(FMargin(0.f));
+		}
+		else if (InLabel.IsEmpty() && bLabelSlotSaved)
+		{
+			TextSlot->SetSize(SavedLabelSlotSize);
+			TextSlot->SetHorizontalAlignment(SavedLabelSlotAlign);
+			TextSlot->SetPadding(SavedLabelSlotPadding);
+			bLabelSlotSaved = false;
+		}
+	}
+	else if (UOverlaySlot* OverlayTextSlot = LabelHost ? Cast<UOverlaySlot>(LabelHost->Slot) : nullptr)
+	{
+		if (!InLabel.IsEmpty() && !bLabelSlotSaved)
+		{
+			SavedLabelSlotAlign = OverlayTextSlot->GetHorizontalAlignment();
+			SavedLabelSlotPadding = OverlayTextSlot->GetPadding();
+			bLabelSlotSaved = true;
+			OverlayTextSlot->SetHorizontalAlignment(HAlign_Center);
+			OverlayTextSlot->SetPadding(FMargin(0.f));
+		}
+		else if (InLabel.IsEmpty() && bLabelSlotSaved)
+		{
+			OverlayTextSlot->SetHorizontalAlignment(SavedLabelSlotAlign);
+			OverlayTextSlot->SetPadding(SavedLabelSlotPadding);
+			bLabelSlotSaved = false;
+		}
+	}
+	SetAmountText();
 }
 
 void UResourceWidget::HandleInfoButtonClicked()

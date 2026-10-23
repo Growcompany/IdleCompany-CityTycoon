@@ -1,6 +1,9 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "Office/WorkstationActorBase.h"
+#include "Office/WorkstationDevFxComponent.h"
+#include "GameMode/OfficeGameMode.h"
+#include "Engine/World.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "NavigationSystem.h"
@@ -11,6 +14,9 @@
 #include "Manager/SaveLoadManager.h"
 #include "Manager/ResourceItemManager.h"
 #include "Manager/TableManagerSubsystem.h"
+#include "Manager/ProjectOperationManager.h"
+#include "Manager/MissionManagerSubsystem.h"
+#include "Office/OfficeManager.h"
 #include "Global/GlobalAssetCache.h"
 #include "Core/CGGameInstance.h"
 #include "Enum/ResourceType.h"
@@ -65,6 +71,8 @@ AWorkstationActorBase::AWorkstationActorBase()
 	HighlightSMC->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	HighlightSMC->SetVisibility(false);
 	HighlightSMC->SetCastShadow(false);
+
+	DevFxComponent = CreateDefaultSubobject<UWorkstationDevFxComponent>(TEXT("DevFx"));
 }
 
 void AWorkstationActorBase::BeginPlay()
@@ -102,6 +110,15 @@ FVector AWorkstationActorBase::GetBubbleAnchorPosition() const
 
 void AWorkstationActorBase::InitializeWorkstation()
 {
+	if (GetWorld() && GetWorld()->GetAuthGameMode<AOfficeGameMode>())
+	{
+		// 의자/PC/추가 슬롯은 자식 생성자가 만든 동일 액터 컴포넌트다.
+		TInlineComponentArray<UStaticMeshComponent*> WorkstationMeshes(this);
+		for (UStaticMeshComponent* WorkstationMesh : WorkstationMeshes)
+		{
+			WorkstationMesh->SetLightingChannels(false, true, false);
+		}
+	}
 	// 슬롯 상태 초기화
 	for (uint8 i = 0; i < static_cast<uint8>(EWorkstationSlot::Max); ++i)
 	{
@@ -155,7 +172,7 @@ void AWorkstationActorBase::RecalcBoxExtent()
 		GetComponents<UStaticMeshComponent>(Meshes);
 		for (UStaticMeshComponent* MC : Meshes)
 		{
-			if (MC && MC != HighlightSMC && MC->GetStaticMesh())
+			if (MC && MC != HighlightSMC && MC->GetStaticMesh() && !MC->ComponentHasTag(UWorkstationDevFxComponent::FxComponentTag))
 			{
 				WorldBox += MC->Bounds.GetBox();
 			}
@@ -193,6 +210,7 @@ void AWorkstationActorBase::RestoreFromSaveData(const FWorkstationSaveData& Save
 	WorkstationTypeID = SaveData.WorkstationTypeID;
 	SetActorTransform(SaveData.Transform);
 	CurrentSetupLevel = SaveData.ComputerSetupLevel;
+	UpgradeLevels = SaveData.UpgradeLevels;
 	SlotStates = SaveData.SlotStates;
 
 	// 레벨 적용 (슬롯 활성화)
@@ -220,6 +238,7 @@ FWorkstationSaveData AWorkstationActorBase::GetSaveData() const
 	SaveData.WorkstationTypeID = WorkstationTypeID;
 	SaveData.Transform = GetActorTransform();
 	SaveData.ComputerSetupLevel = CurrentSetupLevel;
+	SaveData.UpgradeLevels = UpgradeLevels;
 	SaveData.SlotStates = SlotStates;
 
 	return SaveData;
@@ -229,6 +248,7 @@ FWorkstationSaveData AWorkstationActorBase::GetSaveData() const
 
 bool AWorkstationActorBase::TryUpgradeSetupLevel()
 {
+	if (!CanPromoteSetup()) return false;
 	FComputerSetupLevelData NextLevelData;
 	if (!GetNextSetupLevelData(NextLevelData))
 	{
@@ -245,35 +265,97 @@ bool AWorkstationActorBase::TryUpgradeSetupLevel()
 		return false;
 	}
 
-	UGameInstance* GameInstance = GetGameInstance();
-	UResourceItemManager* ResourceManager = GameInstance
-		? GameInstance->GetSubsystem<UResourceItemManager>()
-		: nullptr;
-	if (!ResourceManager)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[WorkstationActorBase] Resource manager is unavailable"));
-		return false;
-	}
-
-	int64 Withdrawn = 0;
-	if (!ResourceManager->ExtractResource(
-		EResourceType::Diamond,
-		static_cast<int64>(NextLevelData.UpgradeCost),
-		Withdrawn,
-		false) || Withdrawn != NextLevelData.UpgradeCost)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[WorkstationActorBase] Not enough Diamond for setup Level%d (cost=%d)"),
-			static_cast<int32>(NextLevelData.Level) + 1, NextLevelData.UpgradeCost);
-		return false;
-	}
-
 	CurrentSetupLevel = NextLevelData.Level;
+	for (uint8 Index = 0; Index < static_cast<uint8>(EWorkstationUpgradeType::Count); ++Index)
+	{
+		UpgradeLevels.Add(static_cast<EWorkstationUpgradeType>(Index), 1);
+	}
 	ApplySetupLevel();
 	RecalculateStats();
 	SaveWorkstationData();
+	if (UMissionManagerSubsystem* Missions = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr)
+	{
+		Missions->NotifyWorkstationGrowthChanged(true);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[WorkstationActorBase] Promoted setup to Level%d"),
+		static_cast<int32>(CurrentSetupLevel) + 1);
+	return true;
+}
 
-	UE_LOG(LogTemp, Log, TEXT("[WorkstationActorBase] Upgraded setup to Level%d for %d Diamond"),
-		static_cast<int32>(CurrentSetupLevel) + 1, NextLevelData.UpgradeCost);
+int32 AWorkstationActorBase::GetUpgradeLevel(EWorkstationUpgradeType Type) const
+{
+	return UpgradeLevels.FindRef(Type) > 0 ? UpgradeLevels.FindRef(Type) : 1;
+}
+
+int32 AWorkstationActorBase::GetUpgradeMaxLevel(EWorkstationUpgradeType Type) const
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	const UTableManagerSubsystem* Tables = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const FWorkstationUpgradeDefinition* Definition = Tables ? Tables->FindWorkstationUpgradeDefinition(Type) : nullptr;
+	return Definition ? Definition->MaxLevel : 0;
+}
+
+float AWorkstationActorBase::GetComponentBonus(EWorkstationUpgradeType Type) const
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	const UTableManagerSubsystem* Tables = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const FWorkstationUpgradeDefinition* Definition = Tables ? Tables->FindWorkstationUpgradeDefinition(Type) : nullptr;
+	return Definition ? WorkstationUpgradeRules::GetCumulativeBonus(*Definition, CurrentSetupLevel, GetUpgradeLevel(Type)) : 0.0f;
+}
+
+bool AWorkstationActorBase::GetUpgradeQuote(EWorkstationUpgradeType Type, int32 RequestedCount,
+	bool bMaxAffordable, FWorkstationUpgradeQuote& OutQuote) const
+{
+	OutQuote = FWorkstationUpgradeQuote();
+	UGameInstance* GameInstance = GetGameInstance();
+	const UTableManagerSubsystem* Tables = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const UResourceItemManager* Resources = GameInstance ? GameInstance->GetSubsystem<UResourceItemManager>() : nullptr;
+	const FWorkstationUpgradeDefinition* Definition = Tables ? Tables->FindWorkstationUpgradeDefinition(Type) : nullptr;
+	if (!Definition || !Resources) return false;
+	return WorkstationUpgradeRules::BuildQuote(*Definition, CurrentSetupLevel, GetUpgradeLevel(Type),
+		RequestedCount, bMaxAffordable, Resources->GetResourceAmount(EResourceType::Money), OutQuote);
+}
+
+bool AWorkstationActorBase::TryUpgradeComponent(EWorkstationUpgradeType Type, int32 RequestedCount,
+	bool bMaxAffordable)
+{
+	FWorkstationUpgradeQuote Quote;
+	if (!GetUpgradeQuote(Type, RequestedCount, bMaxAffordable, Quote) || !Quote.bValid
+		|| Quote.Count <= 0 || Quote.TotalCost > Quote.Available)
+	{
+		return false;
+	}
+	UGameInstance* GameInstance = GetGameInstance();
+	UResourceItemManager* Resources = GameInstance ? GameInstance->GetSubsystem<UResourceItemManager>() : nullptr;
+	if (!Resources) return false;
+	int64 Withdrawn = 0;
+	if (!Resources->ExtractResource(EResourceType::Money, Quote.TotalCost, Withdrawn, false)
+		|| Withdrawn != Quote.TotalCost)
+	{
+		return false;
+	}
+	UpgradeLevels.Add(Type, GetUpgradeLevel(Type) + Quote.Count);
+	RecalculateStats();
+	SaveWorkstationData();
+	if (UMissionManagerSubsystem* Missions = GetGameInstance() ? GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>() : nullptr)
+	{
+		Missions->NotifyWorkstationGrowthChanged(false, Quote.Count);
+	}
+	return true;
+}
+
+bool AWorkstationActorBase::CanPromoteSetup() const
+{
+	if (IsMaxLevel()) return false;
+	UGameInstance* GameInstance = GetGameInstance();
+	const UTableManagerSubsystem* Tables = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	if (!Tables) return false;
+	for (uint8 Index = 0; Index < static_cast<uint8>(EWorkstationUpgradeType::Count); ++Index)
+	{
+		const EWorkstationUpgradeType Type = static_cast<EWorkstationUpgradeType>(Index);
+		const FWorkstationUpgradeDefinition* Definition = Tables->FindWorkstationUpgradeDefinition(Type);
+		if (!Definition || GetUpgradeLevel(Type) != Definition->MaxLevel) return false;
+	}
 	return true;
 }
 
@@ -358,30 +440,7 @@ bool AWorkstationActorBase::TrySwapMaxVariant()
 	FString ValidationError;
 	if (!ValidateAndLoadSetupMeshes(*OtherData, ValidationError))
 	{
-		UE_LOG(LogTemp, Error, TEXT("[WorkstationActorBase] Variant rejected before payment: %s"), *ValidationError);
-		return false;
-	}
-
-	UGameInstance* GameInstance = GetGameInstance();
-	UResourceItemManager* ResourceManager = GameInstance
-		? GameInstance->GetSubsystem<UResourceItemManager>()
-		: nullptr;
-	if (!ResourceManager)
-	{
-		UE_LOG(LogTemp, Error, TEXT("[WorkstationActorBase] Resource manager is unavailable"));
-		return false;
-	}
-
-	// 비용은 전환 대상 행이 소유한다 — 두 변형이 같은 값을 들고 있어도 방향별로 다르게 둘 수 있다
-	const int32 SwapCost = OtherData->VariantSwapCost;
-	int64 Withdrawn = 0;
-	if (!ResourceManager->ExtractResource(
-		EResourceType::Diamond,
-		static_cast<int64>(SwapCost),
-		Withdrawn,
-		false) || Withdrawn != SwapCost)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[WorkstationActorBase] Not enough Diamond to swap appearance (cost=%d)"), SwapCost);
+		UE_LOG(LogTemp, Error, TEXT("[WorkstationActorBase] Variant rejected: %s"), *ValidationError);
 		return false;
 	}
 
@@ -390,7 +449,7 @@ bool AWorkstationActorBase::TrySwapMaxVariant()
 	RecalculateStats();
 	SaveWorkstationData();
 
-	UE_LOG(LogTemp, Log, TEXT("[WorkstationActorBase] Swapped max-level appearance for %d Diamond"), SwapCost);
+	UE_LOG(LogTemp, Log, TEXT("[WorkstationActorBase] Swapped max-level appearance"));
 	return true;
 }
 
@@ -505,7 +564,8 @@ void AWorkstationActorBase::RecalculateStats()
 
 	if (const FComputerSetupLevelData* LevelData = FindSetupLevelData(CurrentSetupLevel))
 	{
-		WorkSpeedBonusRate = LevelData->WorkSpeedBonusRate;
+		WorkSpeedBonusRate = LevelData->WorkSpeedBonusRate
+			+ GetComponentBonus(EWorkstationUpgradeType::Processing);
 	}
 
 	UE_LOG(LogTemp, Verbose, TEXT("[WorkstationActorBase] Work speed +%.1f%%"),
@@ -608,12 +668,28 @@ void AWorkstationActorBase::SaveWorkstationData()
 	UWorld* World = GetWorld();
 	if (!World) return;
 
-	UGameInstance* GI = World->GetGameInstance();
+	UCGGameInstance* GI = Cast<UCGGameInstance>(World->GetGameInstance());
 	if (!GI) return;
 
-	if (USaveLoadManager* SaveLoadMgr = GI->GetSubsystem<USaveLoadManager>())
+	USaveLoadManager* SaveLoadMgr = GI->GetSubsystem<USaveLoadManager>();
+	if (UOfficeManager* OfficeManager = World->GetSubsystem<UOfficeManager>())
 	{
-		SaveLoadMgr->SaveGameData();
+		USaveGame_GameData* CurrentSave = SaveLoadMgr ? SaveLoadMgr->GetCurrentSaveData() : nullptr;
+		FOfficeSaveData* OfficeData = CurrentSave && GI->GetCurrentManagedBuildingIndex() >= 0
+			? CurrentSave->GameData.OfficeDataMap.Find(GI->GetCurrentManagedBuildingIndex()) : nullptr;
+		if (OfficeData)
+		{
+			OfficeManager->FillOfficeSaveData(*OfficeData);
+			if (UProjectOperationManager* Operations = GI->GetSubsystem<UProjectOperationManager>())
+			{
+				Operations->InvalidateStatBonusCache(GI->GetCurrentManagedBuildingIndex());
+			}
+		}
+	}
+
+	if (SaveLoadMgr)
+	{
+		SaveLoadMgr->RequestDeferredSave();
 	}
 }
 

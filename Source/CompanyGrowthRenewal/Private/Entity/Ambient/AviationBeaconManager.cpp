@@ -39,9 +39,8 @@ void AAviationBeaconManager::BeginPlay()
 	if (ATimeCycleManager* Clock = Cast<ATimeCycleManager>(UGameplayStatics::GetActorOfClass(GetWorld(), ATimeCycleManager::StaticClass())))
 	{
 		CachedTimeCycle = Clock;
-		Clock->OnSunRise.AddDynamic(this, &AAviationBeaconManager::HandleSunRise);
-		Clock->OnSunSet.AddDynamic(this, &AAviationBeaconManager::HandleSunSet);
-		const int32 Cur = Clock->GetCurrentTime().ToSeconds();
+		Clock->OnVisualTimeChanged.AddDynamic(this, &AAviationBeaconManager::HandleVisualTimeChanged);
+		const int32 Cur = Clock->GetVisualTime().ToSeconds();
 		const int32 Rise = Clock->GetSunRiseTime().ToSeconds();
 		const int32 Set = Clock->GetSunSetTime().ToSeconds();
 		bGlowVisible = (Cur >= Set) || (Cur < Rise);
@@ -75,8 +74,7 @@ void AAviationBeaconManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	if (ATimeCycleManager* Clock = CachedTimeCycle.Get())
 	{
-		Clock->OnSunRise.RemoveDynamic(this, &AAviationBeaconManager::HandleSunRise);
-		Clock->OnSunSet.RemoveDynamic(this, &AAviationBeaconManager::HandleSunSet);
+		Clock->OnVisualTimeChanged.RemoveDynamic(this, &AAviationBeaconManager::HandleVisualTimeChanged);
 	}
 	Super::EndPlay(EndPlayReason);
 }
@@ -93,8 +91,13 @@ void AAviationBeaconManager::ApplyNightVisibility(bool bNight)
 	}
 }
 
-void AAviationBeaconManager::HandleSunRise() { ApplyNightVisibility(false); }
-void AAviationBeaconManager::HandleSunSet()  { ApplyNightVisibility(true); }
+void AAviationBeaconManager::HandleVisualTimeChanged()
+{
+	if (const ATimeCycleManager* Clock = CachedTimeCycle.Get())
+	{
+		ApplyNightVisibility(Clock->IsVisualNight());
+	}
+}
 
 void AAviationBeaconManager::BuildSkylineBeacons()
 {

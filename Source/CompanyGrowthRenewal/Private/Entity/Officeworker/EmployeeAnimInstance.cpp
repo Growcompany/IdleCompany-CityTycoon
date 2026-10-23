@@ -3,6 +3,9 @@
 #include "Entity/Officeworker/EmployeeAnimInstance.h"
 #include "Entity/Officeworker/Officeworker.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
+#include "Office/SingleWorkstationActor.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Engine/Engine.h"
 #include "HAL/IConsoleManager.h"
 
@@ -28,7 +31,23 @@ void UEmployeeAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	// Owner가 유효하지 않으면 리턴
 	if (!CachedOwner.IsValid())
 	{
+		TypingIKAlpha = 0.0f;
+		TypingMouseBlend = 0.0f;
 		return;
+	}
+
+	// 위상은 소유자가 잡힌 뒤 한 번만 계산한다. 곱셈 해시로 섞지 않으면 EmployeeID 가 연번이라 값이 뭉친다.
+	if (!bAnimPhaseInitialized)
+	{
+		const int32 Id = CachedOwner->GetEmployeeID();
+		if (Id >= 0)
+		{
+			uint32 Hash = static_cast<uint32>(Id) * 2654435761u;
+			Hash ^= Hash >> 15;
+			AnimPhase01 = static_cast<float>(Hash & 0xFFFFu) / 65535.0f;
+			AnimRateJitter = 0.92f + static_cast<float>((Hash >> 16) & 0xFFu) / 255.0f * 0.16f;
+			bAnimPhaseInitialized = true;
+		}
 	}
 
 	// BehaviorComponent 캐싱
@@ -57,6 +76,14 @@ void UEmployeeAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		{
 			bWalking = CachedBehaviorComponent->Walking;
 			Speed = CachedBehaviorComponent->Speed;
+		}
+
+		if (ReactionRunSpeed >= 0.0f)
+		{
+			EmployeeState = EEmployeeState::Wander;
+			bIsSeated = false;
+			bWalking = true;
+			Speed = ReactionRunSpeed;
 		}
 
 #if !UE_BUILD_SHIPPING
@@ -100,4 +127,120 @@ void UEmployeeAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bWalking = false;
 		Speed = 0.0f;
 	}
+
+	UpdateTypingHandTargets(DeltaSeconds);
+}
+
+void UEmployeeAnimInstance::UpdateTypingHandTargets(float DeltaSeconds)
+{
+	if ((EmployeeState != EEmployeeState::Typing || !bIsSeated) && TypingIKAlpha <= KINDA_SMALL_NUMBER)
+	{
+		TypingIKAlpha = 0.0f;
+		TypingMouseBlend = 0.0f;
+		return;
+	}
+	const AOfficeworker* Worker = CachedOwner.Get();
+	const USkeletalMeshComponent* WorkerMesh = GetSkelMeshComponent();
+	if (!IsValid(Worker) || !IsValid(WorkerMesh) || Worker->bIsPortraitMode)
+	{
+		TypingIKAlpha = 0.0f;
+		TypingMouseBlend = 0.0f;
+		return;
+	}
+
+	const ASingleWorkstationActor* Workstation = Cast<ASingleWorkstationActor>(Worker->GetAssignedWorkstation());
+	if (!IsValid(Workstation))
+	{
+		TypingIKAlpha = 0.0f;
+		TypingMouseBlend = 0.0f;
+		return;
+	}
+
+	static const FName LeftWristSocket(TEXT("TypingLeftWrist"));
+	static const FName RightWristSocket(TEXT("TypingRightWrist"));
+	const auto HasTypingSockets = [](const UStaticMeshComponent* Equipment)
+	{
+		return IsValid(Equipment) && Equipment->IsVisible() && Equipment->GetStaticMesh()
+			&& Equipment->DoesSocketExist(LeftWristSocket) && Equipment->DoesSocketExist(RightWristSocket);
+	};
+
+	const UStaticMeshComponent* Equipment = HasTypingSockets(Workstation->KeyboardMesh)
+		? Workstation->KeyboardMesh : Workstation->LaptopMesh_Center;
+	if (!HasTypingSockets(Equipment))
+	{
+		TypingIKAlpha = 0.0f;
+		TypingMouseBlend = 0.0f;
+		return;
+	}
+
+	static const FName ContactCurve(TEXT("TypingContact"));
+	const float Contact = GetCurveValue(ContactCurve);
+	if (Contact <= 0.01f)
+	{
+		TypingIKAlpha = 0.0f;
+		TypingMouseBlend = 0.0f;
+		return;
+	}
+
+	const auto ReadContactCurve = [this, Contact](const TCHAR* CurveName)
+	{
+		return GetCurveValue(FName(CurveName)) / Contact;
+	};
+	const FVector LeftOffset(
+		ReadContactCurve(TEXT("TypingLeftX")),
+		ReadContactCurve(TEXT("TypingLeftY")),
+		ReadContactCurve(TEXT("TypingLeftZ")));
+	const FVector RightOffset(
+		ReadContactCurve(TEXT("TypingRightX")),
+		ReadContactCurve(TEXT("TypingRightY")),
+		ReadContactCurve(TEXT("TypingRightZ")));
+	const FRotator LeftRotationDelta(
+		ReadContactCurve(TEXT("TypingLeftPitch")),
+		ReadContactCurve(TEXT("TypingLeftYaw")),
+		ReadContactCurve(TEXT("TypingLeftRoll")));
+	const FRotator RightRotationDelta(
+		ReadContactCurve(TEXT("TypingRightPitch")),
+		ReadContactCurve(TEXT("TypingRightYaw")),
+		ReadContactCurve(TEXT("TypingRightRoll")));
+	const UStaticMeshComponent* Mouse = Workstation->MouseMesh;
+	const bool bValidMouse = IsValid(Mouse) && Mouse->IsVisible() && Mouse->GetStaticMesh()
+		&& Mouse->DoesSocketExist(RightWristSocket);
+	TypingMouseBlend = bValidMouse
+		? FMath::Clamp(ReadContactCurve(TEXT("TypingMouseWeight")), 0.0f, 1.0f) : 0.0f;
+	const FTransform WorkerWorldTransform = WorkerMesh->GetComponentTransform();
+
+	FTransform LeftTarget = Equipment->GetSocketTransform(LeftWristSocket, RTS_World);
+	LeftTarget.AddToTranslation(Equipment->GetComponentTransform().TransformVector(LeftOffset));
+	// 클립의 손목 회전 변화는 장비 로컬축 기준이므로 월드축으로 옮겨 소켓 회전 앞에 적용한다.
+	const FQuat EquipmentRotation = Equipment->GetComponentQuat();
+	LeftTarget.SetRotation(EquipmentRotation * LeftRotationDelta.Quaternion()
+		* EquipmentRotation.Inverse() * LeftTarget.GetRotation());
+	LeftTarget = LeftTarget.GetRelativeTransform(WorkerWorldTransform);
+	TypingLeftHandLocation = LeftTarget.GetLocation();
+	TypingLeftHandRotation = LeftTarget.Rotator();
+
+	FTransform RightTarget = Equipment->GetSocketTransform(RightWristSocket, RTS_World);
+	RightTarget.AddToTranslation(Equipment->GetComponentTransform().TransformVector(RightOffset));
+	RightTarget.SetRotation(EquipmentRotation * RightRotationDelta.Quaternion()
+		* EquipmentRotation.Inverse() * RightTarget.GetRotation());
+	if (TypingMouseBlend > 0.0f)
+	{
+		FTransform MouseTarget = Mouse->GetSocketTransform(RightWristSocket, RTS_World);
+		MouseTarget.AddToTranslation(Mouse->GetComponentTransform().TransformVector(RightOffset));
+		const FQuat MouseRotation = Mouse->GetComponentQuat();
+		MouseTarget.SetRotation(MouseRotation * RightRotationDelta.Quaternion()
+			* MouseRotation.Inverse() * MouseTarget.GetRotation());
+		const float MouseArcHeight = 4.0f * TypingMouseBlend * (1.0f - TypingMouseBlend)
+			* 4.0f * FMath::Abs(Equipment->GetComponentScale().Z);
+		RightTarget.SetLocation(FMath::Lerp(RightTarget.GetLocation(), MouseTarget.GetLocation(), TypingMouseBlend)
+			+ FVector(0.0f, 0.0f, MouseArcHeight));
+		RightTarget.SetRotation(FQuat::Slerp(RightTarget.GetRotation(), MouseTarget.GetRotation(), TypingMouseBlend));
+	}
+	RightTarget = RightTarget.GetRelativeTransform(WorkerWorldTransform);
+	TypingRightHandLocation = RightTarget.GetLocation();
+	TypingRightHandRotation = RightTarget.Rotator();
+
+	const float TargetAlpha = EmployeeState == EEmployeeState::Typing && bIsSeated
+		? FMath::Clamp(Contact, 0.0f, 1.0f) : 0.0f;
+	TypingIKAlpha = FMath::FInterpTo(TypingIKAlpha, TargetAlpha, DeltaSeconds, TypingIKBlendSpeed);
 }

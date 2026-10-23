@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/ResourceType.h"
 #include "MineResourceCardWidget.generated.h"
 
@@ -18,10 +18,10 @@ class UTexture2D;
 /**
  * UMineResourceCardWidget
  * MinePicker 모달 안에서 자원 1종을 카드로 표시 (UIE_MineResourceCard).
- * +/- 버튼 + 직접 입력으로 채광 수량(N) 을 정해 CreateMineLine 시 라인별 한도로 전달.
- * ProductionCard 패턴 차용: N 변경 시 비용/시간 자동 스케일.
+ * +/- 버튼 + 직접 입력으로 라인 저장 한도(N)를 정해 CreateMineLine에 전달.
+ * N 변경 시 1회 설치비와 한도 도달 시간을 갱신한다.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UMineResourceCardWidget : public UUserWidget
 {
 	GENERATED_BODY()
@@ -61,11 +61,11 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UButtonWidget> PlusButton;
 
-	// 사용자 WBP — 비용 StatRow ("비용:" 라벨 + "200원" 값). N 에 비례 (BasePrice * N).
+	// 사용자 WBP — 1회 설치비 StatRow. N 에 비례 (BasePrice * N).
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UStatRowWidget> Text_Cost;
 
-	// 사용자 WBP — 시간 StatRow ("시간:" 라벨 + "3s" 값). N 에 비례 (N / RatePerSec).
+	// 사용자 WBP — 한도 도달 시간 StatRow. N 에 비례 (N / RatePerSec).
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UStatRowWidget> Text_Time;
 
@@ -81,6 +81,7 @@ private:
 	void RefreshQuantityUI();
 	void RefreshCostText();
 	void RefreshTimeText();
+	void HandleResourceChanged(EResourceType Type, int64 NewValue);
 
 	int64 ComputeCost(int64 Quantity) const;
 	double ComputeProductionTimeSec(int64 Quantity) const;

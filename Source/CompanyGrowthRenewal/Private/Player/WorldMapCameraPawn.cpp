@@ -15,6 +15,13 @@ AWorldMapCameraPawn::AWorldMapCameraPawn()
 		MovementInputHandler->MinZoomDistance = 5000.0f;
 		MovementInputHandler->MaxZoomDistance = 200000.0f;
 
+		// 구 MainMap 밴드를 그대로 고정 — 2026-10-03 도시 답답함 수정으로 베이스가 40/46·-48 로 넓어졌지만
+		// 세계지도는 그 작업 범위가 아니다. 암묵 상속이던 값을 명시해 도시 튜닝이 지도로 새지 않게 한다.
+		MovementInputHandler->ZoomInFOV = 30.0f;
+		MovementInputHandler->ZoomOutFOV = 20.0f;
+		MovementInputHandler->ZoomInPitch = -40.0f;
+		MovementInputHandler->ZoomOutPitch = -55.0f;
+
 		// 타일 스트리밍으로 무한 이동 → 경계 제한 불필요
 		MovementInputHandler->BoundaryRadius = 10000000.0f;
 	}

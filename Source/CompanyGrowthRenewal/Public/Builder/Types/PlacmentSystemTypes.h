@@ -39,7 +39,7 @@ struct FPlacementData {
 		the positional offset to be applyed to the placement actor
 	*/
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Placement System")
-	FVector LocationOffset;
+	FVector LocationOffset = FVector::ZeroVector;
 
 	/*
 		whether to apply grid rule to location, the building can not be placed freely, it will snap to certain points based on grid settings

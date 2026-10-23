@@ -10,6 +10,7 @@
 // Managers
 #include "Manager/UIManagerSubsystem.h"
 #include "Manager/TableManagerSubsystem.h"
+#include "Manager/MissionManagerSubsystem.h"
 
 // Office
 #include "Office/OfficeManager.h"
@@ -46,6 +47,7 @@ void UOfficeWorkstationCardWidget::SetWorkstationInfo(const FWorkstationCardTabl
 {
 	WorkstationInfo = InWorkstationInfo;
 	CardInfoWidget->SetWorkstationInfo(WorkstationInfo);
+	if (UIE_EntityCardFrame) UIE_EntityCardFrame->ApplyCompactCatalogLayout();
 
 	// SoftObjectPath로 아이콘 비동기 로드
 	if (!WorkstationInfo.UIIcon.IsNull())
@@ -87,12 +89,7 @@ void UOfficeWorkstationCardWidget::HandleCardClicked()
 	}
 
 	AOfficeCameraPawn* OfficePawn = Cast<AOfficeCameraPawn>(PC->GetPawn());
-	if (OfficePawn)
-	{
-		// 업무공간 배치 모드 시작
-		OfficePawn->BeginWorkstationPlacement(WorkstationInfo);
-	}
-	else
+	if (!OfficePawn)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[OfficeWorkstationCardWidget] OfficeCameraPawn not found!"));
 		return;
@@ -102,18 +99,24 @@ void UOfficeWorkstationCardWidget::HandleCardClicked()
 	UTableManagerSubsystem* TableManager = GameInstance->GetSubsystem<UTableManagerSubsystem>();
 	UUIManagerSubsystem* UIManager = GameInstance->GetSubsystem<UUIManagerSubsystem>();
 
-	if (!TableManager || !UIManager)
+	UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
+	if (!TableManager || !UIBase)
 	{
-		UE_LOG(LogTemp, Error, TEXT("[OfficeWorkstationCardWidget] TableManager or UIManager not found!"));
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeWorkstationCardWidget] Placement UI dependencies not available"));
 		return;
 	}
 
 	TSubclassOf<UUserWidget> PlacementWidgetClass = TableManager->GetWidgetClass(EWidgetType::BuildPlacementPanel);
+	if (!PlacementWidgetClass || !PlacementWidgetClass->IsChildOf(UBuildPlacementPanelWidget::StaticClass()))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeWorkstationCardWidget] BuildPlacementPanel class missing or invalid"));
+		return;
+	}
 
 	// 카탈로그를 닫고 나면 이 카드(카탈로그의 자식)는 위젯 풀로 반납된다 — 멤버를 더 읽지 않도록 먼저 복사.
 	const FWorkstationCardTable InfoCopy = WorkstationInfo;
 
-	UUIBase* UIBase = UIManager->GetUIBase();
+	OfficePawn->BeginWorkstationPlacement(InfoCopy);
 
 	// 카탈로그를 배치 바 "아래에 깔아두지" 않는다 — 깔아두면 배치 종료 시 되살아난다.
 	// (CommonUI 는 표시 중인 위젯 제거를 전환 완료 후로 미루므로, 끝에서 두 번 pop 해도 카탈로그는 안 닫힌다.)
@@ -125,7 +128,16 @@ void UOfficeWorkstationCardWidget::HandleCardClicked()
 	if (PlacementWidget)
 	{
 		PlacementWidget->SetWorkstationInfo(InfoCopy);
+		if (UMissionManagerSubsystem* MissionMgr = GameInstance->GetSubsystem<UMissionManagerSubsystem>())
+		{
+			MissionMgr->NotifyDeskSelected();
+		}
 		UE_LOG(LogTemp, Log, TEXT("[OfficeWorkstationCardWidget] BuildPlacementPanelWidget opened with workstation info"));
+	}
+	else
+	{
+		OfficePawn->EndWorkstationPlacement();
+		UE_LOG(LogTemp, Warning, TEXT("[OfficeWorkstationCardWidget] Failed to open BuildPlacementPanelWidget"));
 	}
 }
 

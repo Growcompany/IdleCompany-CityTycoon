@@ -21,6 +21,27 @@ EEmployeeRank UEmployeeTypeHelper::GetRankFromEnhancementLevel(int32 Enhancement
     }
 }
 
+EEmployeeJobTitle UEmployeeTypeHelper::GetJobTitleFromLevel(int32 Level)
+{
+    if (Level >= JobTitleLevelExecutive)   return EEmployeeJobTitle::Executive;
+    if (Level >= JobTitleLevelManager)     return EEmployeeJobTitle::Manager;
+    if (Level >= JobTitleLevelSeniorStaff) return EEmployeeJobTitle::SeniorStaff;
+    if (Level >= JobTitleLevelStaff)       return EEmployeeJobTitle::Staff;
+    return EEmployeeJobTitle::Intern;
+}
+
+FString UEmployeeTypeHelper::GetJobTitleDisplayName(EEmployeeJobTitle JobTitle)
+{
+    switch (JobTitle)
+    {
+    case EEmployeeJobTitle::Staff:       return TEXT("사원");
+    case EEmployeeJobTitle::SeniorStaff: return TEXT("대리");
+    case EEmployeeJobTitle::Manager:     return TEXT("과장");
+    case EEmployeeJobTitle::Executive:   return TEXT("임원");
+    default:                             return TEXT("인턴");
+    }
+}
+
 FString UEmployeeTypeHelper::MakeStarString(int32 EnhancementLevel)
 {
     // 상한 = UEmployeeManager::MaxEnhancementLevel(15) — 순환 include 회피로 값 미러 (변경 시 동기)
@@ -40,7 +61,7 @@ namespace
     constexpr float OutputUnit = 5.2f;    // Lv1 무강화 기준 출력 단위
 }
 
-// 레벨은 산출에 직접 곱하지 않는다 `[확정 2026-08-13]` — 레벨업이 이미 SkillPointsPerLevel 로
+// 레벨은 산출에 직접 곱하지 않는다 `[확정 2026-08-13]` — 레벨업이 이미 WorkPowerPerLevel 로
 // 직능 포인트를 주고, 그 포인트가 DisciplineAffinity 로 산출을 올린다. 여기에 LevelFactor 를 두면
 // 같은 레벨업이 두 번 계상된다. 성장 축은 직능 SP / 스탯 / ★ 셋이 전담.
 float UEmployeeTypeHelper::CalculateBaseOutput(int32 /*Level*/)

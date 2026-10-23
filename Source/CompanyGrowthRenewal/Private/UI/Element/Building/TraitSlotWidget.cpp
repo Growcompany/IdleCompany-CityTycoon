@@ -2,32 +2,54 @@
 
 #include "UI/Element/Building/TraitSlotWidget.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
+#include "Components/Border.h"
 #include "Components/Image.h"
 #include "CommonTextBlock.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "UI/Element/Common/ResourceWidget.h"
-#include "UI/Element/Cards/ItemCardWidget.h"
-#include "CommonButtonBase.h"
-#include "UObject/ConstructorHelpers.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/ResourceItemManager.h"
 #include "Table/BuildingTraitTable.h"
+#include "Enum/BuildingTraitTarget.h"
 
-UTraitSlotWidget::UTraitSlotWidget(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
+namespace TraitSlotColor
 {
-	// 등급별 Trait 버튼 스타일 기본 매핑 (CUI_Style_Button_Trait_*). 디자이너가 EquippedRarityStyleMap 으로 override 가능.
-	static ConstructorHelpers::FClassFinder<UCommonButtonStyle> CommonF(TEXT("/Game/CompanyGrowth/UI/CommonStyle/Button/Trait/CUI_Style_Button_Trait_Common.CUI_Style_Button_Trait_Common_C"));
-	static ConstructorHelpers::FClassFinder<UCommonButtonStyle> UnusualF(TEXT("/Game/CompanyGrowth/UI/CommonStyle/Button/Trait/CUI_Style_Button_Trait_Unusual.CUI_Style_Button_Trait_Unusual_C"));
-	static ConstructorHelpers::FClassFinder<UCommonButtonStyle> RareF(TEXT("/Game/CompanyGrowth/UI/CommonStyle/Button/Trait/CUI_Style_Button_Trait_Rare.CUI_Style_Button_Trait_Rare_C"));
-	static ConstructorHelpers::FClassFinder<UCommonButtonStyle> EpicF(TEXT("/Game/CompanyGrowth/UI/CommonStyle/Button/Trait/CUI_Style_Button_Trait_Epic.CUI_Style_Button_Trait_Epic_C"));
-	static ConstructorHelpers::FClassFinder<UCommonButtonStyle> LegendaryF(TEXT("/Game/CompanyGrowth/UI/CommonStyle/Button/Trait/CUI_Style_Button_Trait_Legendary.CUI_Style_Button_Trait_Legendary_C"));
-	static ConstructorHelpers::FClassFinder<UCommonButtonStyle> MythicF(TEXT("/Game/CompanyGrowth/UI/CommonStyle/Button/Trait/CUI_Style_Button_Trait_Mythic.CUI_Style_Button_Trait_Mythic_C"));
-	if (CommonF.Succeeded())    EquippedRarityStyleMap.Add(ELootBoxRarity::Common,    CommonF.Class);
-	if (UnusualF.Succeeded())   EquippedRarityStyleMap.Add(ELootBoxRarity::Unusual,   UnusualF.Class);
-	if (RareF.Succeeded())      EquippedRarityStyleMap.Add(ELootBoxRarity::Rare,      RareF.Class);
-	if (EpicF.Succeeded())      EquippedRarityStyleMap.Add(ELootBoxRarity::Epic,      EpicF.Class);
-	if (LegendaryF.Succeeded()) EquippedRarityStyleMap.Add(ELootBoxRarity::Legendary, LegendaryF.Class);
-	if (MythicF.Succeeded())    EquippedRarityStyleMap.Add(ELootBoxRarity::Mythic,    MythicF.Class);
+	// 등급색 유틸은 sRGB 분수를 돌려준다 ― 섞기는 sRGB 에서 하고 머티리얼에는 linear 로 넣는다
+	static FLinearColor MixToLinear(const FLinearColor& BaseSRGB, const FLinearColor& RaritySRGB, float RarityMix)
+	{
+		return FLinearColor(FMath::Lerp(BaseSRGB, RaritySRGB, RarityMix).ToFColor(false));
+	}
+
+	// M_UIPanel_Rounded 계열 ― Outer = 가장자리 림, Inner = 림 안쪽 밝은 선
+	static void SetPanelColors(UImage* Image, const FLinearColor& Top, const FLinearColor& Bottom,
+		const FLinearColor& OuterRim, const FLinearColor& InnerRim)
+	{
+		if (!Image)
+		{
+			return;
+		}
+		if (UMaterialInstanceDynamic* MID = Image->GetDynamicMaterial())
+		{
+			MID->SetVectorParameterValue(TEXT("FillTop"), Top);
+			MID->SetVectorParameterValue(TEXT("FillBottom"), Bottom);
+			MID->SetVectorParameterValue(TEXT("OuterColor"), OuterRim);
+			MID->SetVectorParameterValue(TEXT("InnerColor"), InnerRim);
+		}
+	}
+
+	// M_UI_ChipLine 은 정점 색을 안 읽어 위젯 틴트가 무시된다 ― 색은 LineCol, 농도는 BaseA 로 넣는다
+	static void SetLineColor(UImage* Image, const FColor& ColorSRGB)
+	{
+		if (!Image)
+		{
+			return;
+		}
+		if (UMaterialInstanceDynamic* MID = Image->GetDynamicMaterial())
+		{
+			MID->SetVectorParameterValue(TEXT("LineCol"), FLinearColor(FColor(ColorSRGB.R, ColorSRGB.G, ColorSRGB.B)));
+			MID->SetScalarParameterValue(TEXT("BaseA"), ColorSRGB.A / 255.f);
+		}
+	}
 }
 
 void UTraitSlotWidget::NativeConstruct()
@@ -67,7 +89,11 @@ void UTraitSlotWidget::ApplyDesignTimePreview()
 	if (!IsDesignTime()) return;
 
 	ApplyVisualForState(PreviewState);
-	// 잠금 비용 샘플은 DiamondCostWidget(UIE_Resource) 인스턴스 기본값(ResourceType=Diamond/Amount=30)이 표시 — 별도 세팅 불필요
+	if (PreviewState == ETraitSlotVisualState::Equipped)
+	{
+		// 아이콘·효과 문구는 WBP 에 저작된 샘플 값이 보인다
+		ApplyRarityColors(PreviewRarity);
+	}
 	if (SelectedBorder)
 	{
 		SelectedBorder->SetVisibility(ESlateVisibility::Collapsed);
@@ -85,7 +111,7 @@ void UTraitSlotWidget::SetEmpty()
 	EquippedTraitID = NAME_None;
 	if (SlotCaptionText)
 	{
-		SlotCaptionText->SetText(FText::FromString(TEXT("비어 있음")));
+		SlotCaptionText->SetText(FText::FromString(TEXT("장착 가능")));
 	}
 	ApplyStateVisibility();
 }
@@ -97,22 +123,33 @@ void UTraitSlotWidget::SetEquipped(FName InTraitID)
 
 	UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
 	FBuildingTraitTableRow Row;
-	const bool bRowFound = TableMgr && TableMgr->GetBuildingTraitData(InTraitID, Row);
-	if (bRowFound)
+	if (TableMgr && TableMgr->GetBuildingTraitData(InTraitID, Row))
 	{
-		if (EquippedCard)
+		if (EquippedIcon)
 		{
-			if (UTexture2D* Tex = Row.Icon.IsNull() ? nullptr : Row.Icon.LoadSynchronous())
-			{
-				EquippedCard->SetIcon(Tex);
-			}
-			EquippedCard->SetItemID(InTraitID);
-			// 등급별 Trait 버튼 스타일 = 카드 배경색
-			if (TSubclassOf<UCommonButtonStyle>* StylePtr = EquippedRarityStyleMap.Find(Row.Rarity))
-			{
-				if (*StylePtr) EquippedCard->SetStyle(*StylePtr);
-			}
+			UTexture2D* Tex = Row.Icon.IsNull() ? nullptr : Row.Icon.LoadSynchronous();
+			EquippedIcon->SetBrushFromTexture(Tex, /*bMatchSize=*/false);
 		}
+		ApplyRarityColors(Row.Rarity);
+
+		// 상세 창 라벨과 같은 (대상, 수치) 에서 나온 두 줄
+		const EBuildingTraitTarget Target = GetTargetForCategory(Row.Category);
+		if (EffectNameText)
+		{
+			EffectNameText->SetText(GetTraitTargetDisplayName(Target));
+		}
+		if (EffectValueText)
+		{
+			EffectValueText->SetText(FormatTraitEffectValueText(Target, Row.BaseEffect));
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[TraitSlot] DT_BuildingTrait 에 '%s' 행이 없습니다 — 슬롯 %d 아이콘·효과 비움"),
+			*InTraitID.ToString(), SlotIndex);
+		if (EquippedIcon) EquippedIcon->SetBrushFromTexture(nullptr, false);
+		if (EffectNameText) EffectNameText->SetText(FText::GetEmpty());
+		if (EffectValueText) EffectValueText->SetText(FText::GetEmpty());
 	}
 
 	ApplyStateVisibility();
@@ -148,8 +185,18 @@ void UTraitSlotWidget::SetSelected(bool bInSelected)
 	PulseTime = 0.f;
 	if (SelectedBorder)
 	{
-		SelectedBorder->SetRenderOpacity(1.f);
 		SelectedBorder->SetVisibility(bSelected ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	ApplySelectedRingPulse();
+	TraitSlotColor::SetLineColor(EmptyRing, bSelected ? RingTargetColor : RingColor);
+	// FLinearColor(FColor) 가 sRGB→linear 변환을 한다
+	if (EmptyPlus)
+	{
+		EmptyPlus->SetContentColorAndOpacity(FLinearColor(bSelected ? PlusTargetColor : PlusColor));
+	}
+	if (SlotCaptionText)
+	{
+		SlotCaptionText->SetColorAndOpacity(FSlateColor(FLinearColor(bSelected ? CaptionTargetColor : CaptionColor)));
 	}
 }
 
@@ -169,22 +216,75 @@ void UTraitSlotWidget::ApplyVisualForState(ETraitSlotVisualState InState)
 		if (W) W->SetVisibility(bVisible ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	};
 
-	Show(EquippedCard, bEquipped);
-	Show(EmptyPlusText, bEmpty);
+	Show(RarityGlow, bEquipped);
+	Show(EquippedFace, bEquipped);
+	Show(EquippedIcon, bEquipped);
+	Show(RarityGem, bEquipped);
+	Show(EffectNameText, bEquipped);
+	Show(EffectValueText, bEquipped);
+
+	Show(EmptyRing, bEmpty);
+	Show(EmptyPlus, bEmpty);
+	Show(SlotCaptionText, bEmpty);
+
+	Show(LockStripes, bLocked);
+	Show(LockShadow, bLocked);
 	Show(LockOverlay, bLocked);
 	Show(DiamondCostWidget, bLocked);
-	// 캡션 = 빈 슬롯 전용("비어 있음") — 장착 이름은 상세 모달 담당 + 긴 이름 겹침 (2026-07-21 사용자 픽)
-	Show(SlotCaptionText, bEmpty);
+}
+
+void UTraitSlotWidget::ApplyRarityColors(ELootBoxRarity Rarity)
+{
+	using namespace TraitSlotColor;
+
+	const FLinearColor RaritySRGB = FLootBoxRarityUtility::GetRarityColor(Rarity);
+	const FLinearColor RarityLinear(RaritySRGB.ToFColor(false));
+
+	const FLinearColor RarityHighlight = MixToLinear(FLinearColor::White, RaritySRGB, 0.65f);
+	SetPanelColors(EquippedFace,
+		MixToLinear(FaceTopBase.ReinterpretAsLinear(), RaritySRGB, FaceTopRarityMix),
+		MixToLinear(FaceBottomBase.ReinterpretAsLinear(), RaritySRGB, FaceBottomRarityMix),
+		RarityLinear, RarityHighlight);
+	// 보석 = 위가 밝은 등급색 덩어리, 테두리는 WBP 의 어두운 림 그대로
+	if (RarityGem)
+	{
+		if (UMaterialInstanceDynamic* MID = RarityGem->GetDynamicMaterial())
+		{
+			MID->SetVectorParameterValue(TEXT("FillTop"), RarityHighlight);
+			MID->SetVectorParameterValue(TEXT("FillBottom"), RarityLinear);
+		}
+	}
+
+	if (RarityGlow)
+	{
+		RarityGlow->SetColorAndOpacity(FLinearColor(RarityLinear.R, RarityLinear.G, RarityLinear.B, GlowAlpha));
+	}
 }
 
 void UTraitSlotWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
-	// 타겟 슬롯 블루 링 펄스 (0.1~1.0, 주기 약 1.4초). 비선택 시 연산 0.
-	if (bSelected && SelectedBorder)
+	// 비선택 시 연산 0
+	if (bSelected)
 	{
 		PulseTime += InDeltaTime;
-		SelectedBorder->SetRenderOpacity(0.55f + 0.45f * FMath::Sin(PulseTime * 4.5f));
+		ApplySelectedRingPulse();
 	}
+}
+
+void UTraitSlotWidget::ApplySelectedRingPulse()
+{
+	UMaterialInstanceDynamic* MID = SelectedBorder ? SelectedBorder->GetDynamicMaterial() : nullptr;
+	if (!MID)
+	{
+		return;
+	}
+	// 링 MI 에 구운 농도가 최고점 ― 첫 주입 전에 한 번 읽어 둔다
+	if (SelectedRingPeakAlpha < 0.f)
+	{
+		SelectedRingPeakAlpha = MID->K2_GetScalarParameterValue(TEXT("BaseA"));
+	}
+	// 최고점의 0.45~1.0 배(시안 opacity .45↔1), 주기 약 1.4초. 고른 순간이 가장 밝다
+	MID->SetScalarParameterValue(TEXT("BaseA"), SelectedRingPeakAlpha * (0.725f + 0.275f * FMath::Cos(PulseTime * 4.5f)));
 }

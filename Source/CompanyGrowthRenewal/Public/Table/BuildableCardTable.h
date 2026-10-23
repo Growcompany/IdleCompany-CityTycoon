@@ -32,7 +32,7 @@ struct FBuildableCardTable : public FTableRowBase
 	TSoftObjectPtr<UTexture2D> UIIcon;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Type")
-	EInteractableType InteractableType;
+	EInteractableType InteractableType = EInteractableType::None;
 
 	// 건물 등급 — 카드 색 표시 전용(오피스 프리셋/슬롯/해금과 무관, footprint 칸수가 그 역할).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rarity")

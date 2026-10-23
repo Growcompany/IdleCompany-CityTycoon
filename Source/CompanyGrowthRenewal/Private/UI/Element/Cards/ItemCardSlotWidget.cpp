@@ -2,6 +2,7 @@
 
 #include "UI/Element/Cards/ItemCardSlotWidget.h"
 #include "CommonTextBlock.h"
+#include "CommonBorder.h"
 #include "UI/Element/Common/ItemTooltipWidget.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Enum/WidgetType.h"
@@ -19,6 +20,11 @@ void UItemCardSlotWidget::SetItem(UTexture2D* InIcon, int32 InQuantity)
 void UItemCardSlotWidget::SetIcon(UTexture2D* InIcon)
 {
 	if (UIE_ItemCard) UIE_ItemCard->SetIcon(InIcon);
+}
+
+void UItemCardSlotWidget::SetIconResource(UObject* InResource)
+{
+	if (UIE_ItemCard) UIE_ItemCard->SetIconResource(InResource);
 }
 
 void UItemCardSlotWidget::SetQuantity(int32 InQuantity)
@@ -67,6 +73,26 @@ void UItemCardSlotWidget::SetCardSize(FVector2D InCardSize, FVector2D InIconSize
 	if (UIE_ItemCard) UIE_ItemCard->SetCardSize(InCardSize, InIconSize);
 }
 
+void UItemCardSlotWidget::SetIconTint(FLinearColor InTint)
+{
+	if (UIE_ItemCard) UIE_ItemCard->SetIconTint(InTint);
+}
+
+FLinearColor UItemCardSlotWidget::GetIconTint() const
+{
+	return UIE_ItemCard ? UIE_ItemCard->GetIconTint() : FLinearColor::White;
+}
+
+void UItemCardSlotWidget::SetLabelColor(FSlateColor InColor)
+{
+	if (QuantityText) QuantityText->SetColorAndOpacity(InColor);
+}
+
+FSlateColor UItemCardSlotWidget::GetLabelColor() const
+{
+	return QuantityText ? QuantityText->GetColorAndOpacity() : FSlateColor::UseForeground();
+}
+
 void UItemCardSlotWidget::SetLabelFontSize(int32 InSize)
 {
 	if (!QuantityText || InSize <= 0) { return; }
@@ -75,7 +101,20 @@ void UItemCardSlotWidget::SetLabelFontSize(int32 InSize)
 	QuantityText->SetFont(Font);
 }
 
-void UItemCardSlotWidget::SetTooltipInfo(const FText& InName, const FText& InDesc, UTexture2D* InIcon, int32 InPrice, int32 InZOrder)
+void UItemCardSlotWidget::SetQuantityBackgroundStyle(TSubclassOf<UCommonBorderStyle> InStyle)
+{
+	if (!QuantityText || !InStyle) { return; }
+	if (UCommonBorder* QuantityBackground = Cast<UCommonBorder>(QuantityText->GetParent()))
+	{
+		QuantityBackground->SetStyle(InStyle);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ItemCardSlot] %s quantity label has no CommonBorder background"), *GetClass()->GetName());
+	}
+}
+
+void UItemCardSlotWidget::SetTooltipInfo(const FText& InName, const FText& InDesc, UObject* InIcon, int32 InPrice, int32 InZOrder)
 {
 	TooltipName = InName;
 	TooltipDesc = InDesc;
@@ -114,9 +153,38 @@ void UItemCardSlotWidget::ShowTooltip()
 	ActiveTooltip->ShowAt(AbsPos, TooltipName, TooltipIcon, TooltipDesc, TooltipPrice, 2.5f, ETooltipAnchor::BelowAnchor, TooltipZOrder);
 }
 
+void UItemCardSlotWidget::NativePreConstruct()
+{
+	Super::NativePreConstruct();
+	// 디자이너 미리보기에서도 저작 규격이 보여야 배치처가 값을 눈으로 고른다 (UItemCardWidget 과 같은 규약)
+	ApplyAuthoredLayout();
+}
+
+void UItemCardSlotWidget::ApplyAuthoredLayout()
+{
+	if (!CardSize.IsNearlyZero())
+	{
+		// SetCardSize 는 두 크기를 함께 덮는다 — 0(=상속)일 때 카드의 저작 IconSize 를 되돌려주지 않으면
+		// 아이콘이 카드 변만큼 부풀고 Product(4:3) 변형의 비율이 사라진다
+		const FVector2D InheritedIcon = UIE_ItemCard ? UIE_ItemCard->GetIconSize() : CardSize;
+		SetCardSize(CardSize, IconSize > 0.f ? FVector2D(IconSize, IconSize) : InheritedIcon);
+	}
+	else if (IconSize > 0.f)
+	{
+		SetIconSize(FVector2D(IconSize, IconSize));
+	}
+	if (LabelFontSize > 0)
+	{
+		SetLabelFontSize(LabelFontSize);
+	}
+}
+
 void UItemCardSlotWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+
+	// 카드 규격은 PreConstruct 에서 한 번 더 — 런타임 경로는 PreConstruct 가 건너뛰어지는 문맥이 있다
+	ApplyAuthoredLayout();
 
 	// 카드의 OnItemCardClicked 를 Slot 의 OnItemCardClicked 로 forward
 	if (UIE_ItemCard)

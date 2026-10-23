@@ -6,7 +6,7 @@
 
 /**
  * 건물 위 금고 게이지의 운영 상태.
- * 채움 길이와 상태 둘 다 운영 진행 시간에서 나온다 ― 금고 만액은 VaultFull 버블이 따로 알린다.
+ * 채움 길이와 상태 둘 다 운영 진행 시간에서 나온다 ― 금고 잔액은 읽지 않는다(온라인 수익은 즉시 적립).
  */
 UENUM(BlueprintType)
 enum class EGaugeHealth : uint8
@@ -200,6 +200,8 @@ inline float ComputeFillTipOffset(float Width, float FillPct, float Inset, float
 struct FGaugeCandidate
 {
 	int32 BuildingIndex = INDEX_NONE;
+	// ⚠ 5초 주기 RefreshVaultGauges 에서만 채워진다 — 매 틱 UpdateVaultGaugePositions 는
+	// 지역변수로 투영하고 되쓰지 않는다. 지금 좌표가 필요하면 ProjectBuildingGaugeGeometry 를 다시 부를 것.
 	FVector2D CanvasPos = FVector2D::ZeroVector;
 	float ScreenWidth = 0.0f;
 	float DistSq = 0.0f;   // SelectGaugesByProximity 가 채운다

@@ -8,11 +8,22 @@
 #include "Table/BuildingSkinData.h"
 #include "Enum/ItemType.h"
 #include "Engine/GameInstance.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Data/CloudEconomyData.h"
+#include "Dom/JsonObject.h"
+#include "Utils/GachaBatchMath.h"
 
 namespace
 {
 	// 기본(시작) 스킨 — 가챠 풀에서 제외
 	constexpr int32 BaseSkinID = 100;
+
+	// 서버 카탈로그 reason — consumeRules.json 과 바이트 단위로 같아야 한다(다르면 400)
+	const FName ConsumeReason_SkinPull(TEXT("skin.pull"));
+
+	// 중복 클릭 차단 키 — 특성(gacha.trait.*)·채용(gacha.recruit.*)과 겹치지 않는 도메인 접두사
+	const FName ActionKey_SkinNormal(TEXT("gacha.skin.normal"));
+	const FName ActionKey_SkinAdvanced(TEXT("gacha.skin.advanced"));
 }
 
 void UBuildingSkinManagerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -106,8 +117,7 @@ bool UBuildingSkinManagerSubsystem::CanExecuteGachaPull(bool bAdvanced) const
 {
 	UItemInventoryManager* IIM = GetItemInventoryManager();
 	if (!IIM) { return false; }
-	const EItemType TicketType = bAdvanced ? EItemType::SkinTicketAdvanced : EItemType::SkinTicketNormal;
-	return IIM->HasItem(TicketType, 1);
+	return IIM->HasItem(GetTicketType(bAdvanced), 1);
 }
 
 int32 UBuildingSkinManagerSubsystem::GetPullsSinceEpic(bool bAdvanced) const
@@ -279,10 +289,21 @@ bool UBuildingSkinManagerSubsystem::ExecuteGachaPull(bool bAdvanced, FBuildingSk
 	if (!CanExecuteGachaPull(bAdvanced)) { return false; }
 
 	UItemInventoryManager* IIM = GetItemInventoryManager();
+	// 티켓 리터럴과 SpendItem 은 이 본문에 남긴다 — export_catalog.py 가 consumeRules.json 의 items/maxPerOp 를 여기서 파싱한다
 	const EItemType TicketType = bAdvanced ? EItemType::SkinTicketAdvanced : EItemType::SkinTicketNormal;
 	if (!IIM->SpendItem(TicketType, 1, false)) { return false; }
 
-	// 천장 스냅샷 — Pick 실패 시 롤백용
+	// 로컬 차감 경로라 등급 풀이 비면 티켓을 되돌릴 수 있다(서버 경로는 되돌리지 않는다)
+	if (!ApplyLocalPullEffect(bAdvanced, /*bRefundTicketOnPoolEmpty=*/true, OutResult)) { return false; }
+
+	SaveGameData();
+	return true;
+}
+
+bool UBuildingSkinManagerSubsystem::ApplyLocalPullEffect(bool bAdvanced, bool bRefundTicketOnPoolEmpty,
+	FBuildingSkinGachaResult& OutResult)
+{
+	// 천장 스냅샷 — 등급 롤이 카운터를 먼저 올리므로 Pick 실패 시 원복해야 한다
 	FBuildingSkinPityData& PityRef = bAdvanced ? Inventory.GachaData.AdvancedPity : Inventory.GachaData.NormalPity;
 	const FBuildingSkinPityData PitySnapshot = PityRef;
 
@@ -295,14 +316,21 @@ bool UBuildingSkinManagerSubsystem::ExecuteGachaPull(bool bAdvanced, FBuildingSk
 
 	if (SkinID == INDEX_NONE)
 	{
-		// 해당 등급 전부 보유 → 중복 처리(마일리지 환산). 카드는 표시용으로 같은 등급 아무 스킨.
+		// 해당 등급 전부 보유 -> 중복 처리(마일리지 환산). 카드는 표시용으로 같은 등급 아무 스킨.
 		SkinID = PickAnySkinOfRarity(Rarity);
 		if (SkinID == INDEX_NONE)
 		{
-			// 등급 풀 자체가 비어있음(데이터 오류) — 롤백 + 환불
-			UE_LOG(LogTemp, Warning, TEXT("[BuildingSkinManager] 등급 %d 의 스킨 풀이 비어있음 — 롤백/환불"), static_cast<int32>(Rarity));
+			// 등급 풀 자체가 비어있음(데이터 오류) — 천장 롤백
+			UE_LOG(LogTemp, Error, TEXT("[BuildingSkinManager] 등급 %d 의 스킨 풀이 비어있음 — 롤백"), static_cast<int32>(Rarity));
 			PityRef = PitySnapshot;
-			IIM->AddItem(TicketType, 1, false);
+			// 서버가 소모한 티켓은 클라가 되돌리지 않는다 — 다음 /player/state 가 지우는 유령 수량이고 소모품 자체 지급이다
+			if (bRefundTicketOnPoolEmpty)
+			{
+				if (UItemInventoryManager* IIM = GetItemInventoryManager())
+				{
+					IIM->AddItem(GetTicketType(bAdvanced), 1, false);
+				}
+			}
 			return false;
 		}
 		bDuplicate = true;
@@ -315,7 +343,8 @@ bool UBuildingSkinManagerSubsystem::ExecuteGachaPull(bool bAdvanced, FBuildingSk
 	}
 
 	Inventory.GachaData.TotalPullsAllTime++;
-	AddMileagePoints(1); // 풀당 기본 마일리지 1 (특성과 동일)
+	// 풀당 기본 마일리지 1 (특성과 동일). 스킨 마일리지는 로컬 권위 — 서버 wallet.mileage 는 채용 풀이다
+	AddMileagePoints(1);
 
 	OutResult.ResultSkinID = SkinID;
 	OutResult.Rarity = Rarity;
@@ -325,7 +354,6 @@ bool UBuildingSkinManagerSubsystem::ExecuteGachaPull(bool bAdvanced, FBuildingSk
 	OutResult.MileageGained = bDuplicate ? MileageGain : 0;
 
 	OnSkinGachaCompleted.Broadcast(OutResult);
-	SaveGameData();
 	return true;
 }
 
@@ -341,6 +369,150 @@ bool UBuildingSkinManagerSubsystem::ExecuteGachaPullMulti(bool bAdvanced, int32 
 		OutResults.Add(R);
 	}
 	return OutResults.Num() > 0;
+}
+
+// ===== 서버 권위 뽑기 =====
+
+UCloudEconomySubsystem* UBuildingSkinManagerSubsystem::GetCloudEconomy() const
+{
+	UGameInstance* GI = GetGameInstance();
+	return GI ? GI->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+}
+
+EItemType UBuildingSkinManagerSubsystem::GetTicketType(bool bAdvanced)
+{
+	return bAdvanced ? EItemType::SkinTicketAdvanced : EItemType::SkinTicketNormal;
+}
+
+FName UBuildingSkinManagerSubsystem::GetPullConsumeReason()
+{
+	return ConsumeReason_SkinPull;
+}
+
+FName UBuildingSkinManagerSubsystem::GachaActionKey(bool bAdvanced)
+{
+	return bAdvanced ? ActionKey_SkinAdvanced : ActionKey_SkinNormal;
+}
+
+int32 UBuildingSkinManagerSubsystem::ResolveRollCount(int32 Requested, int32 ServerAmount)
+{
+	return FMath::Clamp(ServerAmount, 0, FMath::Max(0, Requested));
+}
+
+bool UBuildingSkinManagerSubsystem::ShouldSkipLocalEffect(bool bReplayed)
+{
+	return bReplayed;
+}
+
+void UBuildingSkinManagerSubsystem::RequestGachaPull(bool bAdvanced, int32 RequestedCount, FOnSkinPullDone Done)
+{
+	// 허용 밖의 수를 줄여 보내면 고른 수와 다른 수가 소모된다 ― pending 을 잡기 전에 거절한다
+	if (!GachaBatchMath::IsAllowedPullCount(RequestedCount))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BuildingSkinManager] 스킨 뽑기 거절 - 1/10/30 회만 허용. Requested=%d Advanced=%d"),
+			RequestedCount, bAdvanced ? 1 : 0);
+		Done.ExecuteIfBound(false, TArray<FBuildingSkinGachaResult>());
+		return;
+	}
+
+	const FName ActionKey = GachaActionKey(bAdvanced);
+
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BuildingSkinManager] 스킨 뽑기 실패 - CloudEconomySubsystem 없음. Advanced=%d"),
+			bAdvanced ? 1 : 0);
+		Done.ExecuteIfBound(false, TArray<FBuildingSkinGachaResult>());
+		return;
+	}
+
+	// 중복 클릭 — 내가 잡은 pending 이 아니므로 풀지 않는다
+	if (!Cloud->BeginPendingAction(ActionKey))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BuildingSkinManager] 스킨 뽑기 요청 중복 - 진행 중. Advanced=%d"), bAdvanced ? 1 : 0);
+		Done.ExecuteIfBound(false, TArray<FBuildingSkinGachaResult>());
+		return;
+	}
+
+	// 로컬 캐시로 가능 판정만 — 차감은 서버가 한다. 다이아 폴백이 없어 티켓이 없으면 요청 자체를 보내지 않는다
+	UItemInventoryManager* IIM = GetItemInventoryManager();
+	if (!IIM || !IIM->HasItem(GetTicketType(bAdvanced), RequestedCount))
+	{
+		UE_LOG(LogTemp, Log, TEXT("[BuildingSkinManager] 스킨 뽑기 미전송 - 티켓 부족(로컬 캐시). Count=%d"), RequestedCount);
+		FinishServerPull(bAdvanced, /*bOk=*/false, /*Rolls=*/0, /*bReplayed=*/false, ActionKey, Done);
+		return;
+	}
+
+	SendConsumeThenRoll(bAdvanced, RequestedCount, ActionKey, Done);
+}
+
+void UBuildingSkinManagerSubsystem::SendConsumeThenRoll(bool bAdvanced, int32 RequestedCount, FName ActionKey,
+	FOnSkinPullDone Done)
+{
+	UCloudEconomySubsystem* Cloud = GetCloudEconomy();
+	if (!Cloud)
+	{
+		FinishServerPull(bAdvanced, /*bOk=*/false, /*Rolls=*/0, /*bReplayed=*/false, ActionKey, Done);
+		return;
+	}
+
+	const FName ItemName = FCloudEconomyData::ItemTypeToName(GetTicketType(bAdvanced));
+
+	// 응답 전에 서브시스템이 내려가면 CreateLambda 는 죽은 this 를 만진다
+	Cloud->RequestConsume(GetPullConsumeReason(), ItemName, RequestedCount,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, bAdvanced, RequestedCount, ActionKey, Done](const FCloudOpResult& OpResult)
+	{
+		if (!OpResult.bOk)
+		{
+			// 스킨은 티켓 전용이라 폴백 경로가 없다 — 실패는 그대로 실패다
+			UE_LOG(LogTemp, Warning, TEXT("[BuildingSkinManager] skin.pull 실패 - Code=%s Http=%d"),
+				*OpResult.Code.ToString(), OpResult.HttpStatus);
+			FinishServerPull(bAdvanced, /*bOk=*/false, /*Rolls=*/0, OpResult.bReplayed, ActionKey, Done);
+			return;
+		}
+
+		// 요청값이 아니라 서버가 인정한 수량만큼 돌린다
+		int32 ServerAmount = 0;
+		if (OpResult.Result.IsValid())
+		{
+			OpResult.Result->TryGetNumberField(TEXT("amount"), ServerAmount);
+		}
+
+		FinishServerPull(bAdvanced, /*bOk=*/true, ResolveRollCount(RequestedCount, ServerAmount),
+			OpResult.bReplayed, ActionKey, Done);
+	}));
+}
+
+void UBuildingSkinManagerSubsystem::FinishServerPull(bool bAdvanced, bool bOk, int32 Rolls, bool bReplayed,
+	FName ActionKey, FOnSkinPullDone Done)
+{
+	TArray<FBuildingSkinGachaResult> Results;
+
+	if (bOk && !ShouldSkipLocalEffect(bReplayed) && Rolls > 0)
+	{
+		Results.Reserve(Rolls);
+		for (int32 i = 0; i < Rolls; ++i)
+		{
+			FBuildingSkinGachaResult Rolled;
+			if (!ApplyLocalPullEffect(bAdvanced, /*bRefundTicketOnPoolEmpty=*/false, Rolled))
+			{
+				// 등급 풀 공백(DT 오류)은 되돌릴 티켓이 없다 — 남은 굴림을 포기하고 크게 남긴다
+				UE_LOG(LogTemp, Error, TEXT("[BuildingSkinManager] 서버 뽑기 %d/%d 에서 로컬 등급 풀이 비어 중단"), i + 1, Rolls);
+				break;
+			}
+			Results.Add(Rolled);
+		}
+
+		SaveGameData();
+	}
+
+	if (UCloudEconomySubsystem* Cloud = GetCloudEconomy())
+	{
+		Cloud->EndPendingAction(ActionKey);
+	}
+
+	Done.ExecuteIfBound(bOk, Results);
 }
 
 void UBuildingSkinManagerSubsystem::AddMileagePoints(int32 Amount)

@@ -16,7 +16,7 @@ class UTexture2D;
  *
  * Name + Quantity 표시, Icon은 옵셔널 (있으면 set, 없으면 무시).
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UProductListRowWidget : public UUserWidget
 {
 	GENERATED_BODY()

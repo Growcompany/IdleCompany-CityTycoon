@@ -20,9 +20,9 @@ enum class EMissionConditionType : uint8
 	PlaceDesks UMETA(DisplayName = "PlaceDesks"),
 	// 첫 그림(벽장식) 배치 — 미션판 G7. [꾸미기]→벽 그림 배치 확정으로 완료
 	PlaceFirstPainting UMETA(DisplayName = "PlaceFirstPainting"),
-	// 직원 성장 — 미션판 G9. 완료는 강화 "시도"(성공/유지 무관) — 스타포스는 게임에서 여기서만 소개된다.
-	// 신호원은 HandleEmployeeEnhanced (SP 투자 시점 아님). 구 M9 는 2026-08-08 체인에서 이관됨.
-	InvestFirstStatPoint UMETA(DisplayName = "InvestFirstStatPoint"),
+	// 직원의 첫 개인 경험치 레벨업
+	LevelUpFirstEmployee UMETA(DisplayName = "LevelUpFirstEmployee"),
+	AllocateEmployeeStatPoint UMETA(DisplayName = "AllocateEmployeeStatPoint"),
 	// 첫 자체개발 출시 — M6. [새 프로젝트] 기획 보드→기획안 선택→[출시] 즉시 완료(운영은 백그라운드)
 	LaunchFirstInHouseProject UMETA(DisplayName = "LaunchFirstInHouseProject"),
 	// 첫 수익 수집 — M7. 사무실 나가기→MainMap 빌딩 돈 버블 클릭으로 수익 수령 완료 (cross-map)
@@ -45,4 +45,33 @@ enum class EMissionConditionType : uint8
 	BuildOnClearedPlot UMETA(DisplayName = "비운 땅에 건설"),
 	// 미션판 G11 — 도시 인접 빈 부지 1곳 Money 인수. 완료 = ACityPlotActor 결제 성공
 	AcquireFirstPlot UMETA(DisplayName = "부지 인수"),
+	// 직원 별 강화 시도(결과와 무관)
+	EnhanceFirstEmployee UMETA(DisplayName = "EnhanceFirstEmployee"),
+	// 업무공간의 유료 항목 강화와 무료 등급 승급
+	UpgradeFirstWorkstation UMETA(DisplayName = "UpgradeFirstWorkstation"),
+	PromoteFirstWorkstation UMETA(DisplayName = "PromoteFirstWorkstation"),
+	// 목표 직능 채용과 목표 프로젝트 출시
+	RecruitGoalDiscipline UMETA(DisplayName = "RecruitGoalDiscipline"),
+	LaunchGoalProject UMETA(DisplayName = "LaunchGoalProject"),
+	// 선택한 산업의 회사를 건설
+	BuildIndustry UMETA(DisplayName = "BuildIndustry"),
+	// 튜토리얼 M8 — 공장 작업속도·생산능력이 모두 ConditionAmount 레벨 도달
+	UpgradeFactoryStats UMETA(DisplayName = "UpgradeFactoryStats"),
+	// 튜토리얼 M10 — 첫 회사의 빌드업 외 강화 하나가 ConditionAmount 레벨 도달
+	EnhanceBuildingStat UMETA(DisplayName = "EnhanceBuildingStat"),
+	// 튜토리얼 M13·M23 — 대상 회사 책상 좌석 ConditionAmount 개 도달. M4 PlaceDesks 의 페이즈 경로와 섞지 않으려고 분리
+	PlaceSecondDesk UMETA(DisplayName = "PlaceSecondDesk"),
+	// 튜토리얼 M18 — 첫 회사 직원 중 장비 ConditionAmount 개 이상 장착
+	EquipFirstEquipment UMETA(DisplayName = "EquipFirstEquipment"),
+	// 튜토리얼 M26 — 인수 회사의 회수 종료(보석 즉시 완료 또는 자연 고갈)
+	SkipCompanyRecovery UMETA(DisplayName = "SkipCompanyRecovery"),
+	// 튜토리얼 M28·M31 — 설명 열람 완료
+	ExplainPlot UMETA(DisplayName = "ExplainPlot"),
+	MenuTour UMETA(DisplayName = "MenuTour"),
+	CollectMineResource UMETA(DisplayName = "CollectMineResource"),
+	CollectFactoryProduct UMETA(DisplayName = "CollectFactoryProduct"),
+	SellManufacturedProduct UMETA(DisplayName = "SellManufacturedProduct"),
+	ReserveManufacturingProduct UMETA(DisplayName = "ReserveManufacturingProduct"),
+	// 성장 목표: 보유 공장의 생산능력 강화 레벨 최댓값 도달
+	ReachFactoryProductionLevel UMETA(DisplayName = "공장 생산능력 레벨 도달"),
 };

@@ -1,25 +1,40 @@
 #include "UI/Element/Cards/ShopItemCardWidget.h"
 #include "CommonTextBlock.h"
 #include "Components/Image.h"
-#include "UI/Element/Buttons/ButtonWidget.h"
+#include "Engine/Texture2D.h"
+#include "UI/Element/Common/IconBrushUtils.h"
+#include "UI/Element/Buttons/CostActionButtonWidget.h"
+#include "Components/VerticalBox.h"
+#include "Components/VerticalBoxSlot.h"
+#include "UI/Element/Cards/ShopBundleRowWidget.h"
+#include "Enum/WidgetType.h"
 #include "Manager/TableManagerSubsystem.h"
-#include "Global/GlobalUtilFunctions.h"
 
 void UShopItemCardWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
-	if (PriceButton)
+	if (BuyButton)
 	{
-		PriceButton->OnClicked().AddUObject(this, &UShopItemCardWidget::HandlePriceClicked);
+		BuyButton->OnClicked().AddUObject(this, &UShopItemCardWidget::HandleBuyClicked);
+	}
+
+	// 자식 위젯 구성이 끝난 뒤라 여기서 입힌 값은 덮이지 않는다
+	if (!RowName.IsNone())
+	{
+		ApplyBuyButton();
+		if (bHasState)
+		{
+			RefreshState(CachedRemainingCount, bCachedCanAfford);
+		}
 	}
 }
 
 void UShopItemCardWidget::NativeDestruct()
 {
-	if (PriceButton)
+	if (BuyButton)
 	{
-		PriceButton->OnClicked().RemoveAll(this);
+		BuyButton->OnClicked().RemoveAll(this);
 	}
 	Super::NativeDestruct();
 }
@@ -72,7 +87,8 @@ void UShopItemCardWidget::PlayEntrance(float Delay)
 
 void UShopItemCardWidget::PlayPurchasePunch()
 {
-	PurchasePunch.Start(1.08f, 0.25f);
+	// 1.0 초과는 카드가 클립 경계를 넘어 잘린다 — 축소 딥으로만 친다
+	PurchasePunch.Start(0.94f, 0.22f);
 }
 
 void UShopItemCardWidget::InitCard(FName InRowName, const FShopItemTable& InRow)
@@ -80,86 +96,111 @@ void UShopItemCardWidget::InitCard(FName InRowName, const FShopItemTable& InRow)
 	RowName = InRowName;
 	CachedRow = InRow;
 
+	if (NewRibbon)
+	{
+		NewRibbon->SetVisibility(InRow.bNew ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+
+	RefreshQtyBadge();
+	RefreshBundleList();
+
+	ApplyStage(false);
+	if (StageRays)
+	{
+		StageRays->SetVisibility(InRow.bFeatured ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (StageDots)
+	{
+		StageDots->SetVisibility(InRow.bFeatured ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+
 	if (NameText)
 	{
+		// QtyBadge 로 옮기려 했으나 v4 카드 재배치가 레이아웃을 깨 철회(2026-09-24).
+		// 배지 위젯이 트리에 없으므로 수량은 다시 이름이 진다 — QtyBadge 는 C++ 에 남아 있어
+		// 카드 WBP 에 그 이름의 위젯을 넣으면 그때 이 줄만 되돌리면 된다.
 		NameText->SetText(InRow.Quantity > 1
 			? FText::Format(NSLOCTEXT("Shop", "ItemNameWithQty", "{0} x{1}"), InRow.DisplayName, FText::AsNumber(InRow.Quantity))
 			: InRow.DisplayName);
 	}
 
-	if (IconImage && !InRow.Icon.IsNull())
+	if (IconImage)
 	{
-		if (UTexture2D* Tex = InRow.Icon.LoadSynchronous())
+		if (UObject* IconResource = InRow.ResolveIconResource())
 		{
-			// bMatchSize=true: 원본 비율 유지 (바깥 ScaleBox가 180 박스에 맞춰 균일 축소)
-			IconImage->SetBrushFromTexture(Tex, true);
+			// 텍스처는 원본 비율(정사각으로 박으면 비정사각 아이콘이 눌린다), 머티리얼만 고유 크기가 없어 정사각 명시.
+			// 어느 쪽이든 바깥 ScaleBox가 아이콘 칸에 맞춰 균일 축소한다.
+			const UTexture2D* IconTexture = Cast<UTexture2D>(IconResource);
+			const FVector2D IconDrawSize = IconTexture
+				? FVector2D(IconTexture->GetSizeX(), IconTexture->GetSizeY())
+				: FVector2D(256.f, 256.f);
+			CGIconBrush::ApplyResource(IconImage, IconResource, IconDrawSize);
 		}
 	}
 
-	// 가격 = 웜 칩(PriceIcon + PriceText, 크림 카드 언어), 버튼 = 행동 라벨만.
-	// 마일리지는 재화 아이콘이 없어 칩을 숨기고 버튼 텍스트로 표기
-	UWidget* PriceChipBox = GetWidgetFromName(TEXT("PriceChipBox"));
-	UImage* PriceIcon = Cast<UImage>(GetWidgetFromName(TEXT("PriceIcon")));
-	UCommonTextBlock* PriceText = Cast<UCommonTextBlock>(GetWidgetFromName(TEXT("PriceText")));
+	ApplyBuyButton();
+}
 
-	if (PriceText && CachedRow.Currency != EShopCurrency::Mileage)
+void UShopItemCardWidget::ApplyBuyButton()
+{
+	if (BuyButton)
 	{
-		if (PriceChipBox)
+		// 버튼의 만렙 표면(칩 접기 + 잠금 라벨)을 품절 표면으로 쓴다
+		BuyButton->MaxLevelText = NSLOCTEXT("Shop", "SoldOut", "판매 완료");
+
+		if (CachedRow.Price <= 0)
 		{
-			PriceChipBox->SetVisibility(ESlateVisibility::HitTestInvisible);
+			BuyButton->SetCostVisible(false);
+			BuyButton->SetButtonText(NSLOCTEXT("Shop", "BuyFree", "무료"));
+			BuyButton->SetEnabled(true);
 		}
-
-		PriceText->SetText(BuildPriceText());
-
-		if (PriceIcon)
+		else if (CachedRow.Currency == EShopCurrency::Mileage)
 		{
-			if (UTableManagerSubsystem* TableMgr = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>())
-			{
-				bool bOk = false;
-				const EResourceType ResType = (CachedRow.Currency == EShopCurrency::Money) ? EResourceType::Money : EResourceType::Diamond;
-				const FResourceInfo Info = TableMgr->GetResourceInfo(ResType, bOk);
-				if (bOk && !Info.Icon.IsNull())
-				{
-					// ImageSize(30)는 트리 값 유지 (bMatchSize=false)
-					PriceIcon->SetBrushFromTexture(Info.Icon.LoadSynchronous());
-				}
-			}
+			// 마일리지는 재화 종류(DT_Resource)가 아니라 칩 아이콘·잔액 판정이 없다 — 칩을 접고 라벨이 값을 진다.
+			// 부족 판정은 버튼 게이트 대신 패널의 CanAfford 경로가 맡도록 명시 활성화한다.
+			BuyButton->SetCostVisible(false);
+			BuyButton->SetButtonText(FText::Format(NSLOCTEXT("Shop", "BuyMileage", "{0}pt 교환"), FText::AsNumber(CachedRow.Price)));
+			BuyButton->SetEnabled(true);
 		}
-
-		if (PriceButton)
+		else
 		{
-			PriceButton->SetButtonText(NSLOCTEXT("Shop", "Buy", "구매"));
+			// 잔액 판정은 상점 매니저가 이미 하므로(RefreshState) 버튼의 자체 판정은 끈다
+			const EResourceType CostType = (CachedRow.Currency == EShopCurrency::Money) ? EResourceType::Money : EResourceType::Diamond;
+			BuyButton->SetCostVisible(true);
+			BuyButton->SetCost(CachedRow.Price, CostType, /*bCheckAfford=*/false);
+			BuyButton->SetButtonText(NSLOCTEXT("Shop", "Buy", "구매"));
 		}
 	}
-	else
-	{
-		if (PriceChipBox)
-		{
-			PriceChipBox->SetVisibility(ESlateVisibility::Collapsed);
-		}
+}
 
-		if (PriceButton)
-		{
-			PriceButton->SetButtonText(CachedRow.Currency == EShopCurrency::Mileage
-				? FText::Format(NSLOCTEXT("Shop", "BuyMileage", "{0}pt 교환"), FText::AsNumber(CachedRow.Price))
-				: BuildPriceText());
-		}
+void UShopItemCardWidget::ApplyStage(bool bSoldOut)
+{
+	const FLinearColor Tint = bSoldOut ? SoldOutStageTint : CachedRow.BandTint;
+	if (BandImage)
+	{
+		BandImage->SetColorAndOpacity(Tint);
+	}
+	if (BandShade)
+	{
+		BandShade->SetColorAndOpacity(FLinearColor(Tint.R * StageShadeScale, Tint.G * StageShadeScale, Tint.B * StageShadeScale, Tint.A));
 	}
 }
 
 void UShopItemCardWidget::RefreshState(int32 RemainingCount, bool bCanAfford)
 {
+	CachedRemainingCount = RemainingCount;
+	bCachedCanAfford = bCanAfford;
+	bHasState = true;
+
 	const bool bSoldOut = (RemainingCount == 0);
 
 	if (LimitText)
 	{
 		if (CachedRow.LimitCount > 0)
 		{
-			const FText Prefix = (CachedRow.Tab == EShopTab::Weekly)
-				? NSLOCTEXT("Shop", "LimitWeekly", "주간")
-				: NSLOCTEXT("Shop", "LimitDaily", "일일");
-			LimitText->SetText(FText::Format(NSLOCTEXT("Shop", "LimitFmt", "{0} {1}/{2}"),
-				Prefix, FText::AsNumber(FMath::Max(RemainingCount, 0)), FText::AsNumber(CachedRow.LimitCount)));
+			// 탭 이름(일일/주간)은 레일이 이미 말하고 있다 — 칩은 잔여 수량만
+			LimitText->SetText(FText::Format(NSLOCTEXT("Shop", "LimitFmt", "구매 가능 {0}/{1}"),
+				FText::AsNumber(FMath::Max(RemainingCount, 0)), FText::AsNumber(CachedRow.LimitCount)));
 			LimitText->SetVisibility(ESlateVisibility::HitTestInvisible);
 		}
 		else
@@ -168,46 +209,91 @@ void UShopItemCardWidget::RefreshState(int32 RemainingCount, bool bCanAfford)
 		}
 	}
 
-	if (SoldOutOverlay)
+	// 품절은 버튼이 「판매 완료」로 잠기고, 무대는 무채색으로, 아이콘·이름은 흐리게 둔다
+	ApplyStage(bSoldOut);
+	const float SoldOutDim = bSoldOut ? 0.45f : 1.f;
+	if (IconImage)
 	{
-		SoldOutOverlay->SetVisibility(bSoldOut ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		IconImage->SetRenderOpacity(SoldOutDim);
 	}
-	if (SoldOutText && bSoldOut)
+	if (NameText)
 	{
-		SoldOutText->SetText(CachedRow.Tab == EShopTab::Weekly
-			? NSLOCTEXT("Shop", "SoldOutWeekly", "다음 주에!")
-			: NSLOCTEXT("Shop", "SoldOutDaily", "내일 다시!"));
-	}
-
-	if (PriceButton)
-	{
-		PriceButton->SetIsEnabled(!bSoldOut);
-		// 부족 = 빨강 (클릭은 허용 — 패널이 실패 피드백 처리), 충분 = 크림 라벨 복원
-		PriceButton->SetTextColor(bCanAfford
-			? FSlateColor(FLinearColor(1.0f, 0.972f, 0.941f))
-			: FSlateColor(FLinearColor(0.9f, 0.28f, 0.3f)));
+		NameText->SetRenderOpacity(SoldOutDim);
 	}
 
-	// 가격 텍스트 부족 표시 (충분 = 브라운 #4B2E2B, 부족 = 빨강)
-	if (UCommonTextBlock* PriceText = Cast<UCommonTextBlock>(GetWidgetFromName(TEXT("PriceText"))))
+	if (BuyButton)
 	{
-		PriceText->SetColorAndOpacity(bCanAfford
-			? FSlateColor(FLinearColor(0.0703f, 0.0273f, 0.0241f))
-			: FSlateColor(FLinearColor(0.9f, 0.28f, 0.3f)));
+		BuyButton->SetMaxLevelState(bSoldOut);
+		BuyButton->SetLockedState(bSoldOut);
+		BuyButton->SetCanAfford(bCanAfford);
+		// 판매 완료가 풀리면 버튼이 가격 칩을 다시 펴므로, 칩 없는 상품(무료·마일리지)은 도로 접는다
+		if (!bSoldOut && (CachedRow.Price <= 0 || CachedRow.Currency == EShopCurrency::Mileage))
+		{
+			BuyButton->SetCostVisible(false);
+		}
 	}
 }
 
-void UShopItemCardWidget::HandlePriceClicked()
+void UShopItemCardWidget::HandleBuyClicked()
 {
 	OnPurchaseRequested.Broadcast(RowName);
 }
 
-FText UShopItemCardWidget::BuildPriceText() const
+void UShopItemCardWidget::RefreshQtyBadge()
 {
-	if (CachedRow.Currency == EShopCurrency::Mileage)
+	// 번들은 카드 전체가 묶음이라 낱개 수량 배지를 달지 않는다
+	const bool bShow = (CachedRow.Quantity > 1) && !CachedRow.IsBundle();
+	if (QtyBadge)
 	{
-		return FText::Format(NSLOCTEXT("Shop", "PriceMileage", "{0}pt"), FText::AsNumber(CachedRow.Price));
+		QtyBadge->SetVisibility(bShow ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	}
-	// 비용 표기는 Ceil (프로젝트 규칙)
-	return UGlobalUtilFunctions::AbbreviateNumber(CachedRow.Price, ENumberAbbrevStyle::Auto, ENumberRoundMode::Ceil);
+	if (QtyText && bShow)
+	{
+		QtyText->SetText(FText::FromString(FString::Printf(TEXT("\u00D7%d"), CachedRow.Quantity)));
+	}
+}
+
+void UShopItemCardWidget::RefreshBundleList()
+{
+	if (!BundleList)
+	{
+		return;
+	}
+	BundleList->ClearChildren();
+
+	if (!CachedRow.IsBundle())
+	{
+		BundleList->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+
+	UGameInstance* GI = GetGameInstance();
+	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	TSubclassOf<UUserWidget> RowClass = TableMgr
+		? TableMgr->GetWidgetClass(EWidgetType::ShopBundleRow)
+		: nullptr;
+	if (!RowClass)
+	{
+		// 행 클래스가 없으면 빈 목록을 남기지 말고 접는다 — 제목만 뜬 빈 판이 더 나쁘다
+		BundleList->SetVisibility(ESlateVisibility::Collapsed);
+		UE_LOG(LogTemp, Warning, TEXT("[Shop] ShopBundleRow 위젯 클래스 없음 — DT_WidgetClass 확인"));
+		return;
+	}
+
+	BundleList->SetVisibility(ESlateVisibility::HitTestInvisible);
+	for (const FShopBundleEntry& Entry : CachedRow.BundleItems)
+	{
+		if (Entry.Item == EItemType::None || Entry.Quantity <= 0)
+		{
+			continue;
+		}
+		if (UShopBundleRowWidget* Row = CreateWidget<UShopBundleRowWidget>(this, RowClass))
+		{
+			Row->SetEntry(Entry.Item, Entry.Quantity);
+			if (UVerticalBoxSlot* RowSlot = BundleList->AddChildToVerticalBox(Row))
+			{
+				RowSlot->SetPadding(FMargin(0.f, 0.f, 0.f, 9.f));
+			}
+		}
+	}
 }

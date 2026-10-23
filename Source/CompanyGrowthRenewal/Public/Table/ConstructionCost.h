@@ -15,8 +15,8 @@ struct FConstructionCost
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	EResourceType ResourceType;
+	EResourceType ResourceType = EResourceType::None;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	int64 Cost;
+	int64 Cost = 0;
 };

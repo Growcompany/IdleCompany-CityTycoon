@@ -6,6 +6,7 @@
 #include "GameFramework/Actor.h"
 #include "Office/WorkstationTypes.h"
 #include "Table/WorkstationTable.h"
+#include "Office/WorkstationUpgradeRules.h"
 #include "Interfaces/BubbleAnchorProvider.h"
 #include "WorkstationActorBase.generated.h"
 
@@ -13,6 +14,7 @@ class UDataTable;
 class AOfficeworker;
 class UBoxComponent;
 class UGlobalAssetCache;
+class UWorkstationDevFxComponent;
 
 /**
  * 업무공간 액터 베이스 - 싱글/더블 공통 기능
@@ -47,6 +49,12 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Workstation")
 	UBoxComponent* NavBlocker;
 
+	// 개발 연출(모니터 빛·작업물 조각·메모지·완료 의자) — 개발 중에만 틱한다
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Workstation")
+	UWorkstationDevFxComponent* DevFxComponent;
+
+	UWorkstationDevFxComponent* GetDevFxComponent() const { return DevFxComponent; }
+
 	// ==================== 공통 데이터 ====================
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Workstation|Data")
@@ -57,6 +65,9 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Workstation|Level")
 	EComputerSetupLevel CurrentSetupLevel = EComputerSetupLevel::Level1;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Workstation|Upgrade")
+	TMap<EWorkstationUpgradeType, int32> UpgradeLevels;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Workstation|Level")
 	EMonitorType CurrentMonitor1Type = EMonitorType::None;
@@ -101,6 +112,25 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Workstation|Level")
 	bool TryUpgradeSetupLevel();
 
+	UFUNCTION(BlueprintPure, Category = "Workstation|Upgrade")
+	int32 GetUpgradeLevel(EWorkstationUpgradeType Type) const;
+
+	UFUNCTION(BlueprintPure, Category = "Workstation|Upgrade")
+	int32 GetUpgradeMaxLevel(EWorkstationUpgradeType Type) const;
+
+	UFUNCTION(BlueprintCallable, Category = "Workstation|Upgrade")
+	bool GetUpgradeQuote(EWorkstationUpgradeType Type, int32 RequestedCount, bool bMaxAffordable,
+		FWorkstationUpgradeQuote& OutQuote) const;
+
+	UFUNCTION(BlueprintCallable, Category = "Workstation|Upgrade")
+	bool TryUpgradeComponent(EWorkstationUpgradeType Type, int32 RequestedCount, bool bMaxAffordable);
+
+	UFUNCTION(BlueprintPure, Category = "Workstation|Upgrade")
+	float GetComponentBonus(EWorkstationUpgradeType Type) const;
+
+	UFUNCTION(BlueprintPure, Category = "Workstation|Upgrade")
+	bool CanPromoteSetup() const;
+
 	UFUNCTION(BlueprintCallable, Category = "Workstation|Level")
 	EComputerSetupLevel GetCurrentSetupLevel() const { return CurrentSetupLevel; }
 
@@ -121,7 +151,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Workstation|Level")
 	bool CanSwapMaxVariant() const;
 
-	/** 반대 외형 행 조회 → 메시 검증 → Diamond 정확 인출 → 성공 시에만 전환. 레벨·속도는 그대로다. */
+	/** 반대 외형 행 조회 → 메시 검증 → 무료 전환. 레벨·속도는 그대로다. */
 	UFUNCTION(BlueprintCallable, Category = "Workstation|Level")
 	bool TrySwapMaxVariant();
 

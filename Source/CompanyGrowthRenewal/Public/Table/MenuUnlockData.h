@@ -5,8 +5,8 @@
 #include "MenuUnlockData.generated.h"
 
 /**
- * 메뉴 버튼 해금 조건 DataTable 행
- * RowName = 버튼 이름 (예: "RankBtn")
+ * 메뉴 타일 해금 조건 DataTable 행
+ * RowName = 메뉴 시트 타일 이름 (예: "RankingTile", "AchievementTile")
  */
 USTRUCT(BlueprintType)
 struct FMenuUnlockData : public FTableRowBase

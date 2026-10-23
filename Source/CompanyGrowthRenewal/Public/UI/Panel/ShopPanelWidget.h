@@ -4,10 +4,11 @@
 #include "UI/AnimatedActivatableWidget.h"
 #include "Enum/ShopTypes.h"
 #include "Enum/ResourceType.h"
+#include "Data/EquipmentTicketShopData.h"
 #include "ShopPanelWidget.generated.h"
 
 class UTabButtonWidget;
-class UCloseButtonWidget;
+class UPanelHeaderWidget;
 class UUniformGridPanel;
 class UResourceWidget;
 class UCommonTextBlock;
@@ -30,6 +31,10 @@ public:
 	/** 푸시 직후 호출해 시작 탭 지정 (가챠 화면의 [마일리지 상점] 링크용) */
 	UFUNCTION(BlueprintCallable, Category = "Shop")
 	void SetInitialTab(EShopTab Tab);
+	void SetEquipmentTicketContext(EItemType TicketType, int32 RequiredCount);
+
+	// 흐름 밖에 열린 상점을 닫는 가이드의 헤더 X 대상
+	UWidget* GetCloseButtonWidget() const;
 
 protected:
 	virtual void NativeConstruct() override;
@@ -40,15 +45,19 @@ protected:
 
 	// ===== 상단바 =====
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UCloseButtonWidget* UIE_CloseButton;
+	TObjectPtr<UPanelHeaderWidget> PanelHeader;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UResourceWidget* UIE_Resource_Money_1;
+	UResourceWidget* UIE_Resource_Money;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UResourceWidget* UIE_Resource_Diamond_1;
+	UResourceWidget* UIE_Resource_Diamond;
 
 	// ===== 좌측 탭 레일 =====
+	// 패키지 탭은 WBP 저작 전까지 Optional — required 로 두면 트리에 없는 동안 WBP 컴파일이 깨진다
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	UTabButtonWidget* PackageTab;
+
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UTabButtonWidget* DailyTab;
 
@@ -69,21 +78,19 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* InfoText;
 
-	// 일일 탭 전용 수동 리셋 (다이아 50)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	UButtonWidget* ManualResetButton;
-
 private:
+	friend struct FEquipmentTicketUIValidation;
+	void ConfirmEquipmentTicketPurchase(FEquipmentTicketShopRequest Request);
+	EItemType RefillTicketType = EItemType::None;
+	int32 RefillRequiredCount = 0;
 	UFUNCTION()
 	void OnTabSelectionChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
 
 	UFUNCTION()
 	void OnCloseButtonClicked();
 
-	void OnManualResetClicked();
 	void HandlePurchaseRequested(FName RowName);
 	void ConfirmPurchase(FName RowName);
-	void ConfirmManualReset();
 
 	void RebuildGrid();
 	void RefreshAllCardStates();
@@ -94,7 +101,12 @@ private:
 	void HandleResourceChanged(EResourceType Type, int64 NewValue);
 	void HandleMileageChanged(int32 NewPoints);
 
-	static EShopTab TabForIndex(int32 Index);
+	// 인덱스↔탭은 실제로 그룹에 등록된 탭만으로 만든다 — Optional 탭이 없을 때 인덱스가 밀리지 않게
+	EShopTab TabForIndex(int32 Index) const;
+	int32 IndexForTab(EShopTab Tab) const;
+
+	// 그룹 등록 순서와 1:1 (레일 표시 순서)
+	TArray<EShopTab> TabOrder;
 
 	UPROPERTY()
 	UCommonButtonGroupBase* TabButtonGroup = nullptr;
@@ -109,4 +121,5 @@ private:
 	float PanelIntroElapsed = -1.f;
 	static constexpr float PanelIntroDuration = 0.22f;
 	static constexpr float PanelIntroRise = 18.f;
+
 };

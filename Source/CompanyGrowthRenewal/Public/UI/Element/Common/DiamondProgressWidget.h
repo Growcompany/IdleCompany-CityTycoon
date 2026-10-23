@@ -8,7 +8,7 @@
 // NativePaint 로 트랙(마름모 둘레 전체) + 필(상→우→하→좌 시계방향, Percent 비율)을 MakeLines 로 드로잉.
 // WBP 트리에서 45° 회전 뱃지 위에 겹쳐 배치하면 뱃지 테두리가 곧 진행 게이지가 된다(크기 변화 0).
 // RebuildWidget: 디자이너가 루트를 안 넣으면 SizeBox(DiamondSize) 자동 생성 (프리뷰 지원).
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UDiamondProgressWidget : public UUserWidget
 {
 	GENERATED_BODY()

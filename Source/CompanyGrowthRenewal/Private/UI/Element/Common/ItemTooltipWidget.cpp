@@ -4,6 +4,7 @@
 #include "Global/GlobalUtilFunctions.h"
 #include "CommonTextBlock.h"
 #include "Components/Image.h"
+#include "UI/Element/Common/IconBrushUtils.h"
 #include "Engine/Texture2D.h"
 #include "Animation/WidgetAnimation.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
@@ -18,7 +19,7 @@ void UItemTooltipWidget::NativeDestruct()
 	Super::NativeDestruct();
 }
 
-void UItemTooltipWidget::ApplyData(const FText& InName, UTexture2D* InIcon, const FText& InDesc, int32 InBasePrice)
+void UItemTooltipWidget::ApplyData(const FText& InName, UObject* InIcon, const FText& InDesc, int32 InBasePrice)
 {
 	if (NameText)
 	{
@@ -26,7 +27,7 @@ void UItemTooltipWidget::ApplyData(const FText& InName, UTexture2D* InIcon, cons
 	}
 	if (EntityImage && InIcon)
 	{
-		EntityImage->SetBrushFromTexture(InIcon);
+		CGIconBrush::ApplyResource(EntityImage, InIcon);
 	}
 	if (DescText)
 	{
@@ -48,7 +49,7 @@ void UItemTooltipWidget::ApplyData(const FText& InName, UTexture2D* InIcon, cons
 	}
 }
 
-void UItemTooltipWidget::ShowAt(FVector2D AbsoluteScreenPos, const FText& InName, UTexture2D* InIcon, const FText& InDesc, int32 InBasePrice, float DurationSec, ETooltipAnchor AnchorMode, int32 ZOrder)
+void UItemTooltipWidget::ShowAt(FVector2D AbsoluteScreenPos, const FText& InName, UObject* InIcon, const FText& InDesc, int32 InBasePrice, float DurationSec, ETooltipAnchor AnchorMode, int32 ZOrder)
 {
 	ApplyData(InName, InIcon, InDesc, InBasePrice);
 

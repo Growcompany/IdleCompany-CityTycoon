@@ -16,7 +16,7 @@ class UTexture2D;
  * 미션 보상 연출 베이스 — WBP 변형 2종이 이 클래스를 공유한다.
  *   UI_RewardReveal : 딤 + [받기] + 카운트다운 모달. 아이템(티켓) 보상 미션 전용.
  *   UI_RewardToast  : 딤/버튼 없는 센터 밴드 토스트. 자원 전용 보상 미션.
- * 박스는 UIE_ItemCard_QtyBelow 재사용, 좌→우 스태거 등장. 보상은 이미 지급됨(연출 전용).
+ * 박스는 UIE_ItemCard_QtyBelow 재사용. 모달은 전부 한 번에, 토스트는 좌→우 스태거 등장. 보상은 이미 지급됨(연출 전용).
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API URewardRevealPresentationWidget : public UCommonActivatableWidget
@@ -29,6 +29,12 @@ public:
 	// 매니저가 AddToViewport 직후 1회 호출 — 박스 구성 + 등장 시작.
 	// bInToastMode = 밴드 토스트(입력 통과, 짧은 홀드). false = 기존 모달.
 	void SetupRewards(const TArray<FMissionReward>& InRewards, const FText& InTitle, bool bInToastMode = false, bool bInShowToastTitle = false);
+
+	// 카드가 전부 나타나고 홀드 카운트가 시작됐는가
+	bool IsRevealComplete() const { return !bRevealing && FadeInElapsed < 0.f && AutoCloseElapsed >= 0.f; }
+
+	// 화면에서 내려갈 때 한 번 — 닫기 버튼·자동 닫기·맵 전환 정리 모두
+	FSimpleMulticastDelegate OnPresentationClosed;
 
 protected:
 	virtual void NativeConstruct() override;
@@ -56,7 +62,7 @@ protected:
 
 private:
 	// Icon/Label = 시각, 뒤 3개 = 클릭 툴팁 데이터(이름/설명/단가). 토스트는 입력 통과라 툴팁을 걸지 않는다.
-	UItemCardSlotWidget* MakeBox(UTexture2D* Icon, const FText& Label, const FText& TooltipName, const FText& TooltipDesc, int32 TooltipPrice = 0);
+	UItemCardSlotWidget* MakeBox(UObject* Icon, const FText& Label, const FText& TooltipName, const FText& TooltipDesc, int32 TooltipPrice = 0);
 	void BeginClose();
 
 	// 모달용 / 토스트용 카드. 토스트 변형은 검은 밴드 위 기준으로 수량필 색(S3)·간격·글자를 자체 보유.
@@ -66,7 +72,7 @@ private:
 	// 스태거/페이드 대상. 토스트는 카드를 SizeBox 로 감싸므로 카드가 아닌 그 컨테이너가 들어간다.
 	UPROPERTY() TArray<TObjectPtr<UWidget>> Boxes;
 	int32 RevealIndex = 0;
-	float RevealTimer = 0.f;
+	double RevealStartedAt = 0.0;
 	bool bRevealing = false;
 
 	bool bToastMode = false;

@@ -32,6 +32,15 @@ enum class EWorkstationType : uint8
 	Double		UMETA(DisplayName = "더블 (의자 2개)")
 };
 
+UENUM(BlueprintType)
+enum class EWorkstationUpgradeType : uint8
+{
+	Processing,
+	Tools,
+	Environment,
+	Count UMETA(Hidden)
+};
+
 /**
  * 모니터 타입
  */
@@ -202,6 +211,9 @@ struct FWorkstationSaveData
 	// 현재 컴퓨터 세팅 레벨
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Save")
 	EComputerSetupLevel ComputerSetupLevel = EComputerSetupLevel::Level1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Save")
+	TMap<EWorkstationUpgradeType, int32> UpgradeLevels;
 
 	// 각 슬롯별 스킨 상태 (노트북, 모니터, 키보드마우스 등)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Save")

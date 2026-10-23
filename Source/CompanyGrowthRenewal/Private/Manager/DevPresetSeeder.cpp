@@ -1,6 +1,7 @@
 #include "Manager/DevPresetSeeder.h"
 
 #include "Engine/DataTable.h"
+#include "Engine/StaticMesh.h"
 #include "Core/CGGameInstance.h"
 #include "Data/BuildingEnhancementData.h"
 #include "Data/GameSaveData.h"
@@ -322,6 +323,14 @@ void UDevPresetSeeder::SeedPlotsAndCompanies(const FDevProgressPresetRow& Preset
 
 	TArray<FName> AllPlots;
 	TableMgr->GetAllCityPlotRows(AllPlots);
+	// 레벨 배치용 행은 이 맵(MainMap)에 액터가 없다 — 소유로 시드하면 세이브에 유령 PlotId 가 박힌다.
+	AllPlots.RemoveAll([TableMgr](const FName& Id)
+	{
+		bool bRowOk = false;
+		const FCityPlotData Row = TableMgr->GetCityPlotData(Id, bRowOk);
+		return bRowOk && Row.bPlacedInLevel;
+	});
+
 	if (AllPlots.Num() == 0)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[PresetSeeder] DT_CityPlot 행이 0개 — 리임포트 상태 확인"));
@@ -465,9 +474,7 @@ void UDevPresetSeeder::SeedBuildings(FName PresetRow, const FDevProgressPresetRo
 
 		TArray<FVector>& PlannedOnThisPlot = PlannedByPlot.FindOrAdd(Row->PlotId);
 
-		// footprint 는 DT_Building 의 칸수 × FootprintCellSize(4300) 가 단일 진실 소스다.
-		// 이 값이 탐색 스텝이자 겹침 임계값 둘 다로 쓰이므로, 작게 넘기면 건물이 서로 파고들고
-		// 부지의 나머지 칸이 통째로 안 쓰인다(예: 700 을 넘기면 4300 폭 건물이 84% 겹친다).
+		// 실제 배치와 같은 공통 칸 간격을 탐색 스텝과 점유 크기에 사용한다.
 		bool bBuildingDataOk = false;
 		const FBuildingData BD = TableMgr->GetBuildingData(Row->InteractableName, bBuildingDataOk);
 		if (!bBuildingDataOk)
@@ -476,8 +483,8 @@ void UDevPresetSeeder::SeedBuildings(FName PresetRow, const FDevProgressPresetRo
 				*Row->InteractableName.ToString());
 		}
 		const FVector2D Footprint(
-			FMath::Max(1, bBuildingDataOk ? BD.FootprintWidthCells : 1) * FootprintCellSize,
-			FMath::Max(1, bBuildingDataOk ? BD.FootprintDepthCells : 1) * FootprintCellSize);
+			FMath::Max(1, bBuildingDataOk ? BD.FootprintWidthCells : 1) * BuildingFootprintCellSize,
+			FMath::Max(1, bBuildingDataOk ? BD.FootprintDepthCells : 1) * BuildingFootprintCellSize);
 
 		FTransform Placement;
 		if (!SpawnMgr->FindFreeFootprintOnPlot(Row->PlotId, Footprint, Placement, PlannedOnThisPlot))
@@ -490,9 +497,23 @@ void UDevPresetSeeder::SeedBuildings(FName PresetRow, const FDevProgressPresetRo
 		FBuildingEntitySaveData Entry;
 		Entry.BuildingIndex = NextIndex++;
 		Entry.InteractableName = Row->InteractableName;
-		Entry.Location = Placement.GetLocation();
 		Entry.Rotation = Placement.Rotator();
-		PlannedOnThisPlot.Add(Entry.Location);
+		// 탐색 결과는 점유 사각형 중심이다. 메시의 비대칭 피벗을 저장 좌표로 되돌린다.
+		FBox MeshBounds(ForceInit);
+		const TSoftObjectPtr<UStaticMesh> MeshAssets[] = { BD.BaseMesh, BD.BodyMesh, BD.TopMesh, BD.TopEmptyMesh };
+		for (const TSoftObjectPtr<UStaticMesh>& MeshAsset : MeshAssets)
+		{
+			if (const UStaticMesh* Mesh = MeshAsset.LoadSynchronous())
+			{
+				MeshBounds += Mesh->GetBoundingBox();
+			}
+		}
+		FVector CenterOffset = MeshBounds.IsValid
+			? MeshBounds.GetCenter() * FMath::Max(0.05f, BD.MeshScale)
+			: FVector::ZeroVector;
+		CenterOffset.Z = 0.0;
+		Entry.Location = Placement.GetLocation() - Placement.GetRotation().RotateVector(CenterOffset);
+		PlannedOnThisPlot.Add(Placement.GetLocation());
 		Entry.Scale = FVector::OneVector;   // 오토핏은 '땅에 박힘' 회귀로 제거됨 — Scale 손대지 말 것
 		Entry.PlotId = Row->PlotId;
 		Entry.BuildingData.Body_Module_Copies = Row->Floors;
@@ -607,6 +628,20 @@ void UDevPresetSeeder::SeedProjectHistory(const FDevProgressPresetRow& Preset)
 	int32 AGrade = 0;
 	int32 SGrade = 0;
 
+	// 산업/장르/소재를 돌려가며 넣는다 — 전부 같으면 도감 조합이 1개로 뭉개진다(AddUnique).
+	// 미가용 업종(이번 출시 범위 밖)은 심지 않는다 ― 도감 레일에 없는 산업의 출시작만 남는다.
+	// 전부 걸러지면 필터를 포기한다(이력이 통째로 비는 쪽이 더 나쁘다).
+	TArray<ECompanyType> Industries = {
+		ECompanyType::Game, ECompanyType::IT, ECompanyType::Electronics,
+		ECompanyType::Finance, ECompanyType::Automobile, ECompanyType::Semiconductor };
+	{
+		TArray<ECompanyType> AvailablePool = Industries.FilterByPredicate([SaveMgr](ECompanyType Candidate)
+		{
+			return SaveMgr->IsIndustryAvailable(Candidate);
+		});
+		if (AvailablePool.Num() > 0) { Industries = MoveTemp(AvailablePool); }
+	}
+
 	for (int32 i = 0; i < HistoryCount; ++i)
 	{
 		const float Progress = (HistoryCount > 1)
@@ -623,11 +658,6 @@ void UDevPresetSeeder::SeedProjectHistory(const FDevProgressPresetRow& Preset)
 		}
 		Review = FMath::Clamp(Review, 1, 34);
 
-		// 산업/장르/소재를 돌려가며 넣는다 — 전부 같으면 도감 조합이 1개로 뭉개진다(AddUnique).
-		static const ECompanyType Industries[] = {
-			ECompanyType::Game, ECompanyType::IT, ECompanyType::Electronics,
-			ECompanyType::Finance, ECompanyType::Automobile, ECompanyType::Semiconductor };
-
 		// 등급은 평점과 같은 축에서 파생 — 이력과 등급이 따로 놀면 도감이 가짜로 보인다
 		const EQualityGrade SeedGrade = (Review >= 30) ? EQualityGrade::S
 			: (Review >= 25) ? EQualityGrade::A
@@ -637,17 +667,19 @@ void UDevPresetSeeder::SeedProjectHistory(const FDevProgressPresetRow& Preset)
 		Rec.ProjectIndex = i + 1;
 		Rec.ReviewScore = Review;
 		Rec.QualityGrade = SeedGrade;
-		Rec.Industry = Industries[i % UE_ARRAY_COUNT(Industries)];
+		Rec.Industry = Industries[i % Industries.Num()];
+		const FBuildingEntitySaveData* HistoryBuilding = G.Buildings.FindByPredicate(
+			[&Rec](const FBuildingEntitySaveData& Building)
+			{ return Building.BuildingData.CompanyType == Rec.Industry; });
+		Rec.BuildingIndex = HistoryBuilding ? HistoryBuilding->BuildingIndex : INDEX_NONE;
 		Rec.Genre = FName(*FString::Printf(TEXT("Genre_%d"), (i % 7) + 1));
 		Rec.Material = FName(*FString::Printf(TEXT("Mat_%d"), (i % 5) + 1));
 		Rec.ProjectName = FString::Printf(TEXT("Project %02d"), i + 1);
 		// 매출을 평점에 비례시킨다 — 이력과 누적매출이 따로 놀면 티가 난다
 		Rec.CumulativeRevenue = static_cast<int64>(Review) * 12000000LL + Rng.RandRange(0, 4000000);
 
-		// (ProjectIndex, Industry) upsert — blind Add 는 같은 인덱스 2행을 만든다
-		FShippedProjectRecord* Existing = G.ShippedProjects.FindByPredicate(
-			[&Rec](const FShippedProjectRecord& R)
-			{ return R.ProjectIndex == Rec.ProjectIndex && R.Industry == Rec.Industry; });
+		FShippedProjectRecord* Existing = ShippedProjectRecords::Find(
+			G.ShippedProjects, Rec.BuildingIndex, Rec.Industry, Rec.ProjectIndex);
 		if (Existing)
 		{
 			*Existing = Rec;
@@ -679,7 +711,10 @@ void UDevPresetSeeder::SeedProjectHistory(const FDevProgressPresetRow& Preset)
 		Office.TierProgress.ClearedProjects.Empty();
 		for (const FShippedProjectRecord& R : G.ShippedProjects)
 		{
-			Office.TierProgress.ClearedProjects.AddUnique(R.ProjectIndex);
+			if (R.BuildingIndex == B.BuildingIndex)
+			{
+				Office.TierProgress.ClearedProjects.AddUnique(R.ProjectIndex);
+			}
 		}
 	}
 
@@ -784,8 +819,9 @@ void UDevPresetSeeder::SeedResourcesAndPromote(const FDevProgressPresetRow& Pres
 	{
 		if (UResourceItemManager* Res = GI->GetSubsystem<UResourceItemManager>())
 		{
-			// MarketCap 변경 이벤트가 while(TryPromoteTitle()) 연쇄 승격을 발화한다
-			Res->GrantTestResources(Preset.ResourceScenarioRow);
+			// MarketCap 변경 이벤트가 while(TryPromoteTitle()) 연쇄 승격을 발화한다.
+			// Diamond 는 건너뛴다 ― 프리셋은 부팅마다 도는 자동 경로라 서버 권위 재화를 덮으면 안 된다(§7.6 R3)
+			Res->GrantTestResourcesExceptDiamond(Preset.ResourceScenarioRow);
 		}
 	}
 

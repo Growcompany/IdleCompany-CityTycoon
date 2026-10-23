@@ -29,7 +29,7 @@ class UCommonButtonStyle;
 DECLARE_DELEGATE_ThreeParams(FOnProduceRequested, int32 /*OrderID*/, int32 /*Quantity*/, float /*ProductionTimeSecPerUnit*/);
 DECLARE_DELEGATE_TwoParams(FOnMaterialClicked, EResourceType /*Type*/, FVector2D /*AbsoluteScreenPos*/);
 
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UProductionCardWidget : public UUserWidget
 {
 	GENERATED_BODY()

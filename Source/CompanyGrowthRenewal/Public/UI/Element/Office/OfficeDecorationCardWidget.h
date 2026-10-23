@@ -21,7 +21,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDecorationCardSelected, const FDe
  * - 벽 장식, 바닥 장식, 가구, 바닥 타일 공통 사용
  * - 클릭 시 카테고리에 따라 다른 배치 플로우 시작
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UOfficeDecorationCardWidget : public UEntityCardWidgetBase
 {
 	GENERATED_BODY()
@@ -37,6 +37,7 @@ protected:
 	virtual void NativeOnListItemObjectSet(UObject* ListItemObject) override;
 
 private:
+	void OnDecorationIconLoaded(FSoftObjectPath LoadedPath);
 	// 장식품 데이터
 	UPROPERTY(BlueprintReadOnly, Category = "Decoration", meta = (AllowPrivateAccess = "true"))
 	FDecorationCardTable DecorationInfo;

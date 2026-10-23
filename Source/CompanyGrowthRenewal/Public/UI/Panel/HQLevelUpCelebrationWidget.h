@@ -22,6 +22,12 @@ class COMPANYGROWTHRENEWAL_API UHQLevelUpCelebrationWidget : public UAnimatedAct
 public:
 	void SetLevelUpInfo(int32 InOldLevel, int32 InNewLevel, const FText& InRewardText);
 
+	// 기업 호칭 승격도 같은 연출을 쓴다. 메달 숫자는 티어(1~5), 좌우 텍스트는 호칭 이름이다.
+	void SetTitlePromotion(const FText& InOldTitle, const FText& InNewTitle, int32 InOldTier, int32 InNewTier);
+
+	// 튜토리얼 안내가 짚을 닫기 자리 — 등장 연출이 끝나 터치로 닫힐 때만. 글자 아래 전체 화면 버튼이 탭을 받는다
+	UWidget* GetCloseTargetWidget() const;
+
 protected:
 	virtual void NativeOnActivated() override;
 	virtual void NativeOnDeactivated() override;
@@ -38,6 +44,9 @@ protected:
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UOverlay* TitleContainer = nullptr;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* EyebrowText;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UCommonTextBlock* LevelUpTitleText;
@@ -58,6 +67,9 @@ protected:
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UCommonTextBlock* MedalLevelText = nullptr;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
+	UCommonTextBlock* MedalCaptionText = nullptr;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	UWidget* MedalBox = nullptr;
@@ -102,6 +114,9 @@ private:
 	int32 CachedOldLevel = 1;
 	int32 CachedNewLevel = 2;
 	FText CachedRewardText;
+	bool bTitleMode = false;
+	FText CachedOldTitle;
+	FText CachedNewTitle;
 
 	// 회전 상태
 	float RayRotation = 0.f;

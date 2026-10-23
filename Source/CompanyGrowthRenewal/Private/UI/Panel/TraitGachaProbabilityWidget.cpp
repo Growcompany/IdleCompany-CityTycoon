@@ -2,13 +2,19 @@
 
 #include "UI/Panel/TraitGachaProbabilityWidget.h"
 #include "Components/VerticalBox.h"
+#include "Components/VerticalBoxSlot.h"
 #include "Components/TextBlock.h"
+#include "Components/Border.h"
+#include "Components/SizeBox.h"
+#include "Blueprint/WidgetTree.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
+#include "UI/Element/Employee/PotentialOddsRowWidget.h"
 #include "Manager/BuildingTraitManagerSubsystem.h"
 #include "Manager/BuildingSkinManagerSubsystem.h"
+#include "Manager/TableManagerSubsystem.h"
 #include "Data/GachaRecruitmentData.h"
 #include "Data/BuildingTraitSaveData.h"
-#include "Enum/LootBoxRarity.h"
+#include "Enum/WidgetType.h"
 
 void UTraitGachaProbabilityWidget::NativeConstruct()
 {
@@ -28,7 +34,7 @@ void UTraitGachaProbabilityWidget::NativeConstruct()
 	if (PityRuleText)
 	{
 		PityRuleText->SetText(FText::FromString(FString::Printf(
-			TEXT("%d회부터 Epic +2%%/회 · %d회 Epic 확정 · %d회 Legendary 확정"),
+			TEXT("에픽: %d회부터 +2%%/회 · %d회 확정\n레전드: %d회 확정"),
 			FBuildingTraitPityData::SoftPityStart, FBuildingTraitPityData::HardPity, FBuildingTraitPityData::GrandPity)));
 	}
 
@@ -97,13 +103,38 @@ void UTraitGachaProbabilityWidget::BuildTierRows(UVerticalBox* Container, bool b
 		Rows = TraitManager->GetTraitProbabilityTableForUI(bAdvanced);
 	}
 
-	for (const FGachaRarityChance& Row : Rows)
+	UGameInstance* GI = GetGameInstance();
+	UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	TSubclassOf<UUserWidget> RowClass = TableMgr ? TableMgr->GetWidgetClass(EWidgetType::PotentialOddsRow) : nullptr;
+	if (!RowClass)
 	{
-		UTextBlock* Line = NewObject<UTextBlock>(this);
-		Line->SetText(FText::FromString(FString::Printf(TEXT("%s   %.0f%%"),
-			*FLootBoxRarityUtility::GetKoreanName(Row.Rarity), Row.Percent)));
-		Line->SetColorAndOpacity(FSlateColor(FLootBoxRarityUtility::GetRarityColor(Row.Rarity)));
-		Container->AddChildToVerticalBox(Line);
+		UE_LOG(LogTemp, Warning, TEXT("[TraitGachaProbability] DT_WidgetClass 에 PotentialOddsRow 행이 없습니다"));
+		return;
+	}
+
+	for (int32 Index = 0; Index < Rows.Num(); ++Index)
+	{
+		const FGachaRarityChance& Row = Rows[Index];
+		UPotentialOddsRowWidget* RowWidget = Cast<UPotentialOddsRowWidget>(CreateWidget(this, RowClass));
+		if (!RowWidget)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[TraitGachaProbability] PotentialOddsRow 클래스 타입이 맞지 않습니다"));
+			continue;
+		}
+		RowWidget->SetOdds(Row.Rarity, Row.Percent);
+		Container->AddChildToVerticalBox(RowWidget);
+		if (Index + 1 < Rows.Num())
+		{
+			USizeBox* DividerSize = WidgetTree->ConstructWidget<USizeBox>();
+			DividerSize->SetHeightOverride(2.f);
+			UBorder* Divider = WidgetTree->ConstructWidget<UBorder>();
+			Divider->SetBrushColor(FLinearColor(0.28f, 0.32f, 0.38f, 0.28f));
+			DividerSize->AddChild(Divider);
+			if (UVerticalBoxSlot* DividerSlot = Container->AddChildToVerticalBox(DividerSize))
+			{
+				DividerSlot->SetPadding(FMargin(24.f, 0.f, 24.f, 0.f));
+			}
+		}
 	}
 }
 

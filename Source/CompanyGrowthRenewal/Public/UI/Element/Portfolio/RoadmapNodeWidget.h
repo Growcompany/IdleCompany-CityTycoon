@@ -20,7 +20,7 @@ enum class ERoadmapNodeState : uint8
  * 포트폴리오 로드맵 노드 1개 (UIE_RoadmapNode) — 생김새는 WBP 트리, 개수/상태/색은 CodexPanel C++가 구동.
  * 데이터 없음(순수 표시). 진척 연결선/간격/노드 개수는 소유 패널(CodexPanel)이 담당.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API URoadmapNodeWidget : public UCommonUserWidget
 {
 	GENERATED_BODY()

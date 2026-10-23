@@ -5,6 +5,7 @@
 
 #include "CoreMinimal.h"
 #include "TimeCycle/TimeCycleCode.h"
+#include "TimeCycle/TimeCycleContinuation.h"
 #include "GameFramework/Actor.h"
 #include "TimeCycleManager.generated.h"
 
@@ -40,6 +41,7 @@ public:
 	ATimeCycleManager();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual void Tick(float DeltaSeconds) override;
 
@@ -62,6 +64,22 @@ public:
 	// 현재 시간 반환
 	UFUNCTION(BlueprintPure, Category=TimeCycle)
 	FTimeCycleCode GetCurrentTime() const;
+
+	// 연출용 시간은 게임 시계의 저장·사이클·이벤트에 영향을 주지 않는다.
+	UFUNCTION(BlueprintPure, Category=TimeCycle)
+	FTimeCycleCode GetVisualTime() const;
+
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category=TimeCycle)
+	bool SetVisualTimeOverride(FTimeCycleCode NewTime);
+
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category=TimeCycle)
+	void ClearVisualTimeOverride();
+
+	UFUNCTION(BlueprintPure, Category=TimeCycle)
+	bool HasVisualTimeOverride() const { return bHasVisualTimeOverride; }
+
+	UFUNCTION(BlueprintPure, Category=TimeCycle)
+	bool IsVisualNight() const;
 
 	// 경과한 사이클 수 반환
 	UFUNCTION(BlueprintPure, Category=TimeCycle)
@@ -107,6 +125,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category=TimeCycle)
 	FTimeCycleDelegate OnSunSet;
 
+	// 장식 조명만 구독한다. 실제 일출·일몰과 연출 변경을 모두 반영한다.
+	UPROPERTY(BlueprintAssignable, Category=TimeCycle)
+	FTimeCycleDelegate OnVisualTimeChanged;
+
 	// 정오 도달 시 호출
 	UPROPERTY(BlueprintAssignable, Category=TimeCycle)
 	FTimeCycleDelegate OnNoon;
@@ -116,6 +138,8 @@ public:
 	FTimeCycleDelegate OnMidnight;
 
 private:
+	void CacheTimeSettings();
+	FTimeCycleContinuation MakeContinuation() const;
 	void UpdateNumCycles(const FTimeCycleData& PreviousTimeCycle);
 
 	UFUNCTION()
@@ -148,11 +172,12 @@ private:
 	UPROPERTY(ReplicatedUsing=OnRep_TimeCycleData)
 	FTimeCycleData TimeCycleData;
 
+	bool bHasVisualTimeOverride = false;
+	FTimeCycleCode VisualTimeOverride;
+
 	// 캐시된 초 단위 값
 	int32 InitialTimeSeconds = 0;
 	int32 MaxTimeSeconds = 0;
-	int32 CycleDurationSeconds = 0;
-	int32 CycleSpanSeconds = 0;
 
 	int32 SunRiseSeconds = 0;
 	int32 SunSetSeconds = 0;

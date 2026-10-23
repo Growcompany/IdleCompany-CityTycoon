@@ -5,8 +5,9 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Containers/Ticker.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/ResourceType.h"
+#include "Data/CloudEconomyData.h"
 #include "MineManager.generated.h"
 
 class UTexture2D;
@@ -43,9 +44,13 @@ struct FMineLineState
 	UPROPERTY(SaveGame, BlueprintReadOnly)
 	float BaseRatePerSecond = 0.0f;
 
-	// 라인별 한도 오버라이드. 0 이면 국가 MiningStorage 강화 값을 사용.
+	// 설치 시 선택한 라인 한도. 0 이면 국가 MiningStorage 강화 값을 사용.
 	UPROPERTY(SaveGame, BlueprintReadOnly)
 	int64 OverrideMaxStorage = 0;
+
+	// 설치 이후 구매한 국가 저장 강화 증가분만 선택 한도에 더한다.
+	UPROPERTY(SaveGame, BlueprintReadOnly)
+	int32 StorageLevelAtCreation = 0;
 
 	// Wall-clock lazy 모델의 핵심 — 라인 생성 시점 UTC.
 	// GetLineState 호출 시 (UtcNow - StartWallUtc) * Rate 로 CurrentQty 동적 계산.
@@ -102,7 +107,7 @@ public:
 		ECountryType, Country, EResourceType, Resource, bool, bSaturated);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnMineResourceClaimed,
 		ECountryType, Country, EResourceType, Resource, int64, ClaimedQty);
-	// 수령 후 라인이 ActiveLines 에서 제거됨 — UI 가 위젯 destroy 트리거.
+	// 라인이 ActiveLines 에서 빠질 때. 수령은 라인을 남기고 저장량만 0 으로 되돌리므로 현재 방송처가 없다.
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMineLineRemoved,
 		ECountryType, Country, EResourceType, Resource);
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnMineUpgradeChanged,
@@ -137,7 +142,7 @@ public:
 	void EnsureCountryLines(ECountryType Country);
 
 	// 라인 신규 생성 (슬롯 구조). MaxLines 한도 + Resource pool 검증 + 중복 체크 후 추가.
-	// OverrideMaxStorage>0 이면 라인별 한도. 0 이면 국가 MiningStorage 강화 값 사용.
+	// OverrideMaxStorage>0 이면 설치 시 한도. 이후 국가 MiningStorage 증가분을 더한다.
 	// Country MaxStorage 가 hard ceiling — Override 가 그보다 크면 ceiling 으로 clamp.
 	UFUNCTION(BlueprintCallable, Category = "Mine")
 	bool CreateMineLine(ECountryType Country, EResourceType Resource, int64 OverrideMaxStorage = 0);
@@ -150,13 +155,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Mine")
 	TArray<ECountryType> GetActiveCountries() const;
 
+	// 쌓인 양을 자원 인벤토리로 옮기고, 라인은 남긴 채 저장량만 0 에서 다시 쌓는다.
 	UFUNCTION(BlueprintCallable, Category = "Mine")
 	bool ClaimResource(ECountryType Country, EResourceType Resource);
+
+	// 자동 수령이 켜진 나라의 가득 찬 라인을 한 번 수령한다(틱이 1초마다 부른다).
+	void ProcessAutoClaims();
 
 	// 한도까지 즉시 채움 (다이아 결제 등 비용은 호출자 책임 — 매니저는 상태 변경만).
 	// 이미 saturated 또는 MaxStorage<=0 이면 false 반환.
 	UFUNCTION(BlueprintCallable, Category = "Mine")
 	bool InstantFinishLine(ECountryType Country, EResourceType Resource);
+
+	// 표시와 결제가 같은 남은 시간 견적을 사용한다. 0이면 완료됐거나 구매할 수 없다.
+	int64 GetInstantFinishCost(ECountryType Country, EResourceType Resource) const;
+	bool IsInstantFinishPending(ECountryType Country, EResourceType Resource) const;
+	void RequestInstantFinish(ECountryType Country, EResourceType Resource, int64 MaxAcceptedCost,
+		FOnCloudEconomyOpDone Done);
 
 	// [dev 프리셋] 채광 라인 적재량을 한도의 임의 비율로 만든다 (InstantFinishLine 은 100% 로만 점프).
 	bool SeedLineProgress(ECountryType Country, EResourceType Resource, float ProgressRatio);
@@ -186,14 +201,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Mine|Upgrade")
 	int64 GetMaxStorage(ECountryType Country) const;
 
-	// 라인 1개의 실효 한도. OverrideMaxStorage>0 이면 그 값(Country MaxStorage 로 clamp), 아니면 Country MaxStorage.
-	// 라인이 없거나 Resource==None 이면 0 반환.
+	// 라인 1개의 실효 한도. 선택 한도 + 설치 후 국가 저장 강화 증가분(국가 한도로 clamp).
+	// OverrideMaxStorage 가 0 이면 국가 한도를 그대로 사용한다.
+	// 라인이 없으면 국가 한도, Resource==None 이면 0 반환.
 	UFUNCTION(BlueprintPure, Category = "Mine|Upgrade")
 	int64 GetEffectiveMaxStorage(ECountryType Country, EResourceType Resource) const;
 
 	// 동시 활성 가능한 라인 수 (LineExpansion 강화로 증가).
 	UFUNCTION(BlueprintPure, Category = "Mine|Upgrade")
 	int32 GetMaxLines(ECountryType Country) const;
+
+	// 국가 DT에 등록된 서로 다른 채굴 가능 자원 수. 라인 증설의 국가별 상한.
+	int32 GetResourceLineCap(ECountryType Country) const;
 
 	// 오프라인 catchup 효율 보너스 (0.0~0.5). 1.0x 기본에 곱해짐 → 강화 시 최대 1.5x.
 	UFUNCTION(BlueprintPure, Category = "Mine|Upgrade")
@@ -247,8 +266,6 @@ private:
 	bool TickInternal(float DeltaTime);
 
 	int32 FindLineIndexByResource(const FCountryMineData& Mine, EResourceType Resource) const;
-
-	// GDD_FACTORY 524-541 표 임시 룰: 첫번째 자원 = 주력(2/min), 그 외 = 보조(1/min).
-	// 추후 DT_CountryMineResource 로 분리 (남아공 금/다이아 0.5/0.3 같은 예외 처리용).
-	static float ComputeBaseRatePerSecondByIndex(int32 IndexInList);
+	bool BuildInstantFinishQuote(ECountryType Country, EResourceType Resource, int64& OutCost,
+		FCloudMeta& OutMeta) const;
 };

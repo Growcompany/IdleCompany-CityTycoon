@@ -1,4 +1,7 @@
 #include "UI/Panel/CityCompanyManageWidget.h"
+#include "UI/Element/Common/PanelHeaderWidget.h"
+#include "Manager/PanelIntroSubsystem.h"
+#include "TimerManager.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/TextBlock.h"
 #include "Components/Image.h"
@@ -13,6 +16,7 @@
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Element/Common/ConfirmCancelWidget.h"
 #include "UI/Element/Buttons/CostActionButtonWidget.h"
+#include "Manager/CloudEconomySubsystem.h"
 #include "Manager/ResourceItemManager.h"
 #include "UI/Panel/InGameLayerWidget.h"
 #include "UI/UIBase.h"
@@ -51,14 +55,29 @@ void UCityCompanyManageWidget::NativeConstruct()
 	{
 		Button_SkipRecovery->OnClicked().AddUObject(this, &UCityCompanyManageWidget::HandleSkipRecovery);
 	}
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UCityCompanyManageWidget::HandleCloseClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UCityCompanyManageWidget::HandleCloseClicked);
 	}
 	if (BackgroundBtn)
 	{
 		BackgroundBtn->OnClicked.AddDynamic(this, &UCityCompanyManageWidget::HandleBackgroundClicked);
 	}
+
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UCloudEconomySubsystem* Cloud = GI->GetSubsystem<UCloudEconomySubsystem>())
+		{
+			Cloud->OnEconomyReady.AddUObject(this, &UCityCompanyManageWidget::HandleEconomyReady);
+		}
+	}
+}
+
+void UCityCompanyManageWidget::HandleEconomyReady(bool bReady)
+{
+	// 잠긴 동안에도 [즉시 완료] 는 살려 둔다 — 조용히 죽은 버튼은 "보석이 사라졌다" 로 읽힌다.
+	// 해제되면 서버값으로 정정된 보석 잔액으로 비용 배지를 다시 계산한다
+	RefreshFromProgress();
 }
 
 void UCityCompanyManageWidget::NativeDestruct()
@@ -71,9 +90,9 @@ void UCityCompanyManageWidget::NativeDestruct()
 	{
 		Button_SkipRecovery->OnClicked().RemoveAll(this);
 	}
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = PanelHeader ? PanelHeader->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.RemoveAll(this);
+		PanelCloseButton->OnCloseClicked.RemoveAll(this);
 	}
 	if (BackgroundBtn)
 	{
@@ -87,12 +106,26 @@ void UCityCompanyManageWidget::NativeDestruct()
 	{
 		AcqMgr->OnCompanyProgressChanged.RemoveAll(this);
 	}
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (UCloudEconomySubsystem* Cloud = GI->GetSubsystem<UCloudEconomySubsystem>())
+		{
+			Cloud->OnEconomyReady.RemoveAll(this);
+		}
+	}
 	Super::NativeDestruct();
 }
 
 void UCityCompanyManageWidget::NativeOnActivated()
 {
 	Super::NativeOnActivated();
+
+	// 최초 진입 코치마크 — 등장 모션이 끝난 뒤 딤을 덮는다
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().SetTimer(
+			PanelIntroTimer, this, &UCityCompanyManageWidget::TryPlayPanelIntro, 0.5f, false);
+	}
 
 	if (UCGGameInstance* GI = Cast<UCGGameInstance>(GetGameInstance()))
 	{
@@ -123,6 +156,33 @@ void UCityCompanyManageWidget::NativeOnActivated()
 	}
 }
 
+void UCityCompanyManageWidget::TryPlayPanelIntro()
+{
+	// 타이머 대기 중 창이 닫혔을 수 있다
+	if (!IsActivated())
+	{
+		return;
+	}
+	UPanelIntroSubsystem* IntroMgr = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UPanelIntroSubsystem>() : nullptr;
+	if (!IntroMgr)
+	{
+		return;
+	}
+	// 함수 지역 static 이라 유니티 빌드 셰도잉이 없다
+	static const FName IntroKey(TEXT("CityCompanyManage"));
+	PanelIntroOverlay = IntroMgr->PlayIntro(this, IntroKey, /*bIgnoreSeen=*/false);
+	if (UPanelIntroOverlayWidget* Overlay = PanelIntroOverlay.Get())
+	{
+		Overlay->OnIntroFinished.AddUObject(this, &UCityCompanyManageWidget::HandlePanelIntroFinished);
+	}
+}
+
+void UCityCompanyManageWidget::HandlePanelIntroFinished()
+{
+	PanelIntroOverlay.Reset();
+}
+
 void UCityCompanyManageWidget::NativeOnDeactivated()
 {
 	if (UUIManagerSubsystem* UIM = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
@@ -150,11 +210,48 @@ void UCityCompanyManageWidget::NativeOnDeactivated()
 		}
 	}
 	Super::NativeOnDeactivated();
+
+	// 인트로는 뷰포트 오버레이라 스택이 안 거둬간다 — RemoveFromParent → NativeDestruct 가 복구 신호를 쏜다
+	if (GetWorld())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(PanelIntroTimer);
+	}
+	if (UPanelIntroOverlayWidget* Intro = PanelIntroOverlay.Get())
+	{
+		Intro->RemoveFromParent();
+	}
+	PanelIntroOverlay.Reset();
 }
 
 UWidget* UCityCompanyManageWidget::GetDemolishButtonWidget() const
 {
 	return Button_Demolish;
+}
+
+UWidget* UCityCompanyManageWidget::GetSkipRecoveryButtonWidget() const
+{
+	return Button_SkipRecovery;
+}
+
+UWidget* UCityCompanyManageWidget::GetSkipConfirmButtonWidget() const
+{
+	return GetPendingConfirmButton(/*bWantSkip=*/true);
+}
+
+UWidget* UCityCompanyManageWidget::GetDemolishConfirmButtonWidget() const
+{
+	return GetPendingConfirmButton(/*bWantSkip=*/false);
+}
+
+UWidget* UCityCompanyManageWidget::GetPendingConfirmButton(bool bWantSkip) const
+{
+	const UConfirmCancelWidget* Confirm = PendingConfirm.Get();
+	// 프롬프트 풀이 같은 인스턴스를 다른 소비자에게 넘겼으면 바인딩이 Clear 돼 이 패널 것이 아니다
+	if (!Confirm || !Confirm->IsActivated() || bPendingConfirmIsSkip != bWantSkip || !Confirm->OnConfirm.IsBoundToObject(this))
+	{
+		return nullptr;
+	}
+	return Confirm->GetConfirmButtonWidget();
 }
 
 void UCityCompanyManageWidget::ConfigureForCompany(int32 InKey)
@@ -515,13 +612,15 @@ void UCityCompanyManageWidget::ShowDemolishConfirm()
 	const int64 Pot = AcqMgr->GetPotAmount(CompanyKey);
 	Confirm->SetTitle(NSLOCTEXT("CityAcq", "DemolishTitle", "철거"));
 	Confirm->SetMessage(Pot > 0
-		? FText::Format(NSLOCTEXT("CityAcq", "DemolishMsg", "지금 철거하면 {0}을 받고 남은 회수는 사라집니다."),
+		? FText::Format(NSLOCTEXT("CityAcq", "DemolishMsg", "지금 철거하면 {0}|hpp(을,를) 받고 남은 회수는 사라집니다."),
 			UGlobalUtilFunctions::AbbreviateNumber(Pot))
 		: NSLOCTEXT("CityAcq", "DemolishMsgEmpty", "아직 회수된 금액이 없습니다. 지금 철거하면 아무것도 받지 못합니다."));
 	Confirm->SetConfirmButtonText(NSLOCTEXT("CityAcq", "DemolishConfirm", "철거"));
 	Confirm->SetCancelButtonText(NSLOCTEXT("CityAcq", "DemolishCancel", "취소"));
 
 	Confirm->OnConfirm.AddUObject(this, &UCityCompanyManageWidget::HandleDemolishConfirmed);
+	PendingConfirm = Confirm;
+	bPendingConfirmIsSkip = false;
 }
 
 void UCityCompanyManageWidget::HandleSkipRecovery()
@@ -553,12 +652,14 @@ void UCityCompanyManageWidget::HandleSkipRecovery()
 	// 한 줄로 끝낸다 — 파는 것이 시간뿐이라 되물을 위험 자체가 없다.
 	Confirm->SetTitle(NSLOCTEXT("CityAcq", "SkipTitle", "즉시 완료"));
 	Confirm->SetMessage(FText::Format(
-		NSLOCTEXT("CityAcq", "SkipMsg", "보석 {0}개로 남은 회수를 한 번에 진행합니다."),
+		NSLOCTEXT("CityAcq", "SkipMsg", "다이아 {0}개로 남은 회수를 바로 끝냅니다."),
 		FText::AsNumber(Cost)));
 	Confirm->SetConfirmButtonText(NSLOCTEXT("CityAcq", "SkipConfirm", "즉시 완료"));
 	Confirm->SetCancelButtonText(NSLOCTEXT("CityAcq", "SkipCancel", "취소"));
 
 	Confirm->OnConfirm.AddUObject(this, &UCityCompanyManageWidget::HandleSkipConfirmed);
+	PendingConfirm = Confirm;
+	bPendingConfirmIsSkip = true;
 }
 
 void UCityCompanyManageWidget::HandleSkipConfirmed()
@@ -566,17 +667,24 @@ void UCityCompanyManageWidget::HandleSkipConfirmed()
 	UCityAcquisitionManager* AcqMgr = GetWorld() ? GetWorld()->GetSubsystem<UCityAcquisitionManager>() : nullptr;
 	if (!AcqMgr) { return; }
 
-	// 확인~클릭 사이 상태/잔액 변동은 매니저가 다시 검사한다 (보석 차감도 거기서)
-	if (!AcqMgr->SkipRecovery(CompanyKey))
+	// 확인~클릭 사이 상태/잔액 변동은 매니저가 다시 검사한다. 차감은 서버가 하고 압축은 성공 응답 뒤다.
+	// 실패 원인은 코드로 갈린다 — "즉시 완료할 수 없습니다" 가 서버·네트워크 실패까지 덮지 않게(1-B-4c)
+	const int32 SkipCost = AcqMgr->GetSkipDiamondCost(CompanyKey);
+	AcqMgr->RequestSkipRecovery(CompanyKey,
+		FOnCloudEconomyOpDone::CreateWeakLambda(this, [this, SkipCost](bool bOk, FName Code)
 	{
-		if (UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+		if (!bOk)
 		{
-			UIMgr->ShowRejectNotification(NSLOCTEXT("CityAcq", "SkipFailed", "지금은 즉시 완료할 수 없습니다"));
+			if (UUIManagerSubsystem* UIMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr)
+			{
+				// 잔액 부족은 부족액 토스트로 — 그 외에는 원인별 문구가 나간다
+				UIMgr->NotifyCloudOpFailure(Code, EResourceType::Diamond, SkipCost);
+			}
+			return;
 		}
-		return;
-	}
-	// 패널은 열어 둔다 — 100% 로 찬 링을 보고 철거(수령)를 누르는 게 다음 행동이다.
-	// 표시 갱신은 SkipRecovery 가 브로드캐스트한 OnCompanyProgressChanged 가 처리한다.
+		// 패널은 열어 둔다 — 100% 로 찬 링을 보고 철거(수령)를 누르는 게 다음 행동이다.
+		// 표시 갱신은 ApplySkipRecoveryEffect 가 브로드캐스트한 OnCompanyProgressChanged 가 처리한다.
+	}));
 }
 
 void UCityCompanyManageWidget::HandleDemolishConfirmed()
@@ -587,6 +695,11 @@ void UCityCompanyManageWidget::HandleDemolishConfirmed()
 		AcqMgr->Demolish(CompanyKey);
 	}
 	DeactivateWidget();
+}
+
+UWidget* UCityCompanyManageWidget::GetCloseButtonWidget() const
+{
+	return PanelHeader ? PanelHeader->GetCloseButton() : nullptr;
 }
 
 void UCityCompanyManageWidget::HandleCloseClicked()

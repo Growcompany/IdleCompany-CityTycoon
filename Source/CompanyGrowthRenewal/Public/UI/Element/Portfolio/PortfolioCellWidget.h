@@ -14,7 +14,7 @@ class UTexture2D;
  * 생김새(크림 플레이트+음각 well+등급 배지+접지그림자+광택)는 WBP 트리, 상태/데이터는 CodexPanel C++가 구동.
  * ★ 열람 전용 — 착수는 기획 보드가 단일 창구다(2026-07-26 셀 클릭 착수 제거).
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UPortfolioCellWidget : public UCommonUserWidget
 {
 	GENERATED_BODY()

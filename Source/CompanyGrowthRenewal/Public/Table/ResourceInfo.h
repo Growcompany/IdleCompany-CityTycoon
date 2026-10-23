@@ -50,4 +50,8 @@ struct FResourceInfo : public FTableRowBase
 	// 무역/판매 시스템은 이 값을 baseline 으로 +/- 보정
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Config")
 	int32 BasePrice = 0;
+
+	// 채광 가능한 원료의 강화 전 분당 기본 채취량. 0이면 이 자원으로 라인을 설치할 수 없다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Config")
+	float MiningRatePerMinute = 0.0f;
 };

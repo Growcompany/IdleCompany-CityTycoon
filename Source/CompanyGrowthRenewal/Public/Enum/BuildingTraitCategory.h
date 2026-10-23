@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "BuildingTraitCategory.generated.h"
 
-// 건물 특성 분야 (19개). 분야:대상 = 1:1 — 대상이 겹치면 세트만 갈라져 플레이어가 손해를 본다.
+// 건물 특성 분야 (18개). 분야:대상 = 1:1 — 대상이 겹치면 세트만 갈라져 플레이어가 손해를 본다.
 // Manufacturing/Project 는 타입 전용이라 세트 보너스 없음.
 UENUM(BlueprintType)
 enum class EBuildingTraitCategory : uint8
@@ -29,7 +29,6 @@ enum class EBuildingTraitCategory : uint8
 	ESG				UMETA(DisplayName = "ESG"),
 	Global			UMETA(DisplayName = "글로벌"),
 	CRM				UMETA(DisplayName = "CRM"),
-	Network			UMETA(DisplayName = "파트너십"),
 	IP				UMETA(DisplayName = "IP"),
 	HR				UMETA(DisplayName = "HR"),
 	Mindset			UMETA(DisplayName = "마인드셋")
@@ -60,7 +59,6 @@ inline FText GetBuildingTraitCategoryDisplayName(EBuildingTraitCategory Category
 	case EBuildingTraitCategory::ESG:           return FText::FromString(TEXT("ESG"));
 	case EBuildingTraitCategory::Global:        return FText::FromString(TEXT("글로벌"));
 	case EBuildingTraitCategory::CRM:           return FText::FromString(TEXT("CRM"));
-	case EBuildingTraitCategory::Network:       return FText::FromString(TEXT("파트너십"));
 	case EBuildingTraitCategory::IP:            return FText::FromString(TEXT("IP"));
 	case EBuildingTraitCategory::HR:            return FText::FromString(TEXT("HR"));
 	case EBuildingTraitCategory::Mindset:       return FText::FromString(TEXT("마인드셋"));

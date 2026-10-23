@@ -9,7 +9,7 @@
 // 선택 건물 위 이중 V 셰브론 — 자기 로컬 공간에 선 드로잉 (절대좌표 왕복 없음 = 페인트 공간 버그 무관).
 // 배치는 InGameLayer 가 캔버스 슬롯(하단중앙 정렬 = V 꼭짓점이 앵커)으로 수행.
 // 무인 런타임 위젯이라 WBP/DT 등록 없이 StaticClass 직접 생성 (플레이북 '디자이너 비관여 = C++ 자가 트리' 분기)
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API USelectionChevronWidget : public UUserWidget
 {
 	GENERATED_BODY()

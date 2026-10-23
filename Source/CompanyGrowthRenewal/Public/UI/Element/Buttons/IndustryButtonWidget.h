@@ -10,10 +10,11 @@ class UBorder;
 
 /**
  * 산업 선택 타일 버튼 (CommonButton 정식 변형).
- * - 배경/눌림 = 산업별 CUI_Style2_Btn_* 스타일 (DT ButtonStyle 컬럼에서 로드해 SetStyle)
+ * - 버튼 = 투명 CardClear 스타일로 터치 영역을 제공
  * - 라벨 = 상속 ButtonText (DT DisplayName)
- * - 글리프 = GlyphImage (DT GlyphIcon, 크림 틴트는 WBP 기본값)
- * - 선택 글로우 = SelectionBorder (MI_UI_Glow_Outline 브러시, NativeOnSelected/Deselected 로 토글)
+ * - 면 = FacePlate (DT 산업색으로 채우고 명도를 조절)
+ * - 글리프 = GlyphImage (DT GlyphIcon의 전체 형태를 면 위 배경 문양으로 표시)
+ * - 선택 표시 = SelectionBorder/CheckImage (NativeOnSelected/Deselected 로 토글)
  * - 배타선택은 UBuildModalWidget 의 UCommonButtonGroupBase 가 담당. 클릭은 CommonButtonBase 네이티브 OnClicked().
  */
 UCLASS()
@@ -41,11 +42,19 @@ protected:
 	virtual void NativeOnSelected(bool bBroadcast) override;
 	virtual void NativeOnDeselected(bool bBroadcast) override;
 
-	// 산업 단색 글리프 — DT GlyphIcon 로드. 크림 틴트(#F0E6D0)는 WBP ColorAndOpacity 기본값.
+	// 눌림 표현은 FacePlate가 소유한다. 투명 버튼 스타일은 터치 영역만 제공한다.
+	virtual void NativeOnPressed() override;
+	virtual void NativeOnReleased() override;
+
+	// 업종 배경 문양 — DT GlyphIcon의 전체 형태를 표시하고 선택 여부에 따라 흰색 알파를 조절한다.
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
 	UImage* GlyphImage;
 
-	// 선택 글로우 링 — MI_UI_Glow_Outline 브러시. 표시는 선택 상태에 따라 토글 (기본 Collapsed).
+	// 타일 면 — 산업 시그니처색을 받는 판. 버튼 자체 스타일은 CardClear(투명)라 이 판이 유일한 면이다.
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidget))
+	UBorder* FacePlate;
+
+	// 선택 링 — WBP 브러시를 유지하고 선택 상태에 따라 토글한다 (기본 Collapsed).
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional))
 	UBorder* SelectionBorder;
 
@@ -58,13 +67,18 @@ protected:
 	UImage* LockImage;
 
 private:
-	// DT GetCompanyInfo → ButtonText/GlyphImage/SetStyle 주입. 디자인타임은 DT 직접 로드(IsDesignTime 가드).
+	// DT GetCompanyInfo → 라벨/배경 문양/면색 주입. 디자인타임은 DT 직접 로드(IsDesignTime 가드).
 	void ApplyCompanyInfo();
 
 	// 파라미터명 bInSelected — CommonButtonBase::bSelected 멤버 셰도잉(C4458) 회피
 	void UpdateSelectionBorder(bool bInSelected);
 
-	// 선택 시 글리프에 입힐 산업 시그니처색(ApplyCompanyInfo 에서 캐시). 미선택 글리프는 중립 틴트(무지개 방지).
+	// 면색 재적용. 눌림이면 같은 색을 어둡게 + 살짝 가라앉힌다.
+	void ApplyFaceColor(bool bPressed);
+
+	// ApplyCompanyInfo 가 산출한 명도 적용 면색 — 눌림 복귀 기준값.
+	FLinearColor CachedFaceColor = FLinearColor::White;
+
 	FLinearColor GlyphAccentColor = FLinearColor::White;
 
 	bool bIndustryLocked = false;

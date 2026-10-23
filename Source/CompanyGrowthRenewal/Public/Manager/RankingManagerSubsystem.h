@@ -8,6 +8,7 @@
 class UPlayFabManagerSubsystem;
 class USaveLoadManager;
 struct FPlayFabLeaderboardEntry;
+struct FGameSaveData;
 
 /**
  * 랭킹 & 도시 방문 매니저
@@ -64,9 +65,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ranking")
 	void FetchLeaderboardAroundPlayer(int32 TabIndex, int32 Count = 20);
 
-	// 캐시된 리더보드
+	// 마지막 요청 탭의 캐시된 리더보드
 	UFUNCTION(BlueprintPure, Category = "Ranking")
-	const TArray<FRankingEntry>& GetCachedLeaderboard() const { return CachedLeaderboard; }
+	const TArray<FRankingEntry>& GetCachedLeaderboard() const { return CachedLeaderboards[LastRequestedTabIndex]; }
 
 	// ===== 도시 스냅샷 =====
 
@@ -84,6 +85,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ranking")
 	void EnterVisitMode(const FString& TargetPlayFabId, const FString& TargetDisplayName);
 
+	// 아직 완료되지 않은 방문 의도만 취소한다. 미리보기 다운로드와 현재 방문 모드는 유지한다.
+	void CancelPendingVisit();
+
 	// 방문 모드 퇴출 (정상 MainMap 복귀)
 	UFUNCTION(BlueprintCallable, Category = "Ranking")
 	void ExitVisitMode();
@@ -95,11 +99,14 @@ public:
 	void UploadRankingProfile();
 
 private:
+	friend class FRankingResponseRoutingTest;
+	friend class FBuildingLifetimeRevenuePersistenceTest;
+
 	UPROPERTY()
 	UPlayFabManagerSubsystem* PlayFabMgr = nullptr;
 
 	// 캐시된 리더보드 데이터
-	TArray<FRankingEntry> CachedLeaderboard;
+	TArray<FRankingEntry> CachedLeaderboards[2];
 
 	// 업로드 쓰로틀 (최소 60초 간격)
 	double LastScoreUploadTime = 0.0;
@@ -112,8 +119,8 @@ private:
 	double LastWeeklyFlushTime = 0.0;
 	void FlushWeeklyRevenue(bool bForce);
 
-	// 현재 조회 중인 탭 인덱스 (콜백에서 사용)
-	int32 PendingTabIndex = 0;
+	// 인자 없는 캐시 조회 API의 대상 탭. 응답 라우팅에는 사용하지 않는다.
+	int32 LastRequestedTabIndex = 0;
 
 	// 리더보드 통계 이름
 	static const FString StatName_Weekly;
@@ -130,6 +137,7 @@ private:
 
 	// 스냅샷 빌드 헬퍼
 	FCitySnapshot BuildCitySnapshot() const;
+	static FCitySnapshot BuildCitySnapshotFromSave(const FGameSaveData& GD);
 
 	// RankingProfile JSON 직렬화/역직렬화
 	FString SerializeRankingProfile() const;
@@ -138,4 +146,6 @@ private:
 	// 도시 스냅샷 다운로드 대기 (방문용)
 	FString PendingVisitPlayFabId;
 	FString PendingVisitDisplayName;
+	FTimerHandle VisitTimeout;
+	void HandleVisitTimeout();
 };

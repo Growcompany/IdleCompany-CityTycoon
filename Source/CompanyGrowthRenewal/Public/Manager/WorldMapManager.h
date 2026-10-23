@@ -10,7 +10,7 @@
 #include "Enum/RawMaterialType.h"
 #include "Enum/QualityGrade.h"
 #include "Enum/CompanyType.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "WorldMapManager.generated.h"
 
 struct FProductRecipeTable;

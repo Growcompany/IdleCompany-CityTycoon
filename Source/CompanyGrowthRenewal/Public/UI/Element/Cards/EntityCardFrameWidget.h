@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "Styling/SlateBrush.h"
 #include "EntityCardFrameWidget.generated.h"
 
 class UImage;
@@ -17,12 +18,28 @@ class UUniformGridPanel;
  * - 카드 공통 UI (이미지, 잠금 오버레이)
  * - Named Slot으로 콘텐츠 영역 제공
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UEntityCardFrameWidget : public UUserWidget
 {
 	GENERATED_BODY()
 
 protected:
+	// 빌드 모달 인스턴스에서만 사용하는 저작 브러시. 비어 있으면 공유 프레임의 원래 면을 사용한다.
+	UPROPERTY(EditDefaultsOnly, Category = "Card|Build Modal")
+	FSlateBrush BuildModalThumbnailBrush;
+
+	// 아이콘 원본의 투명 여백을 제외한 정규화 UV 영역. 에디터 저작 도구가 원본 픽셀에서 계산한다.
+	UPROPERTY(EditDefaultsOnly, Category = "Card|Build Modal")
+	TMap<FSoftObjectPath, FVector4> BuildModalIconBounds;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Card|Build Modal")
+	FVector2D BuildModalImageMaxSize = FVector2D(312.f, 236.f);
+
+	UPROPERTY(EditDefaultsOnly, Category = "Card|Build Modal")
+	float BuildModalImageBottomInset = 12.f;
+
+	bool bUsesBuildModalLayout = false;
+
 	// 엔티티 이미지
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
 	UImage* EntityImage;
@@ -62,6 +79,23 @@ protected:
 	UBorder* SizeBadgePill;
 
 public:
+	/** 하단 카탈로그용 가로형 카드 비율. 생성된 인스턴스에만 적용한다. */
+	void ApplyCompactCatalogLayout();
+
+	/**
+	 * 빌드 모달용 대형 카드 비율. 생성된 인스턴스에만 적용한다.
+	 * 여기 값이 카드의 최종 권위다 — 바깥 SizeBox/TileView EntryWidth 를 키워도 이 SizeBox 가 이기므로,
+	 * UI_BuildModal 의 TileView(EntryWidth = BuildModalCardWidth + 간격 12 / EntryHeight = BuildModalCardHeight + 여유 16)
+	 * 와 짝으로 바꿔야 한다.
+	 */
+	void ApplyBuildModalLayout();
+
+	// 빌드 모달 카드 실치수. 오피스 2패널(책상·장식)은 ApplyCompactCatalogLayout 쪽을 쓰므로 영향받지 않는다.
+	// ⚠ 폭은 WBP 쪽에도 같은 값이 박혀 있다 — `UIE_BuildCardInfo.InfoSizeBox.WidthOverride`.
+	//    한쪽만 바꾸면 정보 영역이 썸네일보다 좁아져 카드 안에 빈 띠가 남는다(300 으로 방치돼 있던 이력).
+	static constexpr float BuildModalCardWidth = 360.f;
+	static constexpr float BuildModalCardHeight = 560.f;
+
 	// 이미지 설정
 	UFUNCTION(BlueprintCallable, Category = "Card")
 	void SetEntityImage(UTexture2D* Texture);

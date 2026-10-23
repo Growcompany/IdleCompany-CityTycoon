@@ -7,6 +7,15 @@
 #include "Office/WorkstationTypes.h"
 #include "WorkstationTable.generated.h"
 
+class UTexture2D;
+
+UENUM(BlueprintType)
+enum class EWorkstationEffectCurve : uint8
+{
+	Linear,
+	Compound
+};
+
 /**
  * 업무공간 아이템 스킨 데이터 (통합)
  * 의자, 노트북, 모니터색상, 키보드마우스 등 스킨 정보
@@ -69,13 +78,8 @@ struct FComputerSetupLevelData : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level")
 	FText DisplayName;
 
-	/** 이 행으로 진입할 때 지불하는 Diamond 비용 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level")
-	int32 UpgradeCost = 0;
-
-	/** 최대 레벨 외형 변경 1회 비용. 승급 비용과 별개라 UpgradeCost 를 재활용하지 않는다. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Level")
-	int32 VariantSwapCost = 0;
+	TSoftObjectPtr<UTexture2D> PromotionImage;
 
 	/** 누적 작업 속도 증가율. 0.05는 5% 빠른 점수 Orb 주기를 뜻한다. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stats")
@@ -140,9 +144,9 @@ struct FComputerSetupLevelData : public FTableRowBase
 		{
 			return Reject(TEXT("DisplayName is required"));
 		}
-		if (UpgradeCost < 0 || !FMath::IsFinite(WorkSpeedBonusRate) || WorkSpeedBonusRate < 0.0f)
+		if (!FMath::IsFinite(WorkSpeedBonusRate) || WorkSpeedBonusRate < 0.0f)
 		{
-			return Reject(TEXT("Cost and work-speed rate must be non-negative"));
+			return Reject(TEXT("Work-speed rate must be non-negative"));
 		}
 		// 미파싱 enum 컬럼은 None 으로 떨어진다 — 전 장비 비활성 행을 통과시키면 결제 후 빈 책상이 된다
 		if (LaptopPlacement == ELaptopPlacement::None
@@ -182,5 +186,62 @@ struct FComputerSetupLevelData : public FTableRowBase
 		}
 
 		return true;
+	}
+};
+
+USTRUCT(BlueprintType)
+struct FWorkstationUpgradeDefinition : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	EWorkstationUpgradeType Type = EWorkstationUpgradeType::Processing;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	FText DisplayName;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	FText Description;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	TSoftObjectPtr<UTexture2D> Icon;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	int32 MaxLevel = 100;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	int64 BaseCost = 0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	double CostGrowthRate = 1.0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	double GradeCostMultiplier = 1.0;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	float EffectPerLevel = 0.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Upgrade")
+	EWorkstationEffectCurve EffectCurve = EWorkstationEffectCurve::Linear;
+
+	bool IsValidConfiguration() const
+	{
+		// MAX 견적은 레벨별 가격을 합산하므로 잘못된 데이터의 무제한 순회를 제한한다.
+		constexpr int32 MaxSupportedLevel = 10000;
+		if (!(static_cast<uint8>(Type) < static_cast<uint8>(EWorkstationUpgradeType::Count)
+			&& !DisplayName.IsEmpty() && !Description.IsEmpty()
+			&& MaxLevel >= 2 && MaxLevel <= MaxSupportedLevel && BaseCost > 0
+			&& FMath::IsFinite(CostGrowthRate) && CostGrowthRate >= 1.0
+			&& FMath::IsFinite(GradeCostMultiplier) && GradeCostMultiplier >= 1.0
+			&& FMath::IsFinite(EffectPerLevel) && EffectPerLevel >= 0.0f))
+		{
+			return false;
+		}
+
+		const double MaxCumulativeUnits = 6.0 * (MaxLevel - 1);
+		double MaxBonus = 0.0;
+		switch (EffectCurve)
+		{
+		case EWorkstationEffectCurve::Linear:
+			MaxBonus = MaxCumulativeUnits * static_cast<double>(EffectPerLevel);
+			break;
+		case EWorkstationEffectCurve::Compound:
+			MaxBonus = FMath::Pow(1.0 + static_cast<double>(EffectPerLevel), MaxCumulativeUnits) - 1.0;
+			break;
+		default:
+			return false;
+		}
+		return FMath::IsFinite(MaxBonus) && MaxBonus <= static_cast<double>(TNumericLimits<float>::Max());
 	}
 };

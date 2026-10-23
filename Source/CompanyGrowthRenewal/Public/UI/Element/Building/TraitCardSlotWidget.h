@@ -5,10 +5,10 @@
 #include "CoreMinimal.h"
 #include "UI/Element/Cards/ItemCardSlotWidget.h"
 #include "Enum/LootBoxRarity.h"
-#include "Enum/BuildingTraitRequirement.h"
 #include "TraitCardSlotWidget.generated.h"
 
 class UTextBlock;
+class UImage;
 class UCommonButtonStyle;
 struct FBuildingTraitTableRow;
 
@@ -30,6 +30,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "TraitCard")
 	void SetEquippedCount(int32 InCount);
 
+	// 상세가 열린 카드 표시 = 카드 밖 숨쉬는 파란 링(장착 칸 선택 링과 같은 재질). 공용 카드 안쪽 Outline 은 등급 테두리와 섞여 쓰지 않는다
+	UFUNCTION(BlueprintCallable, Category = "TraitCard")
+	void SetDetailSelected(bool bInSelected);
+
 	UFUNCTION(BlueprintPure, Category = "TraitCard")
 	ELootBoxRarity GetRarity() const { return CurrentRarity; }
 
@@ -44,6 +48,10 @@ protected:
 	virtual void NativePreConstruct() override;
 	virtual void NativeConstruct() override;
 	virtual void SynchronizeProperties() override;
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+
+	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+	TObjectPtr<UImage> SelectRing;
 
 	// 특성 이름 라벨 (카드 아래 또는 안쪽, WBP 배치에 따라)
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
@@ -57,14 +65,6 @@ protected:
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
 	TObjectPtr<UWidget> EquippedBadgeBorder;
 
-	// 전용 특성 뱃지 (우상단 — 좌상단 장착 뱃지와 자리를 나눠 쓴다)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UTextBlock> RequirementBadgeText;
-
-	// 전용 뱃지 배경 래퍼 (장착 뱃지와 동일 구조 — 있으면 래퍼가 가시성을 소유)
-	UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
-	TObjectPtr<UWidget> RequirementBadgeBorder;
-
 	// 등급별 CUI Style 매핑 — WBP Class Defaults에서 6개 채우면 모든 인스턴스가 공유
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "TraitCard|Style")
 	TMap<ELootBoxRarity, TSubclassOf<UCommonButtonStyle>> RarityStyleMap;
@@ -74,9 +74,13 @@ private:
 	ELootBoxRarity CurrentRarity = ELootBoxRarity::Common;
 
 	// SetTraitData 가 NativeConstruct 보다 먼저 오므로, 구성 후 재적용할 값들을 들고 있어야 한다
-	EBuildingTraitRequirement CurrentRequirement = EBuildingTraitRequirement::None;
 	int32 CurrentEquippedCount = 0;
 
+	bool bDetailSelected = false;
+	float PulseTime = 0.f;
+	// 링 MI 에 구운 농도 = 최고점. 첫 주입 전에 한 번 읽는다
+	float RingPeakAlpha = -1.f;
+	void ApplyRingPulse();
+
 	void ApplyRarityVisual(ELootBoxRarity Rarity);
-	void ApplyRequirementBadge(EBuildingTraitRequirement InRequirement);
 };

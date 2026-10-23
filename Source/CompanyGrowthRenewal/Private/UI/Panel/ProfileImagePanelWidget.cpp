@@ -1,4 +1,6 @@
 #include "UI/Panel/ProfileImagePanelWidget.h"
+#include "UI/Element/Common/ModalFrameWidget.h"
+#include "Player/MainMapPlayerController.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Element/Profile/ProfileAvatarTileWidget.h"
 #include "Manager/TableManagerSubsystem.h"
@@ -27,9 +29,9 @@ void UProfileImagePanelWidget::NativeConstruct()
 	TileGroup = NewObject<UCommonButtonGroupBase>(this);
 	TileGroup->SetSelectionRequired(true);
 
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &UProfileImagePanelWidget::OnCloseButtonClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &UProfileImagePanelWidget::OnCloseButtonClicked);
 	}
 	if (BackgroundBtn)
 	{
@@ -43,9 +45,9 @@ void UProfileImagePanelWidget::NativeDestruct()
 	{
 		TileGroup->OnSelectedButtonBaseChanged.RemoveAll(this);
 	}
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.RemoveDynamic(this, &UProfileImagePanelWidget::OnCloseButtonClicked);
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &UProfileImagePanelWidget::OnCloseButtonClicked);
 	}
 	if (BackgroundBtn)
 	{
@@ -58,6 +60,11 @@ void UProfileImagePanelWidget::NativeDestruct()
 void UProfileImagePanelWidget::NativeOnActivated()
 {
 	Super::NativeOnActivated();
+
+	if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr))
+	{
+		PC->GoToUIMode();
+	}
 
 	BuildTileGrid();
 }
@@ -74,6 +81,14 @@ void UProfileImagePanelWidget::NativeOnDeactivated()
 		ImageCardContainer->ClearChildren();
 	}
 
+	// 메뉴 체인은 다음 창이 닫힐 때까지 UI 모드를 유지한다 ― 단독 모달이므로 여기서 해제(짝: MenuPanel 은 이어 열 때 생략)
+	if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr))
+	{
+		if (PC->GetCurrentInputMode() == EInputMode::UI)
+		{
+			PC->GoToNormalMode();
+		}
+	}
 	Super::NativeOnDeactivated();
 }
 

@@ -13,7 +13,7 @@ class UImage;
 /**
  * 건물 스킨 정보를 표시하는 위젯
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API USkinInfoWidget : public UUserWidget
 {
 	GENERATED_BODY()

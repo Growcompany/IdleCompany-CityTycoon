@@ -9,23 +9,25 @@
 #include "UI/UIBase.h"
 #include "Manager/UIManagerSubsystem.h"
 #include "CommonActivatableWidget.h"
+#include "CommonTextBlock.h"
 #include "UI/Element/Buttons/ButtonWidget.h"
 #include "UI/Element/Buttons/IconWithButtonWidget.h"
 #include "UI/Element/Common/AlertMarkWidget.h"
-#include "CommonTextBlock.h"
-#include "Global/GlobalUtilFunctions.h"
-#include "Manager/ProjectOperationManager.h"
+#include "Manager/AttendanceSubsystem.h"
+#include "Manager/QuestSubsystem.h"
+#include "Manager/MailboxSubsystem.h"
+#include "Manager/LiveOpsSubsystem.h"
 #include "Enum/WidgetType.h"
 #include "Player/MainMapPlayerController.h"
 #include "Player/PlayerCamera.h"
 #include "UI/Panel/FactoryPanelInteractionPolicy.h"
 #include "Entity/Factory/BrickFactory.h"
 #include "Data/FactorySaveData.h"
+#include "Data/WorldMapTypes.h"
 #include "Components/Button.h"
 #include "Components/Image.h"
 #include "Components/PanelWidget.h"
 #include "Kismet/GameplayStatics.h"
-#include "UI/Panel/InGameLayerWidget.h"
 #include "Manager/SoundManagerSubsystem.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "UI/UISoundTags.h"
@@ -43,11 +45,6 @@ void UBuildOpenWidget::NativeOnActivated()
 	BuildOpenButton->OnClicked().AddUObject(this, &UBuildOpenWidget::OnBuildOpenButtonClicked);
 	FactoryOpenButton->OnClicked().AddUObject(this, &UBuildOpenWidget::OnFactoryOpenButtonClicked);
 	HeadquartersBtn->OnClicked().AddUObject(this, &UBuildOpenWidget::OnHeadquartersButtonClicked);
-
-	if (CollectAllButton)
-	{
-		CollectAllButton->OnClicked().AddUObject(this, &UBuildOpenWidget::OnCollectAllButtonClicked);
-	}
 
 	if (MenuBtn)
 	{
@@ -69,10 +66,11 @@ void UBuildOpenWidget::NativeOnActivated()
 		GachaBtn->OnClicked.AddDynamic(this, &UBuildOpenWidget::OnGachaButtonClicked);
 	}
 
-	if (InventoryOpenButton)
+	if (QuestBtn)
 	{
-		InventoryOpenButton->OnClicked().AddUObject(this, &UBuildOpenWidget::OnInventoryOpenButtonClicked);
+		QuestBtn->OnClicked.AddDynamic(this, &UBuildOpenWidget::OnQuestButtonClicked);
 	}
+
 
 	// ── AlertMark: 참조 캐싱 + 델리게이트 구독 + 타이머 시작 ──
 	if (UGameInstance* GI = GetGameInstance())
@@ -139,15 +137,6 @@ void UBuildOpenWidget::NativeOnDeactivated()
 	if (FactoryOpenButton) { FactoryOpenButton->OnClicked().Clear(); }
 	if (HeadquartersBtn) { HeadquartersBtn->OnClicked().Clear(); }
 
-	if (InventoryOpenButton)
-	{
-		InventoryOpenButton->OnClicked().Clear();
-	}
-
-	if (CollectAllButton)
-	{
-		CollectAllButton->OnClicked().Clear();
-	}
 
 	if (MenuBtn)
 	{
@@ -167,6 +156,11 @@ void UBuildOpenWidget::NativeOnDeactivated()
 	if (GachaBtn)
 	{
 		GachaBtn->OnClicked.RemoveDynamic(this, &UBuildOpenWidget::OnGachaButtonClicked);
+	}
+
+	if (QuestBtn)
+	{
+		QuestBtn->OnClicked.RemoveDynamic(this, &UBuildOpenWidget::OnQuestButtonClicked);
 	}
 
 	// AlertMark 구독/타이머 해제
@@ -220,53 +214,81 @@ void UBuildOpenWidget::RefreshAlertMarks()
 		if (bCanUpgrade) { FactoryBtn->ShowBadge(); } else { FactoryBtn->HideBadge(); }
 	}
 
-	// CollectAll — 도트(이진)와 금액(정량)이 매니저 조회를 공유한다. 둘 다 미배치면 조회 자체를 건너뛴다.
-	if (IsValid(CollectAllAlertMark) || IsValid(CollectAllAmountText))
+	UGameInstance* MenuGI = GetGameInstance();
+	const UQuestSubsystem* Quest = MenuGI ? MenuGI->GetSubsystem<UQuestSubsystem>() : nullptr;
+	// 튜토리얼 중엔 메뉴·미션을 누를 수 없다 ― 시작부터 켜진 점(출석·공지·출시 우편)이 누르지 못할 곳을 계속 가리킨다
+	const UMissionManagerSubsystem* MenuMissions = MenuGI ? MenuGI->GetSubsystem<UMissionManagerSubsystem>() : nullptr;
+	const bool bTutorialActive = MenuMissions && MenuMissions->HasActiveMission();
+	RefreshQuestBadge(bTutorialActive || !Quest ? 0 : Quest->GetClaimableCount());
+
+	// 메뉴 허브 도트 — 메뉴 시트 안 5 매니저 중 하나라도 받을 것이 있으면 켠다 (타일별 판정은 시트가 한다)
+	if (MenuAlertMark)
 	{
-		UGameInstance* CollectGI = GetGameInstance();
-		UProjectOperationManager* OpMgr = CollectGI
-			? CollectGI->GetSubsystem<UProjectOperationManager>()
-			: nullptr;
+		const UAttendanceSubsystem* Attendance = MenuGI ? MenuGI->GetSubsystem<UAttendanceSubsystem>() : nullptr;
+		const UMailboxSubsystem* Mailbox = MenuGI ? MenuGI->GetSubsystem<UMailboxSubsystem>() : nullptr;
+		const ULiveOpsSubsystem* LiveOps = MenuGI ? MenuGI->GetSubsystem<ULiveOpsSubsystem>() : nullptr;
+		const bool bAnyClaimable = !bTutorialActive && (
+			(Attendance && Attendance->CanClaimToday())
+			|| (Quest && Quest->HasAnyClaimable())
+			|| (Mailbox && Mailbox->GetUnclaimedCount() > 0)
+			|| (LiveOps && (LiveOps->HasClaimableEvent() || LiveOps->HasUnreadNotice())));
 
-		// 수거 가능한 수익이 하나라도 있으면 초록 도트 (가용 신호)
-		if (IsValid(CollectAllAlertMark))
+		if (bAnyClaimable)
 		{
-			const bool bHasRevenue = IsValid(OpMgr) && OpMgr->HasAnyStoredRevenue();
-			if (bHasRevenue)
-			{
-				CollectAllAlertMark->SetMark(EAlertMarkSize::Large, EAlertMarkColor::Green);
-				CollectAllAlertMark->Show();
-			}
-			else
-			{
-				CollectAllAlertMark->Hide();
-			}
+			MenuAlertMark->SetMark(EAlertMarkSize::Large, EAlertMarkColor::Red);
+			MenuAlertMark->Show();
 		}
-
-		// 금액 표시 — 2초 주기 폴링 타이머(AlertMarkPollHandle)가 이미 돌고 있어 새 타이머가 필요 없다.
-		// GetTotalStoredRevenue 는 HasAnyStoredRevenue 와 같은 순회라 도트와 대상 집합이 갈리지 않는다.
-		if (IsValid(CollectAllAmountText))
+		else
 		{
-			const double TotalStored = IsValid(OpMgr) ? OpMgr->GetTotalStoredRevenue() : 0.0;
-			// 매니저가 이미 건물별 max(0, trunc) 를 적용해 합계는 정수값이다 — 임계 리터럴을 다시 쓰지 않고
-			// int64 로 좁혀 파생시킨다. 표시하는 값과 판정하는 값이 같은 식이어야 둘이 갈릴 수 없다.
-			const int64 DisplayAmount = static_cast<int64>(TotalStored);
-			if (DisplayAmount > 0)
-			{
-				CollectAllAmountText->SetText(UGlobalUtilFunctions::AbbreviateNumber(DisplayAmount));
-				CollectAllAmountText->SetVisibility(ESlateVisibility::HitTestInvisible);
-			}
-			else
-			{
-				// 1원(수거 단위) 미만엔 수거할 것이 없으므로 세 표면이 모두 침묵한다 —
-				// 점 꺼짐/숫자 숨김/수거 0원. 여기서 굳이 소수 잔액을 "친절하게" 보여주면
-				// 화면은 수거 가능하다고 말하지만 눌러도 0 원인 거짓 약속이 된다.
-				CollectAllAmountText->SetVisibility(ESlateVisibility::Collapsed);
-			}
+			MenuAlertMark->Hide();
 		}
 	}
 
 	RefreshWorldMapLock();
+}
+
+void UBuildOpenWidget::RefreshQuestBadge(int32 ClaimableCount)
+{
+	if (!QuestBadge || !QuestBadgeCount)
+	{
+		return;
+	}
+	QuestBadge->SetVisibility(ClaimableCount > 0 ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	if (ClaimableCount > 0)
+	{
+		// 두 자리를 넘으면 배지가 알약으로 늘어난다 — 99+ 에서 멈춘다
+		QuestBadgeCount->SetText(ClaimableCount > 99
+			? NSLOCTEXT("BuildOpen", "QuestBadgeMax", "99+")
+			: FText::AsNumber(ClaimableCount));
+	}
+}
+
+void UBuildOpenWidget::OnQuestButtonClicked()
+{
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		if (USoundManagerSubsystem* SM = GI->GetSubsystem<USoundManagerSubsystem>())
+		{
+			SM->PlayUISound(CGUISoundTags::ButtonClick);
+		}
+	}
+
+	UUIManagerSubsystem* UIManager = GetGameInstance() ? GetGameInstance()->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+	UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
+	UTableManagerSubsystem* TableMgr = GetGameInstance() ? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	if (!UIBase || !TableMgr) return;
+
+	// PromptStack에 이미 위젯이 있으면 중복 push 방지
+	if (UIBase->GetPromptStackCount() > 0) return;
+
+	// 탭 힌트 없음 = 미션판 기본 탭(일일). 메뉴판 미션 타일과 같은 진입이다
+	TSubclassOf<UUserWidget> QuestPanel = TableMgr->GetWidgetClass(EWidgetType::QuestPanel);
+	if (!QuestPanel || !UIBase->PushPromptClass(QuestPanel.Get())) return;
+
+	if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController()))
+	{
+		PC->GoToUIMode();
+	}
 }
 
 void UBuildOpenWidget::HandleHQLeveledUp(int32 /*NewLevel*/)
@@ -290,6 +312,11 @@ UWidget* UBuildOpenWidget::GetFactoryOpenButtonWidget() const
 	return FactoryOpenButton;
 }
 
+UWidget* UBuildOpenWidget::GetWorldMapButtonWidget() const
+{
+	return WorldMapBtn;
+}
+
 UWidget* UBuildOpenWidget::GetGachaButtonWidget() const
 {
 	return GachaBtn;
@@ -300,9 +327,9 @@ UWidget* UBuildOpenWidget::GetHeadquartersButtonWidget() const
 	return HeadquartersBtn;
 }
 
-UWidget* UBuildOpenWidget::GetCollectAllButtonWidget() const
+UWidget* UBuildOpenWidget::GetMenuButtonWidget() const
 {
-	return CollectAllButton;
+	return MenuBtn;
 }
 
 void UBuildOpenWidget::OnBuildOpenButtonClicked()
@@ -324,6 +351,7 @@ void UBuildOpenWidget::OnBuildOpenButtonClicked()
 		return;
 	}
 	UCommonActivatableWidget* PushedModal = UIBase->PushPromptClass(buildPanel.Get());
+	if (!PushedModal) return;
 
 	// 미션 가이드 — 모달 열림 알림 ('게임' 타일 하이라이트 페이즈 진입)
 	if (UMissionManagerSubsystem* MissionMgr = GetWorld()->GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
@@ -363,7 +391,11 @@ void UBuildOpenWidget::OnFactoryOpenButtonClicked()
 			APlayerCamera* PlayerCamera = Cast<APlayerCamera>(PC->GetPawn());
 			if (PlayerCamera)
 			{
-				PlayerCamera->FocusOnActor(Factory, 0.35f);
+				const float FocusDistance = Factory->GetCameraFocusDistanceCm();
+				if (FocusDistance > 0.f)
+				{
+					PlayerCamera->FocusOnActor(Factory, 0.35f, true, FocusDistance);
+				}
 			}
 		}
 	}
@@ -388,7 +420,7 @@ void UBuildOpenWidget::OnMenuButtonClicked()
 
 	UTableManagerSubsystem* tableManager = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
 	TSubclassOf<UUserWidget> MenuPanel = tableManager->GetWidgetClass(EWidgetType::MenuPanel);
-	UIBase->PushPromptClass(MenuPanel.Get());
+	if (!UIBase->PushPromptClass(MenuPanel.Get())) return;
 
 	// UI 모드 전환
 	AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController());
@@ -416,40 +448,9 @@ void UBuildOpenWidget::OnShopButtonClicked()
 
 	UTableManagerSubsystem* tableManager = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
 	TSubclassOf<UUserWidget> ShopPanel = tableManager->GetWidgetClass(EWidgetType::ShopPanel);
-	UIBase->PushPromptClass(ShopPanel.Get());
+	if (!UIBase->PushPromptClass(ShopPanel.Get())) return;
 
 	// UI 모드 전환
-	AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController());
-	if (PC)
-	{
-		PC->GoToUIMode();
-	}
-}
-
-void UBuildOpenWidget::OnInventoryOpenButtonClicked()
-{
-	if (UGameInstance* GI = GetGameInstance())
-	{
-		if (USoundManagerSubsystem* SM = GI->GetSubsystem<USoundManagerSubsystem>())
-		{
-			SM->PlayUISound(CGUISoundTags::ButtonClick);
-		}
-	}
-
-	UUIManagerSubsystem* UIManager = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
-	UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
-	if (!UIBase) return;
-
-	if (UIBase->GetPromptStackCount() > 0) return;
-
-	UTableManagerSubsystem* TableMgr = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
-	if (!TableMgr) return;
-	TSubclassOf<UUserWidget> HubClass = TableMgr->GetWidgetClass(EWidgetType::InventoryHub);
-	if (!HubClass) return;
-
-	// 컨텍스트는 InventoryHubWidget::ResolveContext(Auto) 가 GetMapName 으로 추론 (MainMap 진입 시 자동)
-	UIBase->PushPromptClass(HubClass.Get());
-
 	AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController());
 	if (PC)
 	{
@@ -475,7 +476,7 @@ void UBuildOpenWidget::OnGachaButtonClicked()
 	TSubclassOf<UUserWidget> GachaCls = TableMgr->GetWidgetClass(EWidgetType::BuildingTraitGachaPanel);
 	if (!GachaCls) return;
 
-	UIManager->GetUIBase()->PushPromptClass(GachaCls.Get());
+	if (!UIManager->GetUIBase()->PushPromptClass(GachaCls.Get())) return;
 
 	if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController()))
 	{
@@ -485,10 +486,9 @@ void UBuildOpenWidget::OnGachaButtonClicked()
 
 bool UBuildOpenWidget::IsWorldMapUnlocked()
 {
-	// 월드맵은 1막(게임·IT·금융) 완주와 함께 열린다 — 그 마지막인 Finance 의 해금 레벨을 그대로 쓴다.
-	// 제조 3종을 대리로 쓰던 구 판정은 제조가 Lv20 으로 밀리면서 월드맵까지 끌고 갔다.
 	// 매니저가 없으면 열어 둔다 — 잠금이 진행을 막는 쪽으로 실패하지 않게.
-	return !IsValid(CachedSaveMgr) || CachedSaveMgr->IsIndustryUnlocked(ECompanyType::Finance);
+	return !IsValid(CachedSaveMgr)
+		|| CachedSaveMgr->GetHQLevel() >= WorldMapConstants::WorldMapRequiredHQLevel;
 }
 
 void UBuildOpenWidget::RefreshWorldMapLock()
@@ -512,12 +512,11 @@ void UBuildOpenWidget::OnWorldMapButtonClicked()
 {
 	if (!IsWorldMapUnlocked())
 	{
-		// 여기 도달 = IsWorldMapUnlocked 가 CachedSaveMgr 유효를 이미 통과시킨 것
-		const int32 ReqLevel = CachedSaveMgr->GetIndustryRequiredHQLevel(ECompanyType::Finance);
+		const int32 ReqLevel = WorldMapConstants::WorldMapRequiredHQLevel;
 		if (UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 		{
 			UIMgr->ShowNotification(
-				FText::Format(NSLOCTEXT("BuildOpen", "WorldMapLocked", "본사 Lv.{0} 달성 시 금융업과 함께 열립니다"), ReqLevel),
+				FText::Format(NSLOCTEXT("BuildOpen", "WorldMapLocked", "본사 Lv.{0} 달성 시 열립니다"), ReqLevel),
 				3.0f, ENotificationType::Failed);
 		}
 		return;
@@ -531,10 +530,20 @@ void UBuildOpenWidget::OnWorldMapButtonClicked()
 		}
 	}
 
-	UCGGameInstance* GameInstance = UCGGameInstance::GetInstance();
-	if (GameInstance)
+	// 월드맵은 레벨이 아니라 MainMap 위에 얹는 풀스크린 패널이다 ― 전환·로딩 화면이 사라진다.
+	UUIManagerSubsystem* UIManager = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
+	UUIBase* UIBase = UIManager ? UIManager->GetUIBase() : nullptr;
+	UTableManagerSubsystem* TableMgr = GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
+	if (!UIBase || !TableMgr) { return; }
+	if (UIBase->GetPromptStackCount() > 0) { return; }
+
+	if (TSubclassOf<UUserWidget> Cls = TableMgr->GetWidgetClass(EWidgetType::WorldMapPanel))
 	{
-		GameInstance->TransitionToLevel(TEXT("WorldMap"));
+		if (!UIBase->PushPromptClass(TSubclassOf<UCommonActivatableWidget>(Cls))) return;
+		if (AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController()))
+		{
+			PC->GoToUIMode();
+		}
 	}
 }
 
@@ -549,27 +558,12 @@ void UBuildOpenWidget::OnHeadquartersButtonClicked()
 
 	UTableManagerSubsystem* tableManager = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
 	TSubclassOf<UUserWidget> HQPanel = tableManager->GetWidgetClass(EWidgetType::HQManagePanel);
-	UIBase->PushPromptClass(HQPanel.Get());
+	if (!UIBase->PushPromptClass(HQPanel.Get())) return;
 
 	// UI 모드 전환
 	AMainMapPlayerController* PC = Cast<AMainMapPlayerController>(GetWorld()->GetFirstPlayerController());
 	if (PC)
 	{
 		PC->GoToUIMode();
-	}
-}
-
-void UBuildOpenWidget::OnCollectAllButtonClicked()
-{
-	// InGameLayer 가 수거 + 코인 플라이아웃 + 토스트까지 일괄 처리 (단일 버블 클릭 경로와 공유)
-	UUIManagerSubsystem* UIMgr = GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
-	if (!UIMgr) return;
-
-	if (UInGameLayerWidget* InGameLayer = UIMgr->GetInGameLayer())
-	{
-		InGameLayer->ExecuteAllVaultCollection();
-		// CollectAllStoredRevenue 는 동기 — 금액/도트를 폴링(최대 2초) 기다리지 않고 즉시 비운다.
-		// 코인 플라이아웃만 비동기라 연출은 그대로 이어진다.
-		RefreshAlertMarks();
 	}
 }

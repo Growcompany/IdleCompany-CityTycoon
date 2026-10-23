@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "CommonActivatableWidget.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/ResourceType.h"
 #include "MinePickerWidget.generated.h"
 
@@ -24,7 +24,7 @@ class UMineResourceCardWidget;
  *   2. InitializeForCountry(Country) 호출
  *   3. 카드 클릭 → MineMgr->CreateMineLine → RemoveFromParent 로 닫힘
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UMinePickerWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()

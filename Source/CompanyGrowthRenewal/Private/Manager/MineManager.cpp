@@ -4,9 +4,21 @@
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/ResourceItemManager.h"
 #include "Manager/PlayFabManagerSubsystem.h"
+#include "Manager/CloudEconomySubsystem.h"
+#include "Manager/SaveLoadManager.h"
 #include "Data/MineUpgradeData.h"
+#include "Data/FacilityInstantFinishRules.h"
 #include "Table/CountryInfoTable.h"
 #include "Engine/GameInstance.h"
+
+namespace
+{
+	FName MineInstantFinishKey(ECountryType Country, EResourceType Resource)
+	{
+		return FName(*FString::Printf(TEXT("mine.instantFinish.%d.%d"),
+			static_cast<int32>(Country), static_cast<int32>(Resource)));
+	}
+}
 
 void UMineManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -88,6 +100,14 @@ bool UMineManager::CreateMineLine(ECountryType Country, EResourceType Resource, 
 	// 풀 검증: 호주 풀에 다이아몬드 없으면 거부 (국가 정체성)
 	const int32 PoolIndex = Info.MinableResources.IndexOfByKey(Resource);
 	if (PoolIndex == INDEX_NONE) return false;
+	bool bRateFound = false;
+	const FResourceInfo ResourceInfo = TableMgr->GetResourceInfo(Resource, bRateFound);
+	if (!bRateFound || !FMath::IsFinite(ResourceInfo.MiningRatePerMinute) || ResourceInfo.MiningRatePerMinute <= 0.0f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[MineManager] Missing mining rate in DT_Resource for %s; line creation blocked"),
+			*UEnum::GetValueAsString(Resource));
+		return false;
+	}
 
 	FCountryMineData& Mine = GetOrCreateMine(Country);
 
@@ -120,8 +140,9 @@ bool UMineManager::CreateMineLine(ECountryType Country, EResourceType Resource, 
 
 	FMineLineState NewLine;
 	NewLine.Resource = Resource;
-	NewLine.BaseRatePerSecond = ComputeBaseRatePerSecondByIndex(PoolIndex);
+	NewLine.BaseRatePerSecond = ResourceInfo.MiningRatePerMinute / 60.0f;
 	NewLine.OverrideMaxStorage = ClampedOverride;
+	NewLine.StorageLevelAtCreation = GetUpgradeLevel(Country, EMineUpgradeType::MiningStorage);
 	NewLine.StartWallUtc = FDateTime::UtcNow();  // wall-clock lazy 모델 — 이 시점부터 누적 시간 계산
 	// CurrentQty/bSaturated/PendingFraction 은 lazy 계산 — 저장 안 함
 	Mine.ActiveLines.Add(NewLine);
@@ -180,6 +201,7 @@ TArray<EResourceType> UMineManager::GetAvailableResources(ECountryType Country) 
 
 bool UMineManager::ClaimResource(ECountryType Country, EResourceType Resource)
 {
+	if (IsInstantFinishPending(Country, Resource)) return false;
 	FCountryMineData* Mine = CountryMines.Find(Country);
 	if (!Mine) return false;
 
@@ -192,6 +214,14 @@ bool UMineManager::ClaimResource(ECountryType Country, EResourceType Resource)
 	if (LazyState.CurrentQty <= 0) return false;
 
 	const int64 Claimed = LazyState.CurrentQty;
+	const double EffectiveRatePerSec = static_cast<double>(LazyState.BaseRatePerSecond)
+		* static_cast<double>(GetRateMultiplier(Country));
+	if (!FMath::IsFinite(EffectiveRatePerSec) || EffectiveRatePerSec <= 0.0) return false;
+
+	// 부분 수령은 지급한 정수량의 시간만 제거해 다음 1개의 진행도를 보존한다.
+	// 인벤토리 이벤트가 CountryMines를 바꿀 수 있으므로 생산 시계를 먼저 갱신한다.
+	Mine->ActiveLines[Idx].StartWallUtc = LazyState.bSaturated ? FDateTime::UtcNow()
+		: LazyState.StartWallUtc + FTimespan::FromSeconds(static_cast<double>(Claimed) / EffectiveRatePerSec);
 
 	// 자원 인벤토리로 이전
 	if (UGameInstance* GI = GetGameInstance())
@@ -202,11 +232,12 @@ bool UMineManager::ClaimResource(ECountryType Country, EResourceType Resource)
 		}
 	}
 
-	// 주문형 채광 모델 — 수령 후 라인 제거 (자원/N 1회 비용 지불 후 1회 수확).
-	Mine->ActiveLines.RemoveAt(Idx);
-
 	OnResourceClaimed.Broadcast(Country, Resource, Claimed);
-	OnLineRemoved.Broadcast(Country, Resource);
+	OnLineStorageChanged.Broadcast(Country, Resource, 0);
+	if (LazyState.bSaturated)
+	{
+		OnLineSaturated.Broadcast(Country, Resource, false);
+	}
 	return true;
 }
 
@@ -229,15 +260,94 @@ bool UMineManager::InstantFinishLine(ECountryType Country, EResourceType Resourc
 	const double EffectiveRatePerSec = static_cast<double>(Line.BaseRatePerSecond) * static_cast<double>(RateMul);
 	if (EffectiveRatePerSec <= 0.0) return false;
 
-	const double NeededSec = static_cast<double>(LineMax) / EffectiveRatePerSec;
+	const double NeededSec = static_cast<double>(LineMax) / EffectiveRatePerSec + 0.01;
 	const FDateTime AlreadyDoneStart = FDateTime::UtcNow() - FTimespan::FromSeconds(NeededSec);
 
-	if (Line.StartWallUtc > AlreadyDoneStart) return false;  // 이미 더 과거면 의미 없음 (한도 도달 상태)
+	FMineLineState CurrentState;
+	if (!GetLineState(Country, Resource, CurrentState) || CurrentState.bSaturated) return false;
 	Line.StartWallUtc = AlreadyDoneStart;
 
 	OnLineStorageChanged.Broadcast(Country, Resource, LineMax);
 	OnLineSaturated.Broadcast(Country, Resource, true);
 	return true;
+}
+
+bool UMineManager::BuildInstantFinishQuote(ECountryType Country, EResourceType Resource,
+	int64& OutCost, FCloudMeta& OutMeta) const
+{
+	OutCost = 0;
+	FMineLineState State;
+	if (!GetLineState(Country, Resource, State) || State.bSaturated) return false;
+	const double Rate = static_cast<double>(State.BaseRatePerSecond) * GetRateMultiplier(Country);
+	if (!FMath::IsFinite(Rate) || Rate <= 0.0) return false;
+	const double Elapsed = FMath::Max(0.0, (FDateTime::UtcNow() - State.StartWallUtc).GetTotalSeconds());
+	const double Remaining = static_cast<double>(GetEffectiveMaxStorage(Country, Resource)) / Rate - Elapsed;
+	if (!FMath::IsFinite(Remaining) || Remaining <= 0.0 || Remaining > static_cast<double>(MAX_int32)) return false;
+	const int64 Seconds = static_cast<int64>(FMath::CeilToDouble(Remaining));
+	const UTableManagerSubsystem* Tables = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	FInstantFinishBalanceTable Balance;
+	if (!Tables || !Tables->GetInstantFinishBalance(TEXT("Mine"), Balance)) return false;
+	OutCost = FFacilityInstantFinishRules::CalculateCost(Seconds, Balance, 0);
+	if (OutCost <= 0) return false;
+	OutMeta.Add(TEXT("remainingSeconds"), FCloudMetaValue::FromInt(Seconds));
+	OutMeta.Add(TEXT("discountBasisPoints"), FCloudMetaValue::FromInt(0));
+	OutMeta.Add(TEXT("country"), FCloudMetaValue::FromInt(static_cast<int32>(Country)));
+	OutMeta.Add(TEXT("resource"), FCloudMetaValue::FromInt(static_cast<int32>(Resource)));
+	OutMeta.Add(TEXT("cycleStart"), FCloudMetaValue::FromString(State.StartWallUtc.ToIso8601()));
+	return true;
+}
+
+int64 UMineManager::GetInstantFinishCost(ECountryType Country, EResourceType Resource) const
+{
+	int64 Cost = 0;
+	FCloudMeta Meta;
+	BuildInstantFinishQuote(Country, Resource, Cost, Meta);
+	return Cost;
+}
+
+bool UMineManager::IsInstantFinishPending(ECountryType Country, EResourceType Resource) const
+{
+	const UCloudEconomySubsystem* Cloud = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+	return Cloud && (Cloud->IsActionPending(MineInstantFinishKey(Country, Resource))
+		|| Cloud->HasPendingFacilityInstantFinish(TEXT("mine.instantFinish"),
+			static_cast<int32>(Country), static_cast<int32>(Resource)));
+}
+
+void UMineManager::RequestInstantFinish(ECountryType Country, EResourceType Resource,
+	int64 MaxAcceptedCost, FOnCloudEconomyOpDone Done)
+{
+	UCloudEconomySubsystem* Cloud = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UCloudEconomySubsystem>() : nullptr;
+	if (!Cloud) { Done.ExecuteIfBound(false, CloudErr::Internal); return; }
+	const FName ActionKey = MineInstantFinishKey(Country, Resource);
+	if (IsInstantFinishPending(Country, Resource) || !Cloud->BeginPendingAction(ActionKey))
+	{
+		Done.ExecuteIfBound(false, NAME_None);
+		return;
+	}
+
+	int64 Cost = 0;
+	FCloudMeta Meta;
+	FMineLineState Before;
+	if (!BuildInstantFinishQuote(Country, Resource, Cost, Meta) || Cost > MaxAcceptedCost
+		|| !GetLineState(Country, Resource, Before))
+	{
+		Cloud->EndPendingAction(ActionKey);
+		Done.ExecuteIfBound(false, NAME_None);
+		return;
+	}
+	Cloud->RequestFacilityInstantFinish(TEXT("mine.instantFinish"), Cost, Meta,
+		UCloudEconomySubsystem::FOnCloudOp::CreateWeakLambda(this,
+			[this, ActionKey, Done](const FCloudOpResult& Result)
+	{
+		if (UCloudEconomySubsystem* EndCloud = GetGameInstance()->GetSubsystem<UCloudEconomySubsystem>())
+		{
+			EndCloud->EndPendingAction(ActionKey);
+		}
+		Done.ExecuteIfBound(Result.bOk, Result.Code);
+	}));
 }
 
 TArray<FMineLineState> UMineManager::GetMineLines(ECountryType Country) const
@@ -307,6 +417,13 @@ bool UMineManager::GetUpgradeDef(EMineUpgradeType Type, FMineUpgradeDefinition& 
 
 bool UMineManager::UpgradeLevelUp(ECountryType Country, EMineUpgradeType UpgradeType)
 {
+	if (UpgradeType == EMineUpgradeType::MiningRate || UpgradeType == EMineUpgradeType::MiningStorage)
+	{
+		for (const FMineLineState& ActiveLine : GetMineLines(Country))
+		{
+			if (IsInstantFinishPending(Country, ActiveLine.Resource)) return false;
+		}
+	}
 	FCountryMineData& Mine = GetOrCreateMine(Country);
 	int32& Level = Mine.UpgradeLevels.FindOrAdd(UpgradeType);
 
@@ -316,8 +433,46 @@ bool UMineManager::UpgradeLevelUp(ECountryType Country, EMineUpgradeType Upgrade
 	{
 		return false;
 	}
+	if (UpgradeType == EMineUpgradeType::LineExpansion)
+	{
+		const int32 ResourceCap = GetResourceLineCap(Country);
+		const int32 NextLines = FMath::Min(ResourceCap,
+			FMath::Max(1, FMath::FloorToInt32(Def.BaseValue + Def.PerLevel * (Level + 1))));
+		if (NextLines <= GetMaxLines(Country)) return false;
+	}
+
+	const bool bChangesLineProgress = UpgradeType == EMineUpgradeType::MiningStorage || UpgradeType == EMineUpgradeType::MiningRate;
+	TArray<double> AccruedProgress;
+	if (bChangesLineProgress)
+	{
+		AccruedProgress.Reserve(Mine.ActiveLines.Num());
+		for (const FMineLineState& Line : Mine.ActiveLines)
+		{
+			FMineLineState BeforeUpgrade;
+			const bool bHasState = GetLineState(Country, Line.Resource, BeforeUpgrade);
+			AccruedProgress.Add(bHasState
+				? static_cast<double>(BeforeUpgrade.CurrentQty) + static_cast<double>(BeforeUpgrade.PendingFraction)
+				: 0.0);
+		}
+	}
 
 	Level++;
+	if (bChangesLineProgress)
+	{
+		const FDateTime UpgradeTime = FDateTime::UtcNow();
+		const double RateMultiplier = static_cast<double>(GetRateMultiplier(Country));
+		for (int32 LineIndex = 0; LineIndex < Mine.ActiveLines.Num(); ++LineIndex)
+		{
+			FMineLineState& Line = Mine.ActiveLines[LineIndex];
+			const double RatePerSecond = static_cast<double>(Line.BaseRatePerSecond) * RateMultiplier;
+			const double Progress = AccruedProgress[LineIndex];
+			// Tick 단위로 시각을 저장할 때 정수 수량이 경계 아래로 반올림되지 않게 한다.
+			const double AccruedSeconds = (Progress > 0.0 && RatePerSecond > 0.0)
+				? Progress / RatePerSecond + 0.00001
+				: 0.0;
+			Line.StartWallUtc = UpgradeTime - FTimespan::FromSeconds(AccruedSeconds);
+		}
+	}
 	OnUpgradeChanged.Broadcast(Country, UpgradeType, Level);
 	return true;
 }
@@ -334,8 +489,11 @@ int64 UMineManager::GetUpgradeCost(ECountryType Country, EMineUpgradeType Upgrad
 	// double Pow 로 정확도 확보 + int64 범위 clamp (idle clicker 라 Lv 600+ 에서 오버플로 가능)
 	const double CostD = static_cast<double>(Def.BaseCost)
 		* FMath::Pow(static_cast<double>(Def.CostGrowthRate), static_cast<double>(Level));
-	const double Clamped = FMath::Clamp(CostD, 0.0, static_cast<double>(MAX_int64));
-	return static_cast<int64>(Clamped);
+	if (!FMath::IsFinite(CostD) || CostD >= static_cast<double>(MAX_int64))
+	{
+		return MAX_int64;
+	}
+	return static_cast<int64>(FMath::Max(0.0, CostD));
 }
 
 float UMineManager::GetRateMultiplier(ECountryType Country) const
@@ -370,22 +528,48 @@ int64 UMineManager::GetEffectiveMaxStorage(ECountryType Country, EResourceType R
 	const int32 Idx = FindLineIndexByResource(*Mine, Resource);
 	if (Idx == INDEX_NONE) return CountryCap;
 
-	const int64 Override = Mine->ActiveLines[Idx].OverrideMaxStorage;
+	const FMineLineState& Line = Mine->ActiveLines[Idx];
+	const int64 Override = Line.OverrideMaxStorage;
 	if (Override <= 0) return CountryCap;
 
-	// Country cap 이 hard ceiling — Override 가 더 커도 cap 우선. cap=0 이면 그대로 Override 통과.
-	return (CountryCap > 0) ? FMath::Min<int64>(Override, CountryCap) : Override;
+	FMineUpgradeDefinition Def;
+	if (!GetUpgradeDef(EMineUpgradeType::MiningStorage, Def) || CountryCap <= 0)
+	{
+		return Override;
+	}
+	const int64 CountryCapAtCreation = static_cast<int64>(Def.BaseValue + Def.PerLevel * Line.StorageLevelAtCreation);
+	const int64 GainedCapacity = FMath::Max<int64>(0, CountryCap - CountryCapAtCreation);
+	return FMath::Min<int64>(Override + GainedCapacity, CountryCap);
 }
 
 int32 UMineManager::GetMaxLines(ECountryType Country) const
 {
+	const int32 ResourceCap = GetResourceLineCap(Country);
 	FMineUpgradeDefinition Def;
 	if (!GetUpgradeDef(EMineUpgradeType::LineExpansion, Def))
 	{
-		return 1;  // DT 미연결 시 안전 기본값 (최소 라인 1개)
+		return FMath::Min(1, ResourceCap);
 	}
 	const int32 Level = GetUpgradeLevel(Country, EMineUpgradeType::LineExpansion);
-	return FMath::Max(1, FMath::FloorToInt32(Def.BaseValue + Def.PerLevel * Level));
+	return FMath::Min(ResourceCap, FMath::Max(1, FMath::FloorToInt32(Def.BaseValue + Def.PerLevel * Level)));
+}
+
+int32 UMineManager::GetResourceLineCap(ECountryType Country) const
+{
+	const UGameInstance* GI = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = GI ? GI->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	if (!TableMgr) return 0;
+
+	bool bFound = false;
+	const FCountryInfoTable Info = TableMgr->GetCountryInfo(Country, bFound);
+	if (!bFound || !Info.bSupportsMine) return 0;
+
+	TSet<EResourceType> UniqueResources;
+	for (const EResourceType Resource : Info.MinableResources)
+	{
+		if (Resource != EResourceType::None) UniqueResources.Add(Resource);
+	}
+	return UniqueResources.Num();
 }
 
 float UMineManager::GetOfflineCatchupBoost(ECountryType Country) const
@@ -407,7 +591,7 @@ bool UMineManager::IsAutoClaimEnabled(ECountryType Country) const
 
 float UMineManager::GetEffectiveRatePerMinute(ECountryType Country, EResourceType Resource) const
 {
-	// 라인이 이미 있으면 라인의 BaseRatePerSecond, 없으면 풀 인덱스 기반 신규 rate (MinePicker preview 용).
+	// 라인이 이미 있으면 설치 당시 속도를 유지하고, 없으면 DT_Resource 기본 속도를 미리 보여 준다.
 	float BaseRate = 0.0f;
 	FMineLineState State;
 	if (GetLineState(Country, Resource, State))
@@ -424,9 +608,11 @@ float UMineManager::GetEffectiveRatePerMinute(ECountryType Country, EResourceTyp
 		const FCountryInfoTable Info = TableMgr->GetCountryInfo(Country, bSucc);
 		if (!bSucc) return 0.0f;
 
-		const int32 PoolIdx = Info.MinableResources.IndexOfByKey(Resource);
-		if (PoolIdx == INDEX_NONE) return 0.0f;
-		BaseRate = ComputeBaseRatePerSecondByIndex(PoolIdx);
+		if (!Info.MinableResources.Contains(Resource)) return 0.0f;
+		const FResourceInfo ResourceInfo = TableMgr->GetResourceInfo(Resource, bSucc);
+		if (!bSucc || !FMath::IsFinite(ResourceInfo.MiningRatePerMinute)
+			|| ResourceInfo.MiningRatePerMinute <= 0.0f) return 0.0f;
+		BaseRate = ResourceInfo.MiningRatePerMinute / 60.0f;
 	}
 	return BaseRate * GetRateMultiplier(Country) * 60.0f;
 }
@@ -440,27 +626,32 @@ bool UMineManager::TickInternal(float DeltaTime)
 	if (AutoClaimAccum < 1.0) return true;
 	AutoClaimAccum = 0.0;
 
-	for (auto& Pair : CountryMines)
+	ProcessAutoClaims();
+	return true;
+}
+
+void UMineManager::ProcessAutoClaims()
+{
+	// 수령 방송이 구독자를 깨워 CountryMines 를 바꿀 수 있어, 대상부터 모은 뒤 수령한다.
+	TArray<TPair<ECountryType, EResourceType>> ToAutoClaim;
+	for (const auto& Pair : CountryMines)
 	{
 		const ECountryType Country = Pair.Key;
 		if (!IsAutoClaimEnabled(Country)) continue;
 
-		// lazy GetLineState 로 현재 saturated 라인 수집 후 일괄 수령.
-		TArray<EResourceType> ToAutoClaim;
 		for (const FMineLineState& Line : Pair.Value.ActiveLines)
 		{
 			FMineLineState LazyState;
 			if (GetLineState(Country, Line.Resource, LazyState) && LazyState.bSaturated && LazyState.CurrentQty > 0)
 			{
-				ToAutoClaim.Add(Line.Resource);
+				ToAutoClaim.Emplace(Country, Line.Resource);
 			}
 		}
-		for (EResourceType Res : ToAutoClaim)
-		{
-			ClaimResource(Country, Res);  // 라인 제거 + StoreResource + broadcast
-		}
 	}
-	return true;
+	for (const TPair<ECountryType, EResourceType>& Target : ToAutoClaim)
+	{
+		ClaimResource(Target.Key, Target.Value);
+	}
 }
 
 int32 UMineManager::FindLineIndexByResource(const FCountryMineData& Mine, EResourceType Resource) const
@@ -473,13 +664,6 @@ int32 UMineManager::FindLineIndexByResource(const FCountryMineData& Mine, EResou
 		}
 	}
 	return INDEX_NONE;
-}
-
-float UMineManager::ComputeBaseRatePerSecondByIndex(int32 IndexInList)
-{
-	// 임시 룰: 0번(주력) = 2/min, 그 외(보조) = 1/min.
-	// GDD_FACTORY 524-541 표의 예외(남아공 금=0.5, 다이아=0.3)는 추후 DT_CountryMineResource 로 분리.
-	return (IndexInList == 0) ? (2.0f / 60.0f) : (1.0f / 60.0f);
 }
 
 // ===== SaveLoad =====

@@ -6,6 +6,9 @@
 #include "Components/CheckBox.h"
 #include "Components/Border.h"
 #include "Components/CanvasPanel.h"
+#include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
+#include "Components/PanelWidget.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "CommonTextBlock.h"
@@ -36,8 +39,8 @@ namespace
 		return Brush;
 	}
 
-	// 체크 1행 구성 (박스 + 간격 + 라벨), VerticalBox 에 상하 패딩 6 으로 추가
-	UCheckBox* BuildCheckRow(UWidgetTree* Tree, UVerticalBox* Stack, const TCHAR* CheckName, const FString& InLabel,
+	// 체크 구성 (박스 + 간격 + 라벨), 가로 슬롯은 같은 폭을 사용한다.
+	UCheckBox* BuildCheckRow(UWidgetTree* Tree, UPanelWidget* Stack, const TCHAR* CheckName, const FString& InLabel,
 		const FSlateBrush& CheckedBrush, const FSlateBrush& UncheckedBrush, UFont* LabelFont,
 		const FLinearColor& InLabelInk, int32 InLabelFontSize)
 	{
@@ -80,10 +83,23 @@ namespace
 			Check->SetContent(Label);
 		}
 
-		if (UVerticalBoxSlot* BoxSlot = Stack->AddChildToVerticalBox(Check))
+		if (UHorizontalBox* HorizontalStack = Cast<UHorizontalBox>(Stack))
 		{
-			BoxSlot->SetPadding(FMargin(0.f, RowVerticalPadding, 0.f, RowVerticalPadding));
-			BoxSlot->SetHorizontalAlignment(HAlign_Left);
+			if (UHorizontalBoxSlot* BoxSlot = HorizontalStack->AddChildToHorizontalBox(Check))
+			{
+				BoxSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+				BoxSlot->SetPadding(FMargin(6.f, RowVerticalPadding, 6.f, RowVerticalPadding));
+				BoxSlot->SetHorizontalAlignment(HAlign_Fill);
+				BoxSlot->SetVerticalAlignment(VAlign_Fill);
+			}
+		}
+		else if (UVerticalBox* VerticalStack = Cast<UVerticalBox>(Stack))
+		{
+			if (UVerticalBoxSlot* BoxSlot = VerticalStack->AddChildToVerticalBox(Check))
+			{
+				BoxSlot->SetPadding(FMargin(0.f, RowVerticalPadding, 0.f, RowVerticalPadding));
+				BoxSlot->SetHorizontalAlignment(HAlign_Left);
+			}
 		}
 		return Check;
 	}
@@ -125,7 +141,15 @@ void UBulkModeSelectorWidget::BuildSelfTree()
 	Plate->SetPadding(PlateContentPadding);
 	WidgetTree->RootWidget = Plate;
 
-	UVerticalBox* Stack = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("BulkModeStack"));
+	UPanelWidget* Stack = nullptr;
+	if (bHorizontalLayout)
+	{
+		Stack = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("BulkModeStack"));
+	}
+	else
+	{
+		Stack = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("BulkModeStack"));
+	}
 	Plate->SetContent(Stack);
 
 	// NEXON Bold — TSoftObjectPtr + LoadSynchronous (LoadObject 문자열 금지, 쿠킹 안전)
@@ -140,6 +164,11 @@ void UBulkModeSelectorWidget::BuildSelfTree()
 	BulkCheck_x1  = BuildCheckRow(WidgetTree, Stack, TEXT("BulkCheck_x1"),  TEXT("x1"),  CheckedBrush, UncheckedBrush, LabelFont, LabelInk, LabelFontSize);
 	BulkCheck_x10 = BuildCheckRow(WidgetTree, Stack, TEXT("BulkCheck_x10"), TEXT("x10"), CheckedBrush, UncheckedBrush, LabelFont, LabelInk, LabelFontSize);
 	BulkCheck_x50 = BuildCheckRow(WidgetTree, Stack, TEXT("BulkCheck_x50"), TEXT("x50"), CheckedBrush, UncheckedBrush, LabelFont, LabelInk, LabelFontSize);
+	BulkCheck_Max = BuildCheckRow(WidgetTree, Stack, TEXT("BulkCheck_Max"), TEXT("최대"), CheckedBrush, UncheckedBrush, LabelFont, LabelInk, LabelFontSize);
+	if (BulkCheck_Max)
+	{
+		BulkCheck_Max->SetVisibility(bMaxModeEnabled ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+	}
 }
 
 void UBulkModeSelectorWidget::NativeConstruct()
@@ -165,6 +194,7 @@ void UBulkModeSelectorWidget::BindChecks()
 	if (BulkCheck_x1)  { BulkCheck_x1->OnCheckStateChanged.AddDynamic(this, &UBulkModeSelectorWidget::OnCheck_x1); }
 	if (BulkCheck_x10) { BulkCheck_x10->OnCheckStateChanged.AddDynamic(this, &UBulkModeSelectorWidget::OnCheck_x10); }
 	if (BulkCheck_x50) { BulkCheck_x50->OnCheckStateChanged.AddDynamic(this, &UBulkModeSelectorWidget::OnCheck_x50); }
+	if (BulkCheck_Max) { BulkCheck_Max->OnCheckStateChanged.AddDynamic(this, &UBulkModeSelectorWidget::OnCheck_Max); }
 	if (!BulkCheck_x1 && !BulkCheck_x10 && !BulkCheck_x50)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[BulkModeSelector] 체크 미배치 — 자가 트리/디자이너 트리 둘 다 없음 (WBP 확인)"));
@@ -181,15 +211,23 @@ void UBulkModeSelectorWidget::UnbindChecks()
 	if (BulkCheck_x1)  { BulkCheck_x1->OnCheckStateChanged.RemoveDynamic(this, &UBulkModeSelectorWidget::OnCheck_x1); }
 	if (BulkCheck_x10) { BulkCheck_x10->OnCheckStateChanged.RemoveDynamic(this, &UBulkModeSelectorWidget::OnCheck_x10); }
 	if (BulkCheck_x50) { BulkCheck_x50->OnCheckStateChanged.RemoveDynamic(this, &UBulkModeSelectorWidget::OnCheck_x50); }
+	if (BulkCheck_Max) { BulkCheck_Max->OnCheckStateChanged.RemoveDynamic(this, &UBulkModeSelectorWidget::OnCheck_Max); }
 	bChecksBound = false;
 }
 
 void UBulkModeSelectorWidget::OnCheck_x1(bool bIsChecked)  { HandleCheckChanged(EEnhanceBulkMode::x1,  BulkCheck_x1,  bIsChecked); }
 void UBulkModeSelectorWidget::OnCheck_x10(bool bIsChecked) { HandleCheckChanged(EEnhanceBulkMode::x10, BulkCheck_x10, bIsChecked); }
 void UBulkModeSelectorWidget::OnCheck_x50(bool bIsChecked) { HandleCheckChanged(EEnhanceBulkMode::x50, BulkCheck_x50, bIsChecked); }
+void UBulkModeSelectorWidget::OnCheck_Max(bool bIsChecked) { HandleCheckChanged(EEnhanceBulkMode::Max, BulkCheck_Max, bIsChecked); }
 
 void UBulkModeSelectorWidget::HandleCheckChanged(EEnhanceBulkMode Mode, UCheckBox* Sender, bool bIsChecked)
 {
+	if (Mode == EEnhanceBulkMode::Max && !bMaxModeEnabled)
+	{
+		SyncVisuals();
+		return;
+	}
+
 	// 라디오 규약: 현재 모드의 체크 해제 시도는 되돌림 (항상 하나는 선택)
 	if (!bIsChecked)
 	{
@@ -217,10 +255,46 @@ void UBulkModeSelectorWidget::SyncVisuals()
 	if (BulkCheck_x1)  { BulkCheck_x1->SetIsChecked(CurrentMode == EEnhanceBulkMode::x1); }
 	if (BulkCheck_x10) { BulkCheck_x10->SetIsChecked(CurrentMode == EEnhanceBulkMode::x10); }
 	if (BulkCheck_x50) { BulkCheck_x50->SetIsChecked(CurrentMode == EEnhanceBulkMode::x50); }
+	if (BulkCheck_Max)
+	{
+		BulkCheck_Max->SetVisibility(bMaxModeEnabled ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+		BulkCheck_Max->SetIsChecked(bMaxModeEnabled && CurrentMode == EEnhanceBulkMode::Max);
+	}
 }
 
 void UBulkModeSelectorWidget::SetMode(EEnhanceBulkMode InMode)
 {
-	CurrentMode = InMode;
+	CurrentMode = (InMode == EEnhanceBulkMode::Max && !bMaxModeEnabled) ? EEnhanceBulkMode::x1 : InMode;
 	SyncVisuals();
+}
+
+void UBulkModeSelectorWidget::SetMaxModeEnabled(bool bEnabled)
+{
+	if (bMaxModeEnabled == bEnabled)
+	{
+		return;
+	}
+
+	bMaxModeEnabled = bEnabled;
+	const bool bResetMode = !bEnabled && CurrentMode == EEnhanceBulkMode::Max;
+	if (bResetMode)
+	{
+		CurrentMode = EEnhanceBulkMode::x1;
+	}
+	SyncVisuals();
+	if (bResetMode)
+	{
+		OnModeChanged.Broadcast(CurrentMode);
+	}
+}
+
+int32 UBulkModeSelectorWidget::GetRequestedCount() const
+{
+	switch (CurrentMode)
+	{
+	case EEnhanceBulkMode::x10: return 10;
+	case EEnhanceBulkMode::x50: return 50;
+	case EEnhanceBulkMode::Max: return MAX_int32;
+	default: return 1;
+	}
 }

@@ -5,9 +5,9 @@
 #include "CoreMinimal.h"
 #include "Engine/DataTable.h"
 #include "EmployeeStatsData.h"
-#include "CharacterAppearanceTypes.h"
 #include "Enum/LootBoxRarity.h"
 #include "Enum/ProductionDiscipline.h"
+#include "Enum/CompanyType.h"
 #include "EmployeeTypes.generated.h"
 
 UENUM(BlueprintType)
@@ -33,7 +33,7 @@ enum class EEmployeeDepartment : uint8
 };
 
 // 스탯 인덱스 (6종). 각 값이 서로 겹치지 않는 고유 메커니즘 1개씩 담당.
-// DisplayName 이 UI 표시명의 단일 진실 — 코드에 스탯명 하드코딩 금지.
+// 크리티컬 성과 표시명은 잠재옵션과 같은 DataTable 행을 사용한다.
 UENUM(BlueprintType)
 enum class EEmployeeStatIndex : uint8
 {
@@ -42,8 +42,8 @@ enum class EEmployeeStatIndex : uint8
     Composure   = 2 UMETA(DisplayName = "침착성(이탈)"),
     ExpGain     = 3 UMETA(DisplayName = "경험치획득"),
     Stamina     = 4 UMETA(DisplayName = "체력(졸음)"),
-    Focus       = 5 UMETA(DisplayName = "업무집중도"),
-    Count       = 6 UMETA(Hidden)   // 스탯 수 하드코딩 방지 (8→6 사고 재발 차단). EProductionDiscipline::Count 와 같은 규약
+    CritDamage  = 5 UMETA(DisplayName = "크리티컬 성과"),
+    Count       = 6 UMETA(Hidden)   // 스탯 수 하드코딩 방지. EProductionDiscipline::Count 와 같은 규약
 };
 
 // 직능 → 부서 (1:1). 운영(Sales/HR/Management)은 직능 없음.
@@ -122,6 +122,21 @@ enum class EEmployeeRank : uint8
     Chairman = 12         UMETA(DisplayName = "회장")       // +12 | 잠재 3줄, 추가 2줄 (최고 직급)
 };
 
+/**
+ * 화면에 뜨는 직급. 축은 레벨이며 위 EEmployeeRank(★ 단계)와 별개다.
+ * ★는 강화 실패로 내려가지만 레벨은 안 내려가므로 이 축에는 강등이 없다.
+ * EEmployeeRank 는 코스메틱 DT 행 키와 잠재 칸 규칙에만 남는다 — 플레이어에게 이 이름으로 노출되지 않는다.
+ */
+UENUM(BlueprintType)
+enum class EEmployeeJobTitle : uint8
+{
+    Intern = 0      UMETA(DisplayName = "인턴"),   // Lv.1~4   | 채용 직후는 전원 여기
+    Staff = 1       UMETA(DisplayName = "사원"),   // Lv.5~11
+    SeniorStaff = 2 UMETA(DisplayName = "대리"),   // Lv.12~19
+    Manager = 3     UMETA(DisplayName = "과장"),   // Lv.20~29
+    Executive = 4   UMETA(DisplayName = "임원")    // Lv.30+
+};
+
 // FLastNameData, FEmployeeHandleData는 Table/EmployeeNameTable.h로 이동됨
 
 USTRUCT(BlueprintType)
@@ -146,7 +161,10 @@ struct FEmployeeInstance
     int32 Level = 1;
 
     UPROPERTY(SaveGame, BlueprintReadWrite)
-    float Experience = 0.0f;
+    double Experience = 0.0;
+
+    UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Stats")
+    int32 UnspentStatPoints = 0;
 
     UPROPERTY(SaveGame, BlueprintReadWrite)
     int32 EnhancementLevel = 0;
@@ -161,14 +179,6 @@ struct FEmployeeInstance
     UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Discipline")
     TArray<int32> DisciplinePoints;
 
-    // 플레이어가 투자한 직능 포인트(6). DisciplinePoints 에 이미 합산됨 — 이건 리셋 시 되돌릴 몫. 이너트 = DisciplinePoints - Invested.
-    UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Discipline")
-    TArray<int32> InvestedDisciplinePoints;
-
-    // 미사용 스킬포인트 풀. 레벨업으로 적립, 직능 투자로 소모, 리셋으로 반환.
-    UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Discipline")
-    int32 AvailableSkillPoints = 0;
-
     // 배정된 건물 인덱스 (INDEX_NONE = 미배정)
     UPROPERTY(SaveGame, BlueprintReadWrite)
     int32 AssignedBuildingIndex = INDEX_NONE;
@@ -176,12 +186,22 @@ struct FEmployeeInstance
     UPROPERTY(SaveGame, BlueprintReadWrite)
     bool bIsAssigned = false;
 
+    // 출장 점유 — 이 서버 유닉스 시각까지 자리를 비운다. 0 = 사무실에 있음.
+    // 책상 기여 0 · 편성 제외 · 「출장 중」 뱃지가 전부 이 필드 하나를 본다(사이드 컨텐츠 설계 §모듈4).
+    UPROPERTY(SaveGame, BlueprintReadWrite)
+    int64 BusyUntil = 0;
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // RPG 스탯 시스템 (레벨업 시 성장)
+    // RPG 스탯 시스템 (SP 배분 + 스타포스 파생 보너스)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Stats")
     FEmployeeStats Stats;
+
+    // 능력치별 SP 투자 횟수 = 표시 Lv·다음 투자 비용의 기준 (인덱스=EEmployeeStatIndex, 비면 전부 0).
+    // Stats 저장값은 입사 분배·치트도 바꾸므로 Lv 로 쓸 수 없다.
+    UPROPERTY(SaveGame, BlueprintReadOnly, Category = "Stats")
+    TArray<int32> StatLevels;
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // 잠재능력 & 추가옵션 (큐브 시스템)
@@ -194,11 +214,8 @@ struct FEmployeeInstance
     FAdditionalOption AdditionalOption;
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // 외모 & 초상화
+    // 초상화
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    UPROPERTY(SaveGame, BlueprintReadWrite, Category = "Appearance")
-    FCharacterAppearance Appearance;
 
     /** 초상화 텍스처 (런타임 전용, 저장 안됨) */
     UPROPERTY(BlueprintReadWrite, Category = "Appearance", Transient)
@@ -206,7 +223,7 @@ struct FEmployeeInstance
 };
 
 // 등급 → 초기 직능 총 포인트 (튜닝 노브). 고등급일수록 뾰족한 전문가.
-// 2026-08-13: 성장분(SkillPointsPerLevel)을 키운 대신 태생 롤을 낮춰 주 직능 상한을 10 으로 묶었다.
+// 2026-08-13: 성장분(WorkPowerPerLevel)을 키운 대신 태생 롤을 낮춰 주 직능 상한을 10 으로 묶었다.
 inline int32 GetDisciplineTotalForRarity(ELootBoxRarity Rarity)
 {
     switch (Rarity)
@@ -220,10 +237,10 @@ inline int32 GetDisciplineTotalForRarity(ELootBoxRarity Rarity)
     }
 }
 
-// 주 직능 집중 + 소량 스프레드 프로필(6). PrimaryShare=0.65(튜닝 노브).
-inline TArray<int32> MakeDisciplineProfile(EProductionDiscipline Primary, ELootBoxRarity Rarity)
+// 주 직능 집중 + 소량 스프레드 프로필. 제조업은 3칸, 프로젝트형은 6칸이다.
+inline TArray<int32> MakeDisciplineProfile(EProductionDiscipline Primary, ELootBoxRarity Rarity, int32 ActiveCount = 6)
 {
-    const int32 N = static_cast<int32>(EProductionDiscipline::Count); // 6
+	const int32 N = ActiveCount == 3 ? 3 : static_cast<int32>(EProductionDiscipline::Count);
     TArray<int32> Points;
     Points.Init(0, N);
     const int32 Total = GetDisciplineTotalForRarity(Rarity);
@@ -242,9 +259,9 @@ inline TArray<int32> MakeDisciplineProfile(EProductionDiscipline Primary, ELootB
 }
 
 // 6스탯에 Total 을 랜덤 분배 + 각 스탯 MinPerStat 보장. 0으로 태어나 죽은 스탯을 없애는 하한.
-inline TArray<int32> MakeStatProfile(int32 Total = 30, int32 MinPerStat = 3)
+inline TArray<int32> MakeStatProfile(int32 Total = 25, int32 MinPerStat = 3)
 {
-    const int32 N = 6;
+    const int32 N = static_cast<int32>(EEmployeeStatIndex::Count);
     TArray<int32> Out;
     Out.Init(MinPerStat, N);
     int32 Remaining = Total - MinPerStat * N;
@@ -259,17 +276,17 @@ inline TArray<int32> MakeStatProfile(int32 Total = 30, int32 MinPerStat = 3)
 // 프로필 배열(길이 6)을 스탯 필드에 적용. 스폰 경로가 2곳이라 매핑을 여기 한 곳에만 둔다.
 inline void ApplyStatProfile(FEmployeeStats& S, const TArray<int32>& P)
 {
-    if (P.Num() < 6) { return; }
+    if (P.Num() < static_cast<int32>(EEmployeeStatIndex::Count)) { return; }
     S.WorkSpeed   = P[0];
     S.CritChance  = P[1];
     S.Composure   = P[2];
     S.ExpGain     = P[3];
     S.Stamina     = P[4];
-    S.Focus       = P[5];
+    S.CritDamage  = P[5];
 }
 
 // argmax(직능) 슬롯. 동점=낮은 인덱스 우선. 전부 0/빈 배열 = INDEX_NONE(직능 없음).
-// 부서칩 표시와 업무집중도 판정이 같은 "주 직능"을 봐야 하므로 판정은 여기 한 곳에만 둔다.
+// 부서칩 표시가 쓰는 "주 직능" 판정은 여기 한 곳에 둔다.
 inline int32 GetPrimaryDisciplineSlot(const FEmployeeInstance& Emp)
 {
     int32 BestIdx = INDEX_NONE, BestVal = 0;
@@ -284,11 +301,25 @@ inline int32 GetPrimaryDisciplineSlot(const FEmployeeInstance& Emp)
     return BestIdx;
 }
 
+// 제조 품질검증에는 기존 QA 그림을 재사용한다. 포인트 슬롯 번호는 바꾸지 않는다.
+inline int32 GetDisciplineIconSlot(int32 ActiveSlot, int32 ProfileCount)
+{
+	return ProfileCount == 3 && ActiveSlot == 2 ? static_cast<int32>(EProductionDiscipline::QA) : ActiveSlot;
+}
+
 // argmax(직능) → 부서. 전부 0/빈 배열 = None(직능 없음).
 inline EEmployeeDepartment GetDerivedDepartment(const FEmployeeInstance& Emp)
 {
     const int32 BestIdx = GetPrimaryDisciplineSlot(Emp);
     if (BestIdx == INDEX_NONE) { return EEmployeeDepartment::None; }
+	if (Emp.DisciplinePoints.Num() == 3)
+	{
+		const EEmployeeDepartment ManufacturingDepartments[] =
+		{
+			EEmployeeDepartment::Design, EEmployeeDepartment::Development, EEmployeeDepartment::QA
+		};
+		return ManufacturingDepartments[BestIdx];
+	}
     return DisciplineToDepartment(static_cast<EProductionDiscipline>(BestIdx));
 }
 
@@ -302,18 +333,45 @@ inline void SyncDerivedDepartment(FEmployeeInstance& Emp)
     }
 }
 
-// 직원 외모 데이터 (CharacterAppearanceTypes.h에서 이동)
-USTRUCT(BlueprintType)
-struct FEmployeeAppearanceData
+// 실제 다른 산업의 건물로 옮길 때만 프로필을 다시 배분한다. 저장 포인트의 총합을 유지한다.
+inline bool ReshapeDisciplineProfile(FEmployeeInstance& Emp, int32 NewCount)
 {
-    GENERATED_BODY()
+	const int32 OldCount = Emp.DisciplinePoints.Num();
+	if ((OldCount != 3 && OldCount != 6) || (NewCount != 3 && NewCount != 6)) { return false; }
+	if (OldCount == NewCount) { return true; }
 
-    UPROPERTY(BlueprintReadWrite)
-    FCharacterAppearance Appearance;
-
-    UPROPERTY(BlueprintReadWrite)
-    EEmployeeRank CurrentRank;
-};
+	const int32 OldPrimary = GetPrimaryDisciplineSlot(Emp);
+	if (OldPrimary == INDEX_NONE) { Emp.DisciplinePoints.Init(0, NewCount); return true; }
+	int64 Total = 0;
+	for (const int32 Points : Emp.DisciplinePoints)
+	{
+		if (Points < 0) { return false; }
+		Total += Points;
+	}
+	if (Total > static_cast<int64>(MAX_int32) * NewCount) { return false; }
+	const int32 NewPrimary = OldPrimary % NewCount;
+	const int32 PrimaryPoints = Emp.DisciplinePoints[OldPrimary];
+	TArray<int32> Result;
+	Result.Init(0, NewCount);
+	Result[NewPrimary] = PrimaryPoints;
+	int64 Remaining = Total - PrimaryPoints;
+	int32 OtherSlots = NewCount - 1;
+	for (int32 Index = 0; Index < NewCount; ++Index)
+	{
+		if (Index == NewPrimary) { continue; }
+		const int32 Cap = PrimaryPoints - (Index < NewPrimary ? 1 : 0);
+		const int64 EvenShare = (Remaining + OtherSlots - 1) / OtherSlots;
+		const int32 Share = static_cast<int32>(FMath::Min<int64>(EvenShare, FMath::Max(0, Cap)));
+		Result[Index] = Share;
+		Remaining -= Share;
+		--OtherSlots;
+	}
+	if (Remaining > MAX_int32 - Result[NewPrimary]) { return false; }
+	Result[NewPrimary] += static_cast<int32>(Remaining);
+	Emp.DisciplinePoints = MoveTemp(Result);
+	SyncDerivedDepartment(Emp);
+	return true;
+}
 
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UEmployeeTypeHelper : public UBlueprintFunctionLibrary
@@ -323,6 +381,26 @@ class COMPANYGROWTHRENEWAL_API UEmployeeTypeHelper : public UBlueprintFunctionLi
 public:
     UFUNCTION(BlueprintPure, Category = "Employee")
     static EEmployeeRank GetRankFromEnhancementLevel(int32 EnhancementLevel);
+
+    // 직급 경계 — 개발 프리셋의 직원 레벨 대역(Early 3~8 / Mid 8~20 / Late 20~35)에 맞춰
+    // 각 구간에서 승진이 1~2회 걸리게 잡았다. 한 판 총 4회 승진.
+    static constexpr int32 JobTitleLevelStaff = 5;
+    static constexpr int32 JobTitleLevelSeniorStaff = 12;
+    static constexpr int32 JobTitleLevelManager = 20;
+    static constexpr int32 JobTitleLevelExecutive = 30;
+
+    UFUNCTION(BlueprintPure, Category = "Employee")
+    static EEmployeeJobTitle GetJobTitleFromLevel(int32 Level);
+
+    // 출장 점유 판정의 단일 정의. 술어일 뿐이고, 무엇을 거를지는 호출자가 정한다.
+    static bool IsOnBusinessTrip(const FEmployeeInstance& Employee, int64 NowUnix)
+    {
+        return Employee.BusyUntil > 0 && Employee.BusyUntil > NowUnix;
+    }
+
+    // UMETA DisplayName 은 쿠킹에서 스트립되므로 표시 문자열을 코드가 직접 쥔다.
+    UFUNCTION(BlueprintPure, Category = "Employee")
+    static FString GetJobTitleDisplayName(EEmployeeJobTitle JobTitle);
 
     // 강화 별 표기 단일 진실 — ★(U+2605)×EnhancementLevel. 0성 = 빈 문자열(UI는 배지째 숨김). 직급 명칭 UI 표기 금지.
     static FString MakeStarString(int32 EnhancementLevel);

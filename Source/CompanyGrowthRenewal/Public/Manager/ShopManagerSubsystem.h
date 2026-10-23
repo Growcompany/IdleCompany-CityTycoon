@@ -9,7 +9,7 @@
 /**
  * 상점 구매/한도/리셋 매니저
  * - 상품 정의 = DT_ShopItem(TableManagerSubsystem) 단일 진실
- * - 리셋 기준: 로컬 자정 / 월요일 00:00 (서버 시간 검증은 오프라인 보상 시스템 도입 시 통합)
+ * - 리셋 기준: UGameClockSubsystem 의 KST 하루/주 키 (서버 시간 권위, 미동기 시 로컬 폴백)
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API UShopManagerSubsystem : public UGameInstanceSubsystem
@@ -21,6 +21,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Shop")
 	bool PurchaseItem(FName RowName);
 
+	bool QuoteEquipmentTickets(FName RowName, FEquipmentTicketShopQuote& OutQuote, FName& OutError) const;
+	bool PrepareEquipmentTicketPurchase(FName RowName, FEquipmentTicketShopRequest& OutRequest, FEquipmentTicketShopQuote& OutQuote, FName& OutError) const;
+	FEquipmentTicketShopResult PurchaseEquipmentTickets(const FEquipmentTicketShopRequest& Request);
+
 	/** 해당 행 결제 재화를 감당 가능한지 */
 	UFUNCTION(BlueprintPure, Category = "Shop")
 	bool CanAfford(FName RowName) const;
@@ -28,10 +32,6 @@ public:
 	/** 남은 구매 가능 횟수 (-1 = 무제한, 행 없으면 0) */
 	UFUNCTION(BlueprintPure, Category = "Shop")
 	int32 GetRemainingCount(FName RowName) const;
-
-	/** 다이아 50으로 일일 상점 한도 즉시 초기화 */
-	UFUNCTION(BlueprintCallable, Category = "Shop")
-	bool ManualResetDaily();
 
 	/** 자정/월요일 경과 시 한도 리셋 (패널 오픈·구매 시 호출) */
 	UFUNCTION(BlueprintCallable, Category = "Shop")
@@ -53,6 +53,5 @@ private:
 	void SaveGameData();
 
 	FShopSaveData ShopData;
-
-	static constexpr int64 ManualResetDiamondCost = 50;
+	bool bTicketPurchaseExecuting = false;
 };

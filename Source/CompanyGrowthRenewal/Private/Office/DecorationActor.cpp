@@ -3,6 +3,8 @@
 #include "Office/DecorationActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
+#include "GameMode/OfficeGameMode.h"
+#include "Engine/World.h"
 
 ADecorationActor::ADecorationActor()
 {
@@ -35,6 +37,14 @@ ADecorationActor::ADecorationActor()
 void ADecorationActor::BeginPlay()
 {
 	Super::BeginPlay();
+	if (GetWorld() && GetWorld()->GetAuthGameMode<AOfficeGameMode>())
+	{
+		TInlineComponentArray<UStaticMeshComponent*> DecorationMeshes(this);
+		for (UStaticMeshComponent* DecorationMesh : DecorationMeshes)
+		{
+			DecorationMesh->SetLightingChannels(false, true, false);
+		}
+	}
 }
 
 void ADecorationActor::SetDecorationMesh(UStaticMesh* NewMesh)
@@ -42,6 +52,23 @@ void ADecorationActor::SetDecorationMesh(UStaticMesh* NewMesh)
 	if (MeshComponent && NewMesh)
 	{
 		MeshComponent->SetStaticMesh(NewMesh);
+		if (IsFloorCovering())
+		{
+			// 클릭/재배치 채널은 유지하고 물리 이동 및 내비게이션에서는 제외한다.
+			const ECollisionResponse PlacementResponse = MeshComponent->GetCollisionResponseToChannel(ECC_GameTraceChannel2);
+			MeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			MeshComponent->SetCollisionResponseToAllChannels(ECR_Ignore);
+			MeshComponent->SetCollisionResponseToChannel(ECC_GameTraceChannel1, ECR_Block);
+			MeshComponent->SetCollisionResponseToChannel(ECC_GameTraceChannel2, PlacementResponse);
+			MeshComponent->SetCanEverAffectNavigation(false);
+			BoxComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			BoxComponent->SetGenerateOverlapEvents(false);
+			BoxComponent->SetCanEverAffectNavigation(false);
+		}
+		if (GetWorld() && GetWorld()->GetAuthGameMode<AOfficeGameMode>())
+		{
+			MeshComponent->SetLightingChannels(false, true, false);
+		}
 
 		// BoxComponent 크기 재계산
 		RecalcBoxExtent();
@@ -74,4 +101,25 @@ bool ADecorationActor::CanPlaceOnSurface(EDecorationSurface Surface) const
 bool ADecorationActor::IsUnlocked(int32 CurrentLevel) const
 {
 	return CurrentLevel >= UnlockLevel;
+}
+
+bool ADecorationActor::BlocksPlacementWith(const AActor* OtherActor) const
+{
+	const ADecorationActor* OtherDecoration = Cast<ADecorationActor>(OtherActor);
+	return IsFloorCovering() == (OtherDecoration && OtherDecoration->IsFloorCovering());
+}
+
+FBox2D ADecorationActor::GetFloorFootprint(const FTransform& FloorTransform) const
+{
+	FBox2D Result(ForceInit);
+	if (!BoxComponent) return Result;
+	const FVector Extent = BoxComponent->GetUnscaledBoxExtent();
+	for (int32 Corner = 0; Corner < 8; ++Corner)
+	{
+		const FVector Offset(Extent.X * ((Corner & 1) ? 1 : -1),
+			Extent.Y * ((Corner & 2) ? 1 : -1), Extent.Z * ((Corner & 4) ? 1 : -1));
+		const FVector Position = FloorTransform.InverseTransformPosition(BoxComponent->GetComponentTransform().TransformPosition(Offset));
+		Result += FVector2D(Position.X, Position.Y);
+	}
+	return Result;
 }

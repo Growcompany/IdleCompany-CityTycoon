@@ -63,14 +63,91 @@ namespace
 }
 #endif
 
-// 미선택 글리프 = 다크 슬레이트(라이트 판 위 대비). 선택 시에만 산업 시그니처색으로 점화(무지개 방지 — 목업 규칙).
-static const FLinearColor GlyphNeutralTint(0.32f, 0.37f, 0.44f, 1.0f);
+// 배경 문양 = 면색을 OKLab 에서 밝힌 같은 계열 색. 흰색을 얹으면 면이 회색빛으로 바랜다.
+static constexpr float IndustryGlyphAlpha = 0.40f;
+static constexpr float IndustryGlyphAlphaSelected = 0.48f;
+static constexpr float IndustryGlyphLift = 0.20f;
+static constexpr float IndustryGlyphChromaScale = 0.85f;
+
+namespace
+{
+	FVector3f LinearToOklab(const FLinearColor& C)
+	{
+		const float L = FMath::Pow(0.4122214708f * C.R + 0.5363325363f * C.G + 0.0514459929f * C.B, 1.f / 3.f);
+		const float M = FMath::Pow(0.2119034982f * C.R + 0.6806995451f * C.G + 0.1073969566f * C.B, 1.f / 3.f);
+		const float S = FMath::Pow(0.0883024619f * C.R + 0.2817188376f * C.G + 0.6299787005f * C.B, 1.f / 3.f);
+		return FVector3f(
+			0.2104542553f * L + 0.7936177850f * M - 0.0040720468f * S,
+			1.9779984951f * L - 2.4285922050f * M + 0.4505937099f * S,
+			0.0259040371f * L + 0.7827717662f * M - 0.8086757660f * S);
+	}
+
+	FLinearColor OklabToLinear(float L, float A, float B)
+	{
+		const float L3 = FMath::Cube(L + 0.3963377774f * A + 0.2158037573f * B);
+		const float M3 = FMath::Cube(L - 0.1055613458f * A - 0.0638541728f * B);
+		const float S3 = FMath::Cube(L - 0.0894841775f * A - 1.2914855480f * B);
+		return FLinearColor(
+			4.0767416621f * L3 - 3.3077115913f * M3 + 0.2309699292f * S3,
+			-1.2684380046f * L3 + 2.6097574011f * M3 - 0.3413193965f * S3,
+			-0.0041960863f * L3 - 0.7034186147f * M3 + 1.7076147010f * S3);
+	}
+
+	// 화면 밖 색은 채널별로 자르면 색상이 틀어지므로, 색상·명도를 지킨 채 채도만 줄여 맞춘다.
+	FLinearColor OklchToLinear(float L, float Chroma, float HueRad)
+	{
+		const float CosH = FMath::Cos(HueRad);
+		const float SinH = FMath::Sin(HueRad);
+		auto InGamut = [](const FLinearColor& X)
+		{
+			return FMath::Min3(X.R, X.G, X.B) >= -1e-5f && FMath::Max3(X.R, X.G, X.B) <= 1.f + 1e-5f;
+		};
+		FLinearColor Out = OklabToLinear(L, Chroma * CosH, Chroma * SinH);
+		if (!InGamut(Out))
+		{
+			float Lo = 0.f;
+			float Hi = Chroma;
+			for (int32 Step = 0; Step < 24; ++Step)
+			{
+				const float Mid = 0.5f * (Lo + Hi);
+				if (InGamut(OklabToLinear(L, Mid * CosH, Mid * SinH)))
+				{
+					Lo = Mid;
+				}
+				else
+				{
+					Hi = Mid;
+				}
+			}
+			Out = OklabToLinear(L, Lo * CosH, Lo * SinH);
+		}
+		return FLinearColor(FMath::Clamp(Out.R, 0.f, 1.f), FMath::Clamp(Out.G, 0.f, 1.f), FMath::Clamp(Out.B, 0.f, 1.f), 1.f);
+	}
+
+	FLinearColor IndustryGlyphColorFromFace(const FLinearColor& Face, float Alpha)
+	{
+		const FVector3f Lab = LinearToOklab(Face);
+		FLinearColor Glyph = OklchToLinear(
+			FMath::Min(Lab.X + IndustryGlyphLift, 0.97f),
+			FMath::Sqrt(Lab.Y * Lab.Y + Lab.Z * Lab.Z) * IndustryGlyphChromaScale,
+			FMath::Atan2(Lab.Z, Lab.Y));
+		Glyph.A = Alpha;
+		return Glyph;
+	}
+}
+
+// 눌림 = 같은 면을 어둡게 + 2px 가라앉힘. 크기가 안 변하므로 면 밖으로 번지는 잔상이 없다.
+static constexpr float FacePressedScale = 0.82f;
+static constexpr float FacePressSink = 2.0f;
+
+// 산업색 면 위 라벨은 크림색으로 읽히게 한다.
+static const FLinearColor LabelCream(1.0f, 0.9387f, 0.8714f, 1.0f);
 
 void UIndustryButtonWidget::NativePreConstruct()
 {
 	Super::NativePreConstruct();
 
-	// 디자이너 프리뷰: 인스턴스의 CompanyType 으로 라벨/글리프/스타일을 미리 그림(런타임 무영향)
+	// 디자이너 프리뷰: 인스턴스의 CompanyType 으로 라벨/배경 문양/면색을 미리 그림(런타임 무영향)
 	if (IsDesignTime())
 	{
 		ApplyCompanyInfo();
@@ -116,7 +193,6 @@ void UIndustryButtonWidget::ApplyCompanyInfo()
 		SetButtonText(Info.DisplayName);
 	}
 
-	// 산업 시그니처색은 캐시만 — 미선택 글리프는 중립, 선택 시에만 이 색으로 점화(무지개 방지).
 	GlyphAccentColor = Info.AccentColor;
 	if (GlyphImage && !Info.GlyphIcon.IsNull())
 	{
@@ -124,23 +200,59 @@ void UIndustryButtonWidget::ApplyCompanyInfo()
 		{
 			GlyphImage->SetBrushFromTexture(GlyphTex);
 		}
-		GlyphImage->SetColorAndOpacity(GetSelected() ? GlyphAccentColor : GlyphNeutralTint);
 	}
 
-	// 선택 글로우 링을 그 산업색으로 — 고른 업종만 자기 색이 확 올라옴(미니 점화).
-	if (SelectionBorder)
-	{
-		SelectionBorder->SetBrushColor(Info.AccentColor);
-	}
+	// 선택 링은 공통 블루 고정이라 WBP 저작값이 전부다 — 여기서 틴트를 건드리면
+	// RoundedBox 의 TintColor(= 면 채움)가 덮여 타일이 통째로 파래진다.
+	SetTextColor(FSlateColor(LabelCream));
 
-	// 배경 = 플랫 칩 스타일(RoundedBox 다크글래스, 광택 마스터 미사용). 산업 구분은 글리프 색+선택 글로우가 담당.
-	// 스타일 에셋 생성: docs/04_ArtDirection/UIChromePrompts (make_flatchip.py). 선택=밝은 중립, 색은 글리프.
-	static const TSoftClassPtr<UCommonButtonStyle> NeutralButtonStyle(
-		FSoftClassPath(TEXT("/Game/CompanyGrowth/UI/CommonStyle/Button/CUI_Style2_Btn_FlatChip.CUI_Style2_Btn_FlatChip_C")));
-	if (UClass* StyleClass = NeutralButtonStyle.LoadSynchronous())
+	if (FacePlate)
 	{
-		SetStyle(TSubclassOf<UCommonButtonStyle>(StyleClass));
+		if (Info.ButtonFaceColor.A <= 0.f)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[IndustryButton] DT_CompanyInfo '%s' ButtonFaceColor not set (alpha 0); keeping WBP default face"),
+				*StaticEnum<ECompanyType>()->GetNameStringByValue(static_cast<int64>(CompanyType)));
+		}
+		else
+		{
+			CachedFaceColor = Info.ButtonFaceColor;
+			ApplyFaceColor(false);
+		}
 	}
+	if (GlyphImage)
+	{
+		GlyphImage->SetColorAndOpacity(IndustryGlyphColorFromFace(CachedFaceColor, GetSelected() ? IndustryGlyphAlphaSelected : IndustryGlyphAlpha));
+	}
+}
+
+void UIndustryButtonWidget::ApplyFaceColor(bool bPressed)
+{
+	if (!FacePlate)
+	{
+		return;
+	}
+	// 알파는 건드리지 않는다 — 스칼라 곱을 그대로 쓰면 눌릴 때 면이 반투명해진다.
+	FLinearColor Face = CachedFaceColor;
+	if (bPressed)
+	{
+		Face.R *= FacePressedScale;
+		Face.G *= FacePressedScale;
+		Face.B *= FacePressedScale;
+	}
+	FacePlate->SetBrushColor(Face);
+	FacePlate->SetRenderTranslation(FVector2D(0.f, bPressed ? FacePressSink : 0.f));
+}
+
+void UIndustryButtonWidget::NativeOnPressed()
+{
+	Super::NativeOnPressed();
+	ApplyFaceColor(true);
+}
+
+void UIndustryButtonWidget::NativeOnReleased()
+{
+	Super::NativeOnReleased();
+	ApplyFaceColor(false);
 }
 
 void UIndustryButtonWidget::NativeOnSelected(bool bBroadcast)
@@ -159,7 +271,8 @@ void UIndustryButtonWidget::SetIndustryLocked(bool bInLocked)
 {
 	bIndustryLocked = bInLocked;
 	SetIsSelectable(!bInLocked);
-	SetRenderOpacity(bInLocked ? 0.45f : 1.0f);
+	// 잠금 시 면과 전경을 함께 낮추되 업종색과 글리프는 식별 가능하게 유지한다.
+	SetRenderOpacity(bInLocked ? 0.72f : 1.0f);
 	if (bInLocked && CheckImage)
 	{
 		// 비선택 기본선(Hidden)과 통일 — 레이아웃 칸 유지로 잠금↔해금 전환 시 글리프/라벨 안 밀림 (UpdateSelectionBorder 규약과 동일)
@@ -173,10 +286,9 @@ void UIndustryButtonWidget::SetIndustryLocked(bool bInLocked)
 
 void UIndustryButtonWidget::UpdateSelectionBorder(bool bInSelected)
 {
-	// 선택 = 산업 시그니처색 점화, 미선택 = 중립(무지개 방지 — 목업 규칙)
 	if (GlyphImage)
 	{
-		GlyphImage->SetColorAndOpacity(bInSelected ? GlyphAccentColor : GlyphNeutralTint);
+		GlyphImage->SetColorAndOpacity(IndustryGlyphColorFromFace(CachedFaceColor, bInSelected ? IndustryGlyphAlphaSelected : IndustryGlyphAlpha));
 	}
 	if (SelectionBorder)
 	{

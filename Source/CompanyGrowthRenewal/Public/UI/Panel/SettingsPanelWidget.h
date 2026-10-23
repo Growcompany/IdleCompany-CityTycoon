@@ -8,12 +8,15 @@
 #include "SettingsPanelWidget.generated.h"
 
 class UButton;
+class UBorder;
 class UButtonWidget;
 class UCloseButtonWidget;
 class UCommonButtonGroupBase;
 class UCommonButtonBase;
 class UEditableTextBox;
 class UIconWithButtonWidget;
+class UImage;
+class UModalFrameWidget;
 class USettingSegmentRowWidget;
 class USettingSliderRowWidget;
 class USettingToggleRowWidget;
@@ -24,7 +27,7 @@ class UWidgetSwitcher;
 /**
  * 설정창 — 사운드/그래픽/계정 3탭 중앙 모달 (좌측 세로 탭 레일).
  * 값 변경은 즉시 적용, 디스크 저장은 닫힐 때 dirty 기준 1회.
- * SOT: specs/2026-07-08-settings-panel-design.md + docs/05_UI/SettingsPanel_MOCKUP.html
+ * SOT: docs/05_UI/mockups/settings_redesign/CODEX_HANDOFF.md
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API USettingsPanelWidget : public UAnimatedActivatableWidget
@@ -42,7 +45,7 @@ protected:
 	UButton* BackgroundBtn;
 
 	UPROPERTY(BlueprintReadWrite, meta = (BindWidget))
-	UCloseButtonWidget* UIE_CloseButton;
+	UModalFrameWidget* ModalFrame;
 
 	UPROPERTY(meta = (BindWidget))
 	UTextBlock* VersionText;
@@ -56,6 +59,15 @@ protected:
 
 	UPROPERTY(meta = (BindWidget))
 	UIconWithButtonWidget* AccountTab;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UBorder* SoundTabPlate;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UBorder* GraphicsTabPlate;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UBorder* AccountTabPlate;
 
 	UPROPERTY(meta = (BindWidget))
 	UWidgetSwitcher* ContentSwitcher;
@@ -83,12 +95,21 @@ protected:
 	UPROPERTY(meta = (BindWidget))
 	USettingToggleRowWidget* ReduceMotionRow;
 
+	UPROPERTY(meta = (BindWidget))
+	USettingToggleRowWidget* HandOpenBoxRow;
+
 	// ===== 계정 탭 =====
 	UPROPERTY(meta = (BindWidget))
 	UTextBlock* StatusChipText;
 
 	UPROPERTY(meta = (BindWidget))
 	UTextBlock* NickNameText;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* AccountNoteText;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UImage* StatusDot;
 
 	UPROPERTY(meta = (BindWidget))
 	UEditableTextBox* NickInput;
@@ -99,6 +120,9 @@ protected:
 	// 게스트일 때만 표시되는 행 컨테이너 (Border 등 아무 위젯)
 	UPROPERTY(meta = (BindWidget))
 	UWidget* GoogleLinkRow;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UBorder* AccountManageCard;
 
 	UPROPERTY(meta = (BindWidget))
 	UButtonWidget* GoogleLinkBtn;
@@ -112,6 +136,7 @@ protected:
 private:
 	// 탭
 	void InitTabs();
+	void UpdateTabPlates(int32 SelectedIndex);
 	UFUNCTION()
 	void HandleTabChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex);
 
@@ -127,6 +152,7 @@ private:
 	void HandleQualityChanged(int32 Index);
 	void HandleFpsChanged(int32 Index);
 	void HandleReduceMotionToggled(bool bOn);
+	void HandleHandOpenBoxToggled(bool bOn);
 
 	// 계정
 	void RefreshAccountTab();

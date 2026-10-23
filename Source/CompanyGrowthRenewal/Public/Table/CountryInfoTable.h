@@ -4,9 +4,10 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataTable.h"
-#include "Entity/Country/CountryActor.h"
+#include "Enum/CountryType.h"
 #include "Enum/CompanyType.h"
 #include "Enum/ResourceType.h"
+#include "Enum/MedallionAnchor.h"
 #include "CountryInfoTable.generated.h"
 
 /**
@@ -76,4 +77,25 @@ struct FCountryInfoTable : public FTableRowBase
 	// 이 국가 채광장이 뽑을 수 있는 자원 (채광 탭용, 추후)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Country|Mine")
 	TArray<EResourceType> MinableResources;
+
+	// ── 전략 지도 테이블 배치 (2026-09-24) ──
+
+	// 판 기준 정규화 좌표 0~1. 실제 위경도가 아니라 메달리온 겹침을 피해 민 값이다.
+	// (0,0) = 미기입 — 배치에서 제외되고 경고가 난다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Country|Map")
+	FVector2D MapAnchor = FVector2D::ZeroVector;
+
+	// 라벨을 메달리온 어느 쪽에 걸지. 이웃과 반대 방향으로 두어 겹침을 피한다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Country|Map")
+	EMedallionAnchor LabelSide = EMedallionAnchor::Bottom;
+
+	// 이 국가 영역 실루엣 마스크. 미진출·잠김일 때 판 위에 어둡게 덮는다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Country|Map")
+	TSoftObjectPtr<UTexture2D> RegionMask;
+
+	// 메달리온 링에 쓸 대표 산업. SupportedIndustries 의 순서는 대표를 뜻하지 않아
+	// (중국·미국·일본이 모두 Electronics 로 시작) 그대로 쓰면 링이 한 색으로 수렴한다.
+	// None 이면 SupportedIndustries 의 첫 유효 원소로 폴백하고 경고가 난다.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Country|Map")
+	ECompanyType RepresentativeIndustry = ECompanyType::None;
 };

@@ -5,7 +5,6 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "Data/EmployeeTypes.h"
-#include "Data/CharacterAppearanceTypes.h"  // transitive 소비자 호환 (구 모듈러 외형 타입)
 #include "Enum/BubbleType.h"
 #include "Officeworker.generated.h"
 
@@ -15,11 +14,14 @@ class UEmployeeBehaviorComponent;
 class AWorkstationActorBase;
 class UWidgetComponent;
 class UMaterialInterface;
+class UCapsuleComponent;
+class UTexture2D;
+struct FOfficeworkerPortraitCaptureState;
 
 /**
  * 직원 공유 게임플레이 베이스 (외형 무관).
  * Behavior/버블/글로우/초상화/배회 AI/워크스테이션/선택을 담당.
- * 외형은 자식이 구현: AModularOfficeworker(구 17파츠 모듈러) / AStickOfficeworker(스틱맨 코스메틱).
+ * 외형은 자식이 구현: AFunnyOfficeworker(Funny 팩 코스메틱).
  */
 UCLASS()
 class COMPANYGROWTHRENEWAL_API AOfficeworker : public ACharacter
@@ -34,6 +36,10 @@ public:
 	// 머리 위 상태 버블 (3D→Screen 자동 변환)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Bubble")
 	UWidgetComponent* BubbleWidgetComponent = nullptr;
+
+	// 직원 클릭 판정 전용 — 클릭 채널(GameTraceChannel1)만 막고 이동·물리·내비에는 끼지 않는다
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Interaction")
+	UCapsuleComponent* ClickVolume = nullptr;
 
 	// 머리 위 상시 피로 게이지 바 (무드 버블과 별개 — 무드는 None 시 숨지만 이건 항상 표시)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Fatigue")
@@ -59,12 +65,27 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Bubble")
 	TSoftObjectPtr<class UWorkerBubbleConfig> BubbleConfig;
 
-	/** 직원 상태 버블 갱신 (None이면 숨김) */
+	/** 직원 상태 버블 갱신. Working은 짧게 간헐 표시하며 None이면 숨긴다. */
 	UFUNCTION(BlueprintCallable, Category = "Bubble")
 	void SetWorkerBubbleType(EWorkerBubbleType NewType);
 
 	UFUNCTION(BlueprintPure, Category = "Bubble")
 	EWorkerBubbleType GetCurrentBubbleType() const { return CurrentBubbleType; }
+
+	/** 클릭 반응 — 기분 좋음 이모트를 잠깐 띄운 뒤 상태 버블로 돌아간다 */
+	void PlayTapReaction();
+
+	bool IsPlayingTapReaction() const { return bTapReactionActive; }
+
+	/** 반응 이모트(「!」 등)를 Seconds 동안 띄운 뒤 상태 버블로 돌아간다 — 클릭 반응과 같은 통로 */
+	bool PlayEmoteReaction(UTexture2D* Emote, float Seconds);
+
+	/** 머리 위 졸음 연출(Z 글자·콧방울)이 떠 있는가 — 떠 있으면 같은 뜻의 피로 버블을 띄우지 않는다. 연출은 자식이 소유 */
+	virtual bool IsDozeVisualActive() const { return false; }
+
+	/** 머리 위 버블·피로 바를 숨긴 채 고정한다. 진행 중인 클릭 반응은 끝까지 보여 준다 */
+	void SetOverheadUISuppressed(bool bSuppressed);
+	bool IsOverheadUISuppressed() const { return bOverheadUISuppressed; }
 
 	/** 메시 Overlay 글로우 (이벤트 버프 활성 시 ON) — 베이스는 no-op, 시각은 자식이 override */
 	UFUNCTION(BlueprintCallable, Category = "Buff")
@@ -75,6 +96,16 @@ private:
 
 	// 버블/Glow 평가 1초 게이트 누산기 — 워커별 독립이어야 함 (static 공유 시 N배 빨리 터지는 버그)
 	float BubbleCheckAccum = 0.0f;
+	FTimerHandle WorkingBubbleTimerHandle;
+	FTimerHandle TapReactionTimerHandle;
+	bool bTapReactionActive = false;
+	bool bOverheadUISuppressed = false;
+	void ApplyWorkerBubbleState();
+	void ShowWorkingBubble();
+	void HideWorkingBubble();
+	void RefreshWorkerBubbleVisual();
+	bool ShowBubbleEmote(UTexture2D* Emote);
+	void EndTapReaction();
 
 	// 착석 여부에 맞춰 피로 바 Z 를 목표값으로 보간 (정착 후에는 매 프레임 no-op)
 	void UpdateFatigueBarHeight(float DeltaTime);
@@ -105,8 +136,10 @@ public:
 
 public:
 	// Portrait 캡처 완료 델리게이트
-	DECLARE_DELEGATE_OneParam(FOnPortraitCaptured, const FString& /*EmployeeID*/);
+	DECLARE_DELEGATE_TwoParams(FOnPortraitCaptured, const FString& /*EmployeeID*/, bool /*bSaved*/);
 	FOnPortraitCaptured OnPortraitCaptured;
+	DECLARE_DELEGATE_RetVal(bool, FCanCommitPortrait);
+	FCanCommitPortrait CanCommitPortrait;
 
 	// 메시 로드 완료 델리게이트
 	DECLARE_DELEGATE(FOnMeshLoadCompleted);
@@ -126,16 +159,22 @@ public:
 	USceneCaptureComponent2D* FaceCaptureCamera;
 
 	UFUNCTION()
-	void SetupFaceCapture();
+	virtual void SetupFaceCapture();
 
 	UFUNCTION()
 	void CaptureAndSaveFacePortrait();
 
 	UFUNCTION()
 	FString GetPortraitFilePath() const;
+	static FString GetPortraitFilePathForEmployee(int32 InEmployeeID);
 
 private:
+	TSharedPtr<FOfficeworkerPortraitCaptureState, ESPMode::ThreadSafe> PendingPortraitCapture;
+	FTimerHandle PortraitReadbackTimer;
+	void PollPortraitReadback();
+	void FinishPortraitCapture(const TSharedPtr<FOfficeworkerPortraitCaptureState, ESPMode::ThreadSafe>& CaptureState, bool bSaved);
 	FTimerHandle MovementTimer;
+	bool bMovementLockedBySeat = false;
 
 	// 직원 ID (deterministic 신발 선택용)
 	int32 EmployeeID = -1;
@@ -146,6 +185,8 @@ protected:
 
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	void ApplyOfficeLightingChannels(bool bGachaReveal = false);
 
 	virtual void LoadAssetsAsync() PURE_VIRTUAL(AOfficeworker::LoadAssetsAsync, return;)
 	virtual void OnAssetsLoaded() PURE_VIRTUAL(AOfficeworker::OnAssetsLoaded, return;)
@@ -181,6 +222,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AI")
 	void StopRandomRoaming();
 
+	// 직전 StartRandomRoaming 의 반경·대기로 현재 위치에서 다시 배회한다
+	void ResumeRandomRoaming();
+
 	// 현재 배회 중인지 확인
 	UFUNCTION(BlueprintCallable, Category = "AI")
 	bool IsRoaming() const { return bIsRoaming; }
@@ -198,14 +242,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AI|Workstation")
 	void SetAssignedWorkstation(AWorkstationActorBase* Workstation, int32 SeatIndex);
 
-	// Workstation으로 순간이동 후 앉기 (Stage 모드용)
+	// 지정된 Workstation 좌석으로 이동해 착석 위치 유지
 	// @return 성공 여부 (Workstation이 할당되지 않으면 false)
 	UFUNCTION(BlueprintCallable, Category = "AI|Workstation")
 	bool TeleportToWorkstationAndSit();
 
-	// Workstation 근처로 이동 (Operation 모드용)
+	// Workstation 근처로 이동
 	UFUNCTION(BlueprintCallable, Category = "AI|Workstation")
 	void MoveToWorkstationArea();
+
+	/** 배정 좌석 앞의 NavMesh 위 접근 지점. 이동과 채용 도착 판정이 함께 사용한다. */
+	FVector GetWorkstationApproachLocation() const;
 
 	// Workstation에서 일어나기
 	UFUNCTION(BlueprintCallable, Category = "AI|Workstation")

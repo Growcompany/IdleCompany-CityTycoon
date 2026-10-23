@@ -3,12 +3,25 @@
 
 #include "Entity/Factory/BrickFactory.h"
 
+#include "Entity/Factory/BrickLaborer.h"
+#include "Entity/Factory/FactoryUpgradeEffectComponent.h"
+#include "Entity/Ambient/VacantPlotDressingManager.h"
+#include "Components/BoxComponent.h"
+#include "Data/BrickLaborerRules.h"
+#include "Player/Components/PlotPlacementRules.h"
+#include "Table/BuildingData.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Animation/AnimSequence.h"
+#include "Engine/SkeletalMesh.h"
 #include "UI/Panel/InGameLayerWidget.h"
 #include "Data/FactoryUpgradeConfig.h"
 #include "Data/FactoryUpgradeData.h"
+#include "Data/FactoryOfflineGainPolicy.h"
+#include "Data/TutorialDerivedMissionRules.h"
 #include "Manager/TableManagerSubsystem.h"
 #include "Manager/MissionManagerSubsystem.h"
 #include "Manager/SaveLoadManager.h"
+#include "Manager/QuestSubsystem.h"
 
 #include "Components/StaticMeshComponent.h"
 #include "Player/PlayerCamera.h"
@@ -32,6 +45,7 @@
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshSocket.h"
+#include "EngineUtils.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
@@ -48,6 +62,7 @@ ABrickFactory::ABrickFactory()
 
 	// Factory 데이터 초기화
 	FactoryData = FFactorySaveData(FactoryID);
+	UpgradeEffect = CreateDefaultSubobject<UFactoryUpgradeEffectComponent>(TEXT("UpgradeEffect"));
 
 	// 야간 조명 ISM — 루트에 붙여 공장 재배치 시 조명이 따라오게 한다
 	LightISM = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("LightISM"));
@@ -68,35 +83,53 @@ ABrickFactory::ABrickFactory()
 	{
 		LightISM->SetStaticMesh(LightMeshFinder.Object);
 	}
+
+	// 잡부 기본값은 BP 가 아니라 여기서 준다.
+	// BP CDO 에 꽂아 두면 네이티브 부모가 바뀔 때마다 재컴파일로 조용히 리셋된다(2026-10-02 실측).
+	// 경로 문자열만 들고 있는 소프트 참조라 하드 의존이 생기지 않는다 — 쿠킹은 FunnyWorker/ 폴더 등록으로 커버.
+	LaborerClass = TSoftClassPtr<ABrickLaborer>(FSoftObjectPath(
+		TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Laborer/BP_BrickLaborer.BP_BrickLaborer_C")));
+	WalkAnim = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(
+		TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Anims/AS_Walk.AS_Walk")));
+	RunAnim = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(
+		TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Anims/Moving/AS_Run_Medium.AS_Run_Medium")));
+	CarryWalkAnim = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(
+		TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Laborer/Anims/AS_CarryWalk.AS_CarryWalk")));
+	CarryRunAnim = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(
+		TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Laborer/Anims/AS_CarryRun.AS_CarryRun")));
 }
 
 // Called when the game starts or when spawned
 void ABrickFactory::BeginPlay()
 {
+	UpdateAppearanceTransform();
 	Super::BeginPlay();
 
 	UpdateProductionValues();
+	UpgradeEffect->OnConcealed.AddUObject(this, &ABrickFactory::ApplyPendingFactoryAppearance);
+	UpgradeEffect->OnRevealed.AddUObject(this, &ABrickFactory::HandleUpgradeRevealed);
+	UpgradeEffect->OnFinished.AddUObject(this, &ABrickFactory::HandleUpgradeEffectFinished);
+	RefreshFactoryAppearance(false);
 
 	if (UGameInstance* GI = GetGameInstance())
 	{
 		if (USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>())
 		{
 			SaveMgr->OnHQLevelUp.AddDynamic(this, &ABrickFactory::HandleHQLevelUp);
+			// 접속 중 재고는 안 쌓는다 — 오프라인 경과분만 여기서 한 번 정산한다
+			SaveMgr->OnOfflineGainsApplied.AddUObject(this, &ABrickFactory::SettleOfflineBricks);
 		}
 	}
 
 	// HQ 레벨업 시점을 놓친 세이브 보정 — 연출 없이 조용히
 	EvaluateAutoCollectionUnlock(false);
 
-	RestartAutoCollectionTimer();
-
 	// 낮엔 additive 조명을 숨겨 fill 절감 — day/night 전환 구독. 못 찾으면 항상 표시.
 	if (ATimeCycleManager* Clock = Cast<ATimeCycleManager>(UGameplayStatics::GetActorOfClass(GetWorld(), ATimeCycleManager::StaticClass())))
 	{
 		CachedTimeCycle = Clock;
-		Clock->OnSunRise.AddDynamic(this, &ABrickFactory::HandleSunRise);
-		Clock->OnSunSet.AddDynamic(this, &ABrickFactory::HandleSunSet);
-		const int32 Cur = Clock->GetCurrentTime().ToSeconds();
+		Clock->OnVisualTimeChanged.AddDynamic(this, &ABrickFactory::HandleVisualTimeChanged);
+		const int32 Cur = Clock->GetVisualTime().ToSeconds();
 		const int32 Rise = Clock->GetSunRiseTime().ToSeconds();
 		const int32 Set = Clock->GetSunSetTime().ToSeconds();
 		bLightVisible = (Cur >= Set) || (Cur < Rise);
@@ -104,10 +137,22 @@ void ABrickFactory::BeginPlay()
 
 	SetupBodyNightEmissive();
 	BuildNightLights();
+
+	RefreshLaborerCrew();
 }
 
 void ABrickFactory::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (UpgradeEffect)
+	{
+		UpgradeEffect->Cancel();
+		UpgradeEffect->OnConcealed.RemoveAll(this);
+		UpgradeEffect->OnRevealed.RemoveAll(this);
+		UpgradeEffect->OnFinished.RemoveAll(this);
+	}
+	GetWorldTimerManager().ClearTimer(HoldSmokeTimerHandle);
+	GetWorldTimerManager().ClearTimer(BoostStreakHideTimerHandle);
+	ClearSmokeVFX();
 	// Steam/Ambience 사운드 컴포넌트가 World에 분리 spawn 되어 있어 Actor 종료 시 명시적 정리 필요
 	StopSteamSound();
 	StopAmbienceSound();
@@ -117,14 +162,25 @@ void ABrickFactory::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		if (USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>())
 		{
 			SaveMgr->OnHQLevelUp.RemoveDynamic(this, &ABrickFactory::HandleHQLevelUp);
+			SaveMgr->OnOfflineGainsApplied.RemoveAll(this);
 		}
 	}
 
 	if (ATimeCycleManager* Clock = CachedTimeCycle.Get())
 	{
-		Clock->OnSunRise.RemoveDynamic(this, &ABrickFactory::HandleSunRise);
-		Clock->OnSunSet.RemoveDynamic(this, &ABrickFactory::HandleSunSet);
+		Clock->OnVisualTimeChanged.RemoveDynamic(this, &ABrickFactory::HandleVisualTimeChanged);
 	}
+
+	// 잡부는 Owner 만 걸고 따로 spawn 된 액터다 — UE 는 Owner 로 수명을 잇지 않아
+	// 공장이 사라지면 월드에 멈춰 선 채로 남는다(Tick 이 OwnerFactory 무효로 조기 반환).
+	for (ABrickLaborer* Laborer : Laborers)
+	{
+		if (IsValid(Laborer))
+		{
+			Laborer->Destroy();
+		}
+	}
+	Laborers.Reset();
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -161,10 +217,25 @@ void ABrickFactory::ApplyNightVisibility(bool bNight)
 		UE_LOG(LogTemp, Log, TEXT("[FactoryLight] 본체 EmissiveFactor -> %s"),
 			*(bNight ? NightEmissiveTint : FLinearColor::Black).ToString());
 	}
+
+	// 잡부는 Unlit 머티리얼이라 밤에도 안 어두워진다 — 공장이 받은 밤 비트를 그대로 내려 준다.
+	// 30명이 각자 시계를 구독하지 않게 여기 한 곳에서만 전달한다.
+	for (ABrickLaborer* Laborer : Laborers)
+	{
+		if (IsValid(Laborer))
+		{
+			Laborer->SetNightMode(bNight);
+		}
+	}
 }
 
-void ABrickFactory::HandleSunRise() { ApplyNightVisibility(false); }
-void ABrickFactory::HandleSunSet()  { ApplyNightVisibility(true); }
+void ABrickFactory::HandleVisualTimeChanged()
+{
+	if (const ATimeCycleManager* Clock = CachedTimeCycle.Get())
+	{
+		ApplyNightVisibility(Clock->IsVisualNight());
+	}
+}
 
 namespace
 {
@@ -287,38 +358,37 @@ void ABrickFactory::BuildNightLights()
 
 void ABrickFactory::OnInteract_Implementation(APlayerController* PC)
 {
-	// Factory 모드로 전환
+	if (bIsRelocating) return;
+	// Factory 모드로 전환 — 인터페이스 호출자가 메인맵 PC 라는 보장이 없다(오피스/방문 맵)
 	AMainMapPlayerController* MainPC = Cast<AMainMapPlayerController>(PC);
-	MainPC->GoToFactoryMode();
+	if (MainPC)
+	{
+		MainPC->GoToFactoryMode();
+	}
 
 	bIsInteracting = true;
 
 	UE_LOG(LogTemp, Log, TEXT("Pressed on ABrickFactory"));
 
-	// 연기 VFX 시작 (Continuous 타입이므로 인터랙션 동안 유지)
+	// 짧은 굴뚝 분출과 건물 외곽 속도선을 홀드에 맞춘다.
 	StartSmokeVFX();
+	StartBoostStreaks();
 
-	// 트레일러/디버그 간격 오버라이드 우선 (치트 FactoryMax [Amount] [SpeedSec]), 없으면 강화 곡선값
-	float CurrentInterval = (TrailerSpawnIntervalOverride > 0.0f)
-		? TrailerSpawnIntervalOverride
-		: GetUpgradeValue(EFactoryUpgradeType::HoldProductionSpeed);
-	if (CurrentInterval <= 0.0f)
+	// 홀드는 더 이상 벽돌을 직접 뱉지 않는다 — 잡부 왕복을 2배속으로 돌린다 [확정 2026-10-02]
+	ApplyLaborerPace(true);
+	if (UMissionManagerSubsystem* MissionMgr = GetGameInstance()->GetSubsystem<UMissionManagerSubsystem>())
 	{
-		CurrentInterval = BrickSpawnInterval;
+		MissionMgr->NotifyFactoryBoostStarted();
 	}
 
-	// 홀드 동안 포인터 아래 라디얼 게이지 — 생산 주기와 동기, OnEndInteract 에서 종료
+	// 홀드 중 배수 배지는 최초 누름점에 머문다.
 	if (UUIManagerSubsystem* UIMgr = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
 		if (UInGameLayerWidget* InGame = UIMgr->GetInGameLayer())
 		{
-			InGame->BeginHoldPulse(CurrentInterval);
+			InGame->BeginFactoryBoost(HoldSpeedMultiplier);
 		}
 	}
-
-	// 첫 벽돌도 한 주기를 채워야 생산 — 게이지(한 바퀴=벽돌 1개)와 정확히 일치, 즉시 생성 없음
-	GetWorld()->GetTimerManager().SetTimer(
-		BrickSpawnTimerHandle, this, &ABrickFactory::SpawnBrick, CurrentInterval, true);
 }
 
 void ABrickFactory::OnEndInteract_Implementation(APlayerController* PC)
@@ -334,17 +404,18 @@ void ABrickFactory::OnEndInteract_Implementation(APlayerController* PC)
 
 	// 연기 VFX 중지
 	StopSmokeVFX();
+	StopBoostStreaks();
 
 	if (UUIManagerSubsystem* UIMgr = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
 		if (UInGameLayerWidget* InGame = UIMgr->GetInGameLayer())
 		{
-			InGame->EndHoldPulse();
+			InGame->EndFactoryBoost();
 		}
 	}
 
-	// 벽돌 생산 타이머 중지
-	GetWorld()->GetTimerManager().ClearTimer(BrickSpawnTimerHandle);
+	// 가속 해제 — 홀드를 떼면 즉시 평소 속도로
+	ApplyLaborerPace(false);
 
 	// 상태 체크 후 Normal로 복귀
 	AMainMapPlayerController* MainPC = Cast<AMainMapPlayerController>(PC);
@@ -359,56 +430,34 @@ void ABrickFactory::OnEndInteract_Implementation(APlayerController* PC)
 void ABrickFactory::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-
 }
 
-void ABrickFactory::SpawnBrick()
+void ABrickFactory::HarvestBricksAt(const FVector& WorldLocation, int32 Amount)
 {
-	// 1) SpawnPoints 배열에서 랜덤 선택
-	FVector SpawnLocation = GetActorLocation();
-	if (SpawnPoints.Num() > 0)
+	if (Amount <= 0) return;
+
+	UGameInstance* GI = GetGameInstance();
+	UUIManagerSubsystem* UIManager = GI ? GI->GetSubsystem<UUIManagerSubsystem>() : nullptr;
+	UInGameLayerWidget* InGameUI = UIManager ? UIManager->GetInGameLayer() : nullptr;
+	if (!InGameUI)
 	{
-		int32 Idx = FMath::RandRange(0, SpawnPoints.Num() - 1);
-		if (SpawnPoints[Idx])
+		if (UResourceItemManager* ResourceManager = GI ? GI->GetSubsystem<UResourceItemManager>() : nullptr)
 		{
-			SpawnLocation = SpawnPoints[Idx]->GetComponentLocation();
+			ResourceManager->CollectFactoryBricks(Amount);
 		}
+		return;
 	}
 
-	// 2) VFX 위치를 벽돌 스폰 위치로 이동 + 비활성화면 재시작
-	if (CachedSmokeVFX)
-	{
-		CachedSmokeVFX->SetWorldLocation(SpawnLocation);
+	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	FVector2D ScreenPos = FVector2D::ZeroVector;
+	// 풀스크린 EffectCanvas와 같은 뷰포트 기준 좌표를 사용한다.
+	const bool bSourceProjected = PC && UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(
+		PC, WorldLocation, ScreenPos, false);
 
-		if (!CachedSmokeVFX->IsActive())
-		{
-			CachedSmokeVFX->Activate(true);
-		}
-	}
+	InGameUI->SpawnBrickCollectAt(ScreenPos, EResourceType::Brick, Amount, bSourceProjected);
 
-	// 3) 월드 → 스크린 좌표 변환
-	FVector2D ScreenPos;
-	UWidgetLayoutLibrary::ProjectWorldLocationToWidgetPosition(
-		GetWorld()->GetFirstPlayerController(),
-		SpawnLocation,
-		ScreenPos, true);
-	// 생산 틱마다(최대 초당 5회) 찍히던 로그 — 필요할 때만 켜도록 Verbose
-	UE_LOG(LogTemp, Verbose, TEXT("[ABrick] ProjectWorldLocationToWidgetPosition ScreenPos : %s"), *ScreenPos.ToString());
-
-	UUIManagerSubsystem* UIManager = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>();
-	check(UIManager);
-
-	UInGameLayerWidget* InGameUI = UIManager->GetInGameLayer();
-	check(InGameUI);
-
-	// 업그레이드된 생산량 적용
-	int32 ProductionAmount = FMath::RoundToInt(GetUpgradeValue(EFactoryUpgradeType::HoldProductionAmount));
-
-	InGameUI->SpawnBrickCollectAt(ScreenPos, EResourceType::Brick, ProductionAmount);
-
-	// 생산 순간과 동기화된 바운스 (재생 중이면 PlayBounce 내부 IsPlaying 가드가 스킵 — 연타 안전)
-	// 생산틱 시각 강조는 홀드 게이지 한 바퀴 완료 팝이 담당
-	PlayBounce();
+	// 바운스는 "공장이 벽돌을 뱉었다"는 신호였다 — 이제 생산 주체가 잡부라 공장이 들썩일 이유가 없다.
+	// 30명이 쉴 새 없이 배달하면 공장이 상시 진동하게 된다.
 }
 
 
@@ -421,9 +470,11 @@ void ABrickFactory::NotifyActorOnClicked(FKey ButtonPressed)
 
 void ABrickFactory::OnConstruction(const FTransform& Transform)
 {
+	UpdateAppearanceTransform();
 	Super::OnConstruction(Transform);
 
 	SpawnPoints.Empty();
+	LaborerDoors.Empty();
 
 	// 루트 밑에 붙어 있는 모든 SceneComponent 수집
 	TArray<USceneComponent*> All;
@@ -438,22 +489,461 @@ void ABrickFactory::OnConstruction(const FTransform& Transform)
 		{
 			SpawnPoints.Add(Comp);
 		}
+		else if (Comp->GetName().StartsWith(TEXT("LaborerDoor")))
+		{
+			LaborerDoors.Add(Comp);
+		}
 	}
+
+	// 컴포넌트 수집 순서는 보장되지 않는다 — 입구/출구가 매번 뒤바뀌지 않도록 이름순으로 고정
+	LaborerDoors.Sort([](const USceneComponent& A, const USceneComponent& B)
+	{
+		return A.GetName() < B.GetName();
+	});
+}
+
+FVector ABrickFactory::GetLaborerEntryPoint() const
+{
+	return GetLaborerDoorTransform(0).GetLocation();
+}
+
+FVector ABrickFactory::GetLaborerExitPoint() const
+{
+	return GetLaborerDoorTransform(1).GetLocation();
+}
+
+FTransform ABrickFactory::GetLaborerDoorTransform(int32 DoorIndex) const
+{
+	const int32 DoorCount = GetLaborerDoorCount();
+	if (DoorCount <= 0)
+	{
+		return GetActorTransform();
+	}
+	const int32 Index = FMath::Clamp(DoorIndex, 0, DoorCount - 1);
+	if (MainMeshComponent && MainMeshComponent->DoesSocketExist(TEXT("LaborerDoor_0")))
+	{
+		return MainMeshComponent->GetSocketTransform(
+			FName(*FString::Printf(TEXT("LaborerDoor_%d"), Index)));
+	}
+	if (LaborerDoors.IsValidIndex(Index) && LaborerDoors[Index])
+	{
+		return LaborerDoors[Index]->GetComponentTransform();
+	}
+	return GetActorTransform();
+}
+
+int32 ABrickFactory::GetLaborerDoorCount() const
+{
+	if (MainMeshComponent && MainMeshComponent->DoesSocketExist(TEXT("LaborerDoor_0")))
+	{
+		int32 Count = 1;
+		while (MainMeshComponent->DoesSocketExist(FName(*FString::Printf(TEXT("LaborerDoor_%d"), Count))))
+		{
+			++Count;
+		}
+		return Count;
+	}
+	return LaborerDoors.Num();
+}
+
+FTransform ABrickFactory::GetPlacementFootprintTransform(bool bCommitted) const
+{
+	const FTransform Placement = bCommitted && bIsRelocating ? RelocationOriginalTransform : GetActorTransform();
+	const FQuat PlacementRotation = FRotator(0.f, Placement.Rotator().Yaw, 0.f).Quaternion();
+	const FVector Center = Placement.GetLocation() + PlacementRotation.RotateVector(
+		FVector(PlacementFootprintOffset.X, PlacementFootprintOffset.Y, 0.f));
+	return FTransform(PlacementRotation, Center);
+}
+
+FVector ABrickFactory::GetPlacementFootprintCenter(bool bCommitted) const
+{
+	return GetPlacementFootprintTransform(bCommitted).GetLocation();
+}
+
+FVector2D ABrickFactory::GetPlacementFootprintHalfExtent(bool bWorldAxes, bool bCommitted) const
+{
+	const double HalfSide = FPlotPlacementRules::GetPlotCellSize(ResolvePlotBaseCellSize(GetWorld())) * FactoryScale;
+	if (!bWorldAxes) return FVector2D(HalfSide);
+	const double YawRadians = FMath::DegreesToRadians(static_cast<double>(GetPlacementFootprintTransform(bCommitted).Rotator().Yaw));
+	const double AABBHalfSide = HalfSide * (FMath::Abs(FMath::Cos(YawRadians)) + FMath::Abs(FMath::Sin(YawRadians)));
+	return FVector2D(AABBHalfSide);
+}
+
+bool ABrickFactory::BeginRelocation()
+{
+	if (bIsRelocating) return false;
+	OnEndInteract_Implementation(GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr);
+	if (UpgradeEffect && UpgradeEffect->IsPlaying())
+	{
+		UpgradeEffect->Cancel();
+		RefreshFactoryAppearance(false);
+	}
+	RelocationOriginalTransform = GetActorTransform();
+	bIsRelocating = true;
+	ClearSmokeVFX();
+	for (ABrickLaborer* Laborer : Laborers)
+	{
+		if (!IsValid(Laborer)) continue;
+		Laborer->SetActorHiddenInGame(true);
+		Laborer->SetActorTickEnabled(false);
+	}
+	return true;
+}
+
+void ABrickFactory::RotatePlacementQuarterTurn()
+{
+	const FVector ReservedCenter = GetPlacementFootprintCenter();
+	AddActorWorldRotation(FRotator(0.f, 90.f, 0.f));
+	AddActorWorldOffset(ReservedCenter - GetPlacementFootprintCenter());
+}
+
+void ABrickFactory::FinishRelocation(bool bCommit, FName DestinationPlotId)
+{
+	if (!bIsRelocating) return;
+	if (bCommit)
+	{
+		FactoryData.OwningPlotId = DestinationPlotId;
+		FactoryData.PlacementTransform = GetActorTransform();
+	}
+	else
+	{
+		SetActorTransform(RelocationOriginalTransform);
+	}
+	bIsRelocating = false;
+	ReCalcBoxExtent();
+	for (ABrickLaborer* Laborer : Laborers)
+	{
+		if (!IsValid(Laborer)) continue;
+		Laborer->RefreshPath();
+		Laborer->SetActorHiddenInGame(false);
+		Laborer->SetActorTickEnabled(true);
+	}
+	if (bCommit)
+	{
+		if (UGameInstance* FactoryGameInstance = GetGameInstance())
+		{
+			if (USaveLoadManager* SaveManager = FactoryGameInstance->GetSubsystem<USaveLoadManager>())
+			{
+				SaveManager->RequestDeferredSave();
+			}
+		}
+	}
+}
+
+float ABrickFactory::GetCameraFocusDistanceCm() const
+{
+	const UGameInstance* FactoryGameInstance = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = FactoryGameInstance
+		? FactoryGameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const int32 DisplayLevel = CurrentAppearanceLevel > 0
+		? CurrentAppearanceLevel : GetUpgradeLevel(EFactoryUpgradeType::FactoryExpansion);
+	const FFactoryAppearanceRow* Appearance = TableMgr ? TableMgr->FindFactoryAppearance(DisplayLevel) : nullptr;
+	if (!Appearance || !FMath::IsFinite(Appearance->CameraFocusDistanceCm) || Appearance->CameraFocusDistanceCm <= 0.f)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] Missing camera focus distance at factory level %d"), DisplayLevel);
+		return 0.f;
+	}
+	return Appearance->CameraFocusDistanceCm;
+}
+
+int32 ABrickFactory::GetDesiredLaborerCount() const
+{
+	return FBrickLaborerRules::LaborerCountFromValue(
+		GetUpgradeValue(EFactoryUpgradeType::LaborerCount), GetLaborerCapacity());
+}
+
+int32 ABrickFactory::GetLaborerCapacity() const
+{
+	return GetLaborerCapacityAtLevel(GetUpgradeLevel(EFactoryUpgradeType::FactoryExpansion));
+}
+
+int32 ABrickFactory::GetLaborerCapacityAtLevel(int32 ExpansionLevel) const
+{
+	const UGameInstance* FactoryGameInstance = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = FactoryGameInstance
+		? FactoryGameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const FFactoryAppearanceRow* Appearance = TableMgr ? TableMgr->FindFactoryAppearance(ExpansionLevel) : nullptr;
+	if (!Appearance || Appearance->LaborerCapacity <= 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] Missing laborer capacity at factory level %d"), ExpansionLevel);
+		return 0;
+	}
+	return Appearance->LaborerCapacity;
+}
+
+namespace BrickLaborerDefaults
+{
+	// BP/레벨에 None 이 직렬화돼 있으면 C++ 생성자 기본값을 덮어써 버린다(2026-10-02 실측).
+	// 그 경우 조용히 멈추지 말고 이 경로로 자가 복구하고, 데이터가 어긋났다는 사실은 경고로 남긴다.
+	static const TCHAR* LaborerBP = TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Laborer/BP_BrickLaborer.BP_BrickLaborer_C");
+	static const TCHAR* Walk = TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Anims/AS_Walk.AS_Walk");
+	static const TCHAR* Run = TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Anims/Moving/AS_Run_Medium.AS_Run_Medium");
+	static const TCHAR* CarryWalk = TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Laborer/Anims/AS_CarryWalk.AS_CarryWalk");
+	static const TCHAR* CarryRun = TEXT("/Game/CompanyGrowth/Characters/FunnyWorker/Laborer/Anims/AS_CarryRun.AS_CarryRun");
+
+	template <typename T>
+	T* ResolveOrFallback(const TSoftObjectPtr<T>& Soft, const TCHAR* FallbackPath, const TCHAR* Label)
+	{
+		if (!Soft.IsNull())
+		{
+			if (T* Loaded = Soft.LoadSynchronous())
+			{
+				return Loaded;
+			}
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] %s 가 비어 있어 기본 경로로 복구한다 — BP/레벨 값 확인 필요"), Label);
+		return Cast<T>(FSoftObjectPath(FallbackPath).TryLoad());
+	}
+
+	UAnimSequence* ResolveCarryOrFallback(const TSoftObjectPtr<UAnimSequence>& Soft,
+		const TCHAR* FallbackPath, const TCHAR* Label)
+	{
+		if (!Soft.IsNull())
+		{
+			if (UAnimSequence* Loaded = Soft.LoadSynchronous())
+			{
+				return Loaded;
+			}
+		}
+		if (UAnimSequence* Fallback = Cast<UAnimSequence>(FSoftObjectPath(FallbackPath).TryLoad()))
+		{
+			return Fallback;
+		}
+		static bool bWarnedMissingCarryClip = false;
+		if (!bWarnedMissingCarryClip)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] %s carry clip is unavailable; laborers will use normal gait"), Label);
+			bWarnedMissingCarryClip = true;
+		}
+		return nullptr;
+	}
+}
+
+void ABrickFactory::SpawnLaborer(int32 LaneIndex, int32 LaneCount)
+{
+	UClass* LoadedClass = LaborerClass.IsNull() ? nullptr : LaborerClass.LoadSynchronous();
+	if (!LoadedClass)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[BrickFactory] LaborerClass 가 비어 있어 기본 경로로 복구한다 — BP/레벨 값 확인 필요"));
+		LoadedClass = Cast<UClass>(FSoftObjectPath(BrickLaborerDefaults::LaborerBP).TryLoad());
+	}
+	if (!LoadedClass)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[BrickFactory] 잡부 BP 를 기본 경로에서도 못 찾았다: %s"),
+			BrickLaborerDefaults::LaborerBP);
+		return;
+	}
+
+	FActorSpawnParameters Params;
+	Params.Owner = this;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	ABrickLaborer* Laborer = GetWorld()->SpawnActor<ABrickLaborer>(
+		LoadedClass, GetLaborerEntryPoint(), FRotator::ZeroRotator, Params);
+	if (!Laborer)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] 잡부 스폰 실패 (class=%s)"), *LoadedClass->GetName());
+		return;
+	}
+
+	Laborer->InitLaborer(this, LaneIndex, LaneCount);
+	// 밤에 스폰된 신입만 혼자 환하게 서 있지 않도록 현재 밤 상태를 바로 물려준다
+	Laborer->SetNightMode(bLightVisible);
+	Laborer->SetActorHiddenInGame(bIsRelocating);
+	Laborer->SetActorTickEnabled(!bIsRelocating);
+	Laborers.Add(Laborer);
+}
+
+void ABrickFactory::RefreshLaborerCrew()
+{
+	if (!GetWorld())
+	{
+		return;
+	}
+
+
+	Laborers.RemoveAll([](const ABrickLaborer* L) { return !IsValid(L); });
+
+	const int32 Desired = GetDesiredLaborerCount();
+
+	for (int32 i = Laborers.Num(); i < Desired; ++i)
+	{
+		SpawnLaborer(i, Desired);
+	}
+
+	// 줄어든 경우: 초과분은 지금 들고 있는 벽돌을 배달한 뒤 스스로 빠진다
+	for (int32 i = Desired; i < Laborers.Num(); ++i)
+	{
+		if (IsValid(Laborers[i]))
+		{
+			Laborers[i]->RequestRetireAfterCycle();
+		}
+	}
+
+	// 왕복 시간은 **거리 ÷ 걷는 속도**로 정한다. 곡선에서 바로 뽑으면 62m 를 1.2초에 가게 된다.
+	const float LegTime = GetLaborerLegSeconds();
+
+	for (int32 i = 0; i < Laborers.Num(); ++i)
+	{
+		if (IsValid(Laborers[i]))
+		{
+			Laborers[i]->SetCycleDuration(LegTime);
+		}
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[BrickFactory] 잡부 %d/%d명 · 문 %d개 · 경로 %.0fcm · 한 구간 %.1f초(평속 %.0fcm/s)"),
+		Laborers.Num(), Desired, GetLaborerDoorCount(),
+		GetLaborerPathLength(), LegTime, LaborerWalkSpeed);
+
+	// 배속·운반량은 평소/홀드에 따라 다르므로 한 곳에서 같이 계산한다
+	ApplyLaborerPace(bIsInteracting);
+}
+
+float ABrickFactory::GetLaborerPathLength() const
+{
+	const float Straight = FVector::Dist2D(GetLaborerEntryPoint(), GetLaborerExitPoint());
+	return FMath::Max(100.f, Straight * PathLengthFudge);
+}
+
+float ABrickFactory::GetLaborerLegSeconds() const
+{
+	return FBrickLaborerRules::LegSeconds(GetLaborerPathLength(), LaborerWalkSpeed);
+}
+
+void ABrickFactory::ApplyLaborerPace(bool bHolding)
+{
+	// 이동 속도와 생산율을 따로 계산한다.
+	// 속도는 사람처럼 보이는 범위(걷기/뛰기)로 묶고, 곡선이 요구하는 나머지 배수는 1회 운반량이 가져간다.
+	const float SpeedMul = bHolding ? FMath::Max(1.f, HoldSpeedMultiplier) : 1.f;
+	const float ProdScale = bHolding ? HoldProductionScale : IdleProductionScale;
+
+	float CurveCycle = GetUpgradeValue(EFactoryUpgradeType::HoldProductionSpeed);
+	if (CurveCycle <= 0.f)
+	{
+		CurveCycle = BrickSpawnInterval;
+	}
+
+	const float LegTime = GetLaborerLegSeconds();
+	// 1인당 능력치 — 인원수로 나누지 않는다. 인원과 능력이 곱으로 쌓인다.
+	const int32 PerLaborerOutput = FMath::Max(1, FMath::RoundToInt(GetUpgradeValue(EFactoryUpgradeType::HoldProductionAmount)));
+	const int32 Amount = FBrickLaborerRules::HarvestPerTrip(
+		PerLaborerOutput, LegTime, CurveCycle, SpeedMul, ProdScale);
+
+	// 지면 속도에 맞춘 클립과 재생 속도 — 속도만 올리면 발이 끌리고, 클립만 올리면 제자리걸음이 된다
+	const float GroundSpeed = GetLaborerPathLength() * SpeedMul / FMath::Max(LegTime, KINDA_SMALL_NUMBER);
+	const bool bRun = (SpeedMul > 1.01f);
+	UAnimSequence* Clip = bRun
+		? BrickLaborerDefaults::ResolveOrFallback(RunAnim, BrickLaborerDefaults::Run, TEXT("RunAnim"))
+		: BrickLaborerDefaults::ResolveOrFallback(WalkAnim, BrickLaborerDefaults::Walk, TEXT("WalkAnim"));
+	UAnimSequence* CarryClip = bRun
+		? BrickLaborerDefaults::ResolveCarryOrFallback(CarryRunAnim, BrickLaborerDefaults::CarryRun, TEXT("CarryRunAnim"))
+		: BrickLaborerDefaults::ResolveCarryOrFallback(CarryWalkAnim, BrickLaborerDefaults::CarryWalk, TEXT("CarryWalkAnim"));
+	const float RefSpeed = bRun ? RunClipRefSpeed : WalkClipRefSpeed;
+	const float PlayRate = FBrickLaborerRules::ClipPlayRate(GroundSpeed, RefSpeed);
+
+	for (ABrickLaborer* Laborer : Laborers)
+	{
+		if (!IsValid(Laborer))
+		{
+			continue;
+		}
+		Laborer->SetSpeedMultiplier(SpeedMul);
+		Laborer->SetHarvestAmount(Amount);
+		Laborer->SetGait(Clip, PlayRate, GroundSpeed, CarryClip);
+	}
+}
+
+void ABrickFactory::OnLaborerEntered(int32 Amount)
+{
+	if (bIsRelocating) return;
+	// 굴뚝(BrickSpawnPoint)에서 벽돌이 튀어나오는 기존 연출이 그대로 수확이다 — 별도 적재지점을 두지 않는다
+	FVector SpawnLocation = GetActorLocation();
+	if (SpawnPoints.Num() > 0)
+	{
+		const int32 Index = FMath::RandRange(0, SpawnPoints.Num() - 1);
+		if (SpawnPoints[Index])
+		{
+			SpawnLocation = SpawnPoints[Index]->GetComponentLocation();
+		}
+	}
+
+	PulseSmokeVFX();
+	HarvestBricksAt(SpawnLocation, Amount);
+}
+
+void ABrickFactory::PulseSmokeVFX()
+{
+	if (!BrickSmokeVFX || !GetWorld() || SpawnPoints.IsEmpty())
+	{
+		return;
+	}
+
+	// 잡부가 여럿이면 매 입장마다 터뜨려 사실상 상시 분출이 된다 — 재점화에 최소 간격을 둔다
+	const float Now = GetWorld()->GetTimeSeconds();
+	const float Interval = bIsInteracting ? HoldSmokeInterval : SmokeMinIntervalSeconds;
+	if (Now - LastSmokePulseTime < FMath::Max(0.3f, Interval) - KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+	LastSmokePulseTime = Now;
+
+	if (CachedSmokeVFX.Num() != SpawnPoints.Num()) ClearSmokeVFX();
+	CachedSmokeVFX.SetNum(SpawnPoints.Num());
+	for (int32 Index = 0; Index < SpawnPoints.Num(); ++Index)
+	{
+		USceneComponent* Chimney = SpawnPoints[Index];
+		if (!IsValid(Chimney)) continue;
+		UNiagaraComponent* Smoke = CachedSmokeVFX[Index];
+		if (!IsValid(Smoke))
+		{
+			Smoke = UNiagaraFunctionLibrary::SpawnSystemAttached(
+				BrickSmokeVFX, Chimney, NAME_None, FVector::ZeroVector, FRotator::ZeroRotator,
+				EAttachLocation::SnapToTarget, false, false, ENCPoolMethod::None, false);
+			CachedSmokeVFX[Index] = Smoke;
+		}
+		if (!IsValid(Smoke)) continue;
+		Smoke->SetFloatParameter(FName("Duration"), SmokePulseSeconds);
+		Smoke->SetFloatParameter(FName("Scale"), bIsInteracting ? HoldSmokeScale : SmokePulseScale);
+		Smoke->SetVariableFloat(TEXT("User.Smoke_Particle_Life"), FMath::Max(0.1f, SmokeParticleLifetime));
+		Smoke->Activate(true);
+	}
+
+	// 짧은 분출 후 모든 굴뚝을 함께 멈춘다.
+	GetWorld()->GetTimerManager().SetTimer(
+		SmokePulseTimerHandle,
+		FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			for (UNiagaraComponent* Smoke : CachedSmokeVFX)
+			{
+				if (IsValid(Smoke)) Smoke->Deactivate();
+			}
+		}),
+		SmokePulseSeconds, false);
+}
+
+void ABrickFactory::ClearSmokeVFX()
+{
+	GetWorldTimerManager().ClearTimer(SmokePulseTimerHandle);
+	for (UNiagaraComponent* Smoke : CachedSmokeVFX)
+	{
+		if (IsValid(Smoke)) Smoke->DestroyComponent();
+	}
+	CachedSmokeVFX.Reset();
+}
+
+void ABrickFactory::NotifyLaborerRetired(ABrickLaborer* Laborer)
+{
+	Laborers.Remove(Laborer);
 }
 
 
 // Factory 업그레이드 시스템 — Count=1 단건 / Count>1 벌크. 사이드이펙트(차감/타이머/브로드캐스트)는 마지막 1회로 게이트.
 bool ABrickFactory::UpgradeFactory(EFactoryUpgradeType UpgradeType, int32 Count)
 {
-	// BrickStock 은 상태 표시 전용 슬롯 — 업그레이드 호출 자체를 차단
-	if (UpgradeType == EFactoryUpgradeType::BrickStock)
-	{
-		return false;
-	}
-
-	// 자동 카테고리는 언락되지 않았으면 업그레이드 불가
-	if ((UpgradeType == EFactoryUpgradeType::AutoCollection ||
-		 UpgradeType == EFactoryUpgradeType::AutoCollectionCapacity) &&
+	// 오프라인 수집 상한만 자동화 해금을 요구한다.
+	if (FactoryUpgradeUnlockPolicy::IsAutoUnlockType(UpgradeType) &&
 		!FactoryData.bAutoCollectionUnlocked)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] Auto collection not unlocked yet"));
@@ -467,12 +957,24 @@ bool ABrickFactory::UpgradeFactory(EFactoryUpgradeType UpgradeType, int32 Count)
 	}
 
 	// 하드 가드 — UI가 어떤 값을 넘겨도 액터가 스스로 상한(50)을 지킨다 (비용 오버플로/레벨 폭주 방지)
-	Count = FMath::Clamp(Count, 1, 50);
+	if (Count <= 0)
+	{
+		return false;
+	}
+	Count = FMath::Min(Count, GetAllowedUpgradeCount(UpgradeType));
+	if (Count <= 0)
+	{
+		return false;
+	}
 	const int32 CurrentLevel = UpgradeDataPtr->Level;
 
 	// DT 단일 진실 — 비용 곡선/상한/자원타입. 미로드 시 FFactoryUpgradeConfig 폴백(단건 경로와 동일한 곡선).
 	FFactoryCostCurve CostCurve;
-	int32 MaxLevel = 0;
+	const int32 MaxLevel = GetUpgradeMaxLevel(UpgradeType);
+	if (MaxLevel == INDEX_NONE)
+	{
+		return false;
+	}
 	EResourceType CostType = EResourceType::Money;
 
 	UTableManagerSubsystem* TableMgr = GetWorld()->GetGameInstance()->GetSubsystem<UTableManagerSubsystem>();
@@ -480,17 +982,20 @@ bool ABrickFactory::UpgradeFactory(EFactoryUpgradeType UpgradeType, int32 Count)
 	if (TableMgr && TableMgr->GetFactoryUpgradeDefinition(UpgradeType, Def))
 	{
 		CostCurve = Def.GetCostCurve();
-		MaxLevel = Def.MaxLevel;
 		CostType = Def.CostResourceType;
 	}
 	else
 	{
+		if (UpgradeType == EFactoryUpgradeType::FactoryExpansion)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] FactoryExpansion definition is missing"));
+			return false;
+		}
 		CostCurve = FFactoryUpgradeConfig::GetFallbackCostCurve(UpgradeType);
-		MaxLevel = FFactoryUpgradeConfig::GetMaxLevel(UpgradeType);
 	}
 
 	// MaxLevel 가드(0=무제한) — 잔여로 Count 클램프
-	if (MaxLevel > 0)
+	if (MaxLevel > 0 || UpgradeType == EFactoryUpgradeType::LaborerCount)
 	{
 		const int32 Remaining = MaxLevel - CurrentLevel;
 		if (Remaining <= 0)
@@ -498,6 +1003,16 @@ bool ABrickFactory::UpgradeFactory(EFactoryUpgradeType UpgradeType, int32 Count)
 			return false;
 		}
 		Count = FMath::Min(Count, Remaining);
+	}
+
+	if (UpgradeType == EFactoryUpgradeType::FactoryExpansion)
+	{
+		const FFactoryAppearanceRow* Appearance = TableMgr ? TableMgr->FindFactoryAppearance(CurrentLevel + Count) : nullptr;
+		if (!Appearance || !Appearance->Mesh.LoadSynchronous())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] Factory appearance is unavailable; purchase cancelled"));
+			return false;
+		}
 	}
 
 	// 합산 비용 — 패널 표시와 동일 곡선으로 청구해 "표시=청구" 정합
@@ -519,7 +1034,6 @@ bool ABrickFactory::UpgradeFactory(EFactoryUpgradeType UpgradeType, int32 Count)
 
 	// bShouldSave=false — 저장은 패널 OnUpgradeSuccess 의 지연 저장 1회로 통합 (홀드 10Hz 경로라 즉시 저장=히칭)
 	ResourceManager->SpendResource(CostType, TotalCost, /*bShouldSave=*/false);
-
 	// 지출 플로팅 — 홀드 10Hz 연타는 InGameLayer 스폰 지점의 배치 게이트가 합산
 	if (UUIManagerSubsystem* UIMgr = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
 	{
@@ -533,18 +1047,25 @@ bool ABrickFactory::UpgradeFactory(EFactoryUpgradeType UpgradeType, int32 Count)
 	UpgradeDataPtr->Level += Count;
 
 	// 업그레이드 값 계산
-	UpgradeDataPtr->CurrentValue = FFactoryUpgradeConfig::CalculateUpgradeValue(UpgradeType, UpgradeDataPtr->Level);
-
-	// 자동 수집 타이머 재설정 — 벌크여도 마지막 값 기준 1회
-	if (UpgradeType == EFactoryUpgradeType::AutoCollection)
-	{
-		RestartAutoCollectionTimer();
-	}
+	UpgradeDataPtr->CurrentValue = GetUpgradeValueAtLevel(UpgradeType, UpgradeDataPtr->Level);
 
 	UE_LOG(LogTemp, Log, TEXT("[BrickFactory] Upgraded %d x%d to Level %d, Value: %.2f, Cost: %lld"),
 		(int32)UpgradeType, Count, UpgradeDataPtr->Level, UpgradeDataPtr->CurrentValue, TotalCost);
 
 	UpdateProductionValues();
+
+	// 인력·배달량·왕복 주기는 강화 값에서 파생 — 홀드 연타 경로라 값이 바뀐 이 지점에서만 갱신
+	if (UpgradeType == EFactoryUpgradeType::HoldProductionAmount ||
+		UpgradeType == EFactoryUpgradeType::HoldProductionSpeed ||
+		UpgradeType == EFactoryUpgradeType::LaborerCount ||
+		UpgradeType == EFactoryUpgradeType::FactoryExpansion)
+	{
+		RefreshLaborerCrew();
+	}
+	if (UpgradeType == EFactoryUpgradeType::FactoryExpansion)
+	{
+		RefreshFactoryAppearance(true);
+	}
 
 	OnFactoryUpgraded.Broadcast(UpgradeType);
 	return true;
@@ -565,31 +1086,31 @@ bool ABrickFactory::CanUpgradeAny() const
 	{
 		const EFactoryUpgradeType Type = Pair.Key;
 		const int32 Level = Pair.Value.Level;
+		if (GetAllowedUpgradeCount(Type) <= 0)
+		{
+			continue;
+		}
 
-		if ((Type == EFactoryUpgradeType::AutoCollection ||
-			 Type == EFactoryUpgradeType::AutoCollectionCapacity) &&
+		if (FactoryUpgradeUnlockPolicy::IsAutoUnlockType(Type) &&
 			!FactoryData.bAutoCollectionUnlocked)
 		{
 			continue;
 		}
 
-		// BrickStock은 업그레이드 대상 아님
-		if (Type == EFactoryUpgradeType::BrickStock)
-		{
-			continue;
-		}
-
 		FFactoryUpgradeDefinition Def;
-		int32 MaxLevel = FFactoryUpgradeConfig::GetMaxLevel(Type);
+		const int32 MaxLevel = GetUpgradeMaxLevel(Type);
 		int64 Cost = FFactoryUpgradeConfig::CalculateUpgradeCost(Type, Level);
 
 		if (TableMgr && TableMgr->GetFactoryUpgradeDefinition(Type, Def))
 		{
-			MaxLevel = Def.MaxLevel;
 			Cost = Def.CalculateUpgradeCost(Level);
 		}
+		else if (Type == EFactoryUpgradeType::FactoryExpansion)
+		{
+			continue;
+		}
 
-		if (MaxLevel > 0 && Level >= MaxLevel)
+		if (MaxLevel == INDEX_NONE || ((MaxLevel > 0 || Type == EFactoryUpgradeType::LaborerCount) && Level >= MaxLevel))
 		{
 			continue;
 		}
@@ -608,10 +1129,139 @@ int32 ABrickFactory::GetUpgradeLevel(EFactoryUpgradeType UpgradeType) const
 	return UpgradeDataPtr ? UpgradeDataPtr->Level : 0;
 }
 
+int32 ABrickFactory::GetUpgradeMaxLevel(EFactoryUpgradeType UpgradeType) const
+{
+	const UGameInstance* FactoryGameInstance = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = FactoryGameInstance
+		? FactoryGameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	FFactoryUpgradeDefinition Definition;
+	int32 MaxLevel = FFactoryUpgradeConfig::GetMaxLevel(UpgradeType);
+	if (TableMgr && TableMgr->GetFactoryUpgradeDefinition(UpgradeType, Definition))
+	{
+		MaxLevel = Definition.MaxLevel;
+	}
+	else if (UpgradeType == EFactoryUpgradeType::FactoryExpansion)
+	{
+		return INDEX_NONE;
+	}
+	if (UpgradeType == EFactoryUpgradeType::LaborerCount)
+	{
+		const int32 Capacity = GetLaborerCapacity();
+		if (Capacity <= 0)
+		{
+			return INDEX_NONE;
+		}
+		const int32 CapacityLevel = Capacity - 1;
+		MaxLevel = MaxLevel > 0 ? FMath::Min(MaxLevel, CapacityLevel) : CapacityLevel;
+	}
+	return MaxLevel;
+}
+
+int32 ABrickFactory::GetAllowedUpgradeCount(EFactoryUpgradeType UpgradeType) const
+{
+	if (!FactoryData.UpgradeData.Contains(UpgradeType)
+		|| (FactoryUpgradeUnlockPolicy::IsAutoUnlockType(UpgradeType) && !FactoryData.bAutoCollectionUnlocked))
+	{
+		return 0;
+	}
+
+	const int32 CurrentLevel = GetUpgradeLevel(UpgradeType);
+	const int32 MaxLevel = GetUpgradeMaxLevel(UpgradeType);
+	if (MaxLevel == INDEX_NONE)
+	{
+		return 0;
+	}
+	int32 Allowed = MaxLevel > 0 || UpgradeType == EFactoryUpgradeType::LaborerCount
+		? FMath::Clamp(MaxLevel - CurrentLevel, 0, 50) : 50;
+
+	const UGameInstance* GameInstance = GetGameInstance();
+	const UMissionManagerSubsystem* Missions = GameInstance
+		? GameInstance->GetSubsystem<UMissionManagerSubsystem>() : nullptr;
+	if (!Missions || !Missions->HasActiveMission())
+	{
+		return Allowed;
+	}
+
+	switch (Missions->GetActiveConditionType())
+	{
+	case EMissionConditionType::CollectBricks:
+	{
+		if (Missions->GetActiveMissionID() != TEXT("M1_CollectBricks"))
+		{
+			break;
+		}
+		const FFactorySaveData InitialData;
+		const int32 InitialExpansionLevel = InitialData.UpgradeData.FindChecked(EFactoryUpgradeType::FactoryExpansion).Level;
+		const int32 InitialCapacity = GetLaborerCapacityAtLevel(InitialExpansionLevel);
+		if (UpgradeType == EFactoryUpgradeType::LaborerCount)
+		{
+			Allowed = FMath::Min(Allowed, FMath::Max(0, InitialCapacity - GetDesiredLaborerCount()));
+		}
+		else if (UpgradeType == EFactoryUpgradeType::FactoryExpansion)
+		{
+			Allowed = InitialCapacity > 0 && GetDesiredLaborerCount() >= InitialCapacity
+				? FMath::Min(Allowed, FMath::Max(0, InitialExpansionLevel + 1 - CurrentLevel)) : 0;
+		}
+		else
+		{
+			Allowed = 0;
+		}
+		break;
+	}
+	case EMissionConditionType::UpgradeFactoryStats:
+	{
+		if (Missions->GetActiveMissionID() != TEXT("M2_UpgradeFactory"))
+		{
+			break;
+		}
+		FMissionTable Mission;
+		if (!Missions->GetActiveMission(Mission))
+		{
+			return 0;
+		}
+		if (UpgradeType == EFactoryUpgradeType::HoldProductionSpeed
+			|| UpgradeType == EFactoryUpgradeType::HoldProductionAmount)
+		{
+			const int32 Target = FTutorialDerivedMissionRules::ResolveTarget(Mission.ConditionAmount);
+			Allowed = FMath::Min(Allowed, FMath::Max(0, Target - CurrentLevel));
+		}
+		else
+		{
+			Allowed = 0;
+		}
+		break;
+	}
+	default:
+		break;
+	}
+	return Allowed;
+}
+
 float ABrickFactory::GetUpgradeValue(EFactoryUpgradeType UpgradeType) const
 {
 	const FFactoryUpgradeData* UpgradeDataPtr = FactoryData.UpgradeData.Find(UpgradeType);
 	return UpgradeDataPtr ? UpgradeDataPtr->CurrentValue : 0.0f;
+}
+
+float ABrickFactory::GetUpgradeValueAtLevel(EFactoryUpgradeType UpgradeType, int32 Level) const
+{
+	if (UpgradeType != EFactoryUpgradeType::FactoryExpansion)
+	{
+		return FFactoryUpgradeConfig::CalculateUpgradeValue(UpgradeType, Level);
+	}
+	UGameInstance* GameInstance = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	FFactoryUpgradeDefinition Definition;
+	if (TableMgr && TableMgr->GetFactoryUpgradeDefinition(UpgradeType, Definition))
+	{
+		const FFactoryAppearanceRow* Appearance = TableMgr->FindFactoryAppearance(FMath::Min(Level, Definition.MaxLevel));
+		if (Appearance)
+		{
+			return static_cast<float>(Appearance->LaborerCapacity);
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] Missing factory appearance value at level %d"), Level);
+	return 0.f;
 }
 
 void ABrickFactory::UnlockAutoCollection()
@@ -629,13 +1279,11 @@ void ABrickFactory::ApplyAutoCollectionUnlock(bool bAllowCelebration)
 	FactoryData.bAutoCollectionUnlocked = true;
 	bPendingAutoUnlockCelebration = bAllowCelebration;
 
-	RestartAutoCollectionTimer();
-
 	// 열려 있는 공장 패널이 잠금 슬롯을 즉시 갱신하도록
-	OnFactoryUpgraded.Broadcast(EFactoryUpgradeType::AutoCollection);
+	OnFactoryUpgraded.Broadcast(EFactoryUpgradeType::LaborerCount);
 
-	UE_LOG(LogTemp, Log, TEXT("[BrickFactory] Auto collection unlocked (interval %.3fs)"),
-		FMath::Max(MinAutoCollectionInterval, GetUpgradeValue(EFactoryUpgradeType::AutoCollection)));
+	UE_LOG(LogTemp, Log, TEXT("[BrickFactory] 자동(오프라인) 카테고리 해금 — 획득 상한 %d개"),
+		GetAutoCollectionCapacity());
 }
 
 bool ABrickFactory::TryGetAutoUnlockRequiredHQLevel(int32& OutRequiredHQLevel) const
@@ -699,96 +1347,78 @@ bool ABrickFactory::ConsumeAutoUnlockCelebration()
 	return bPending;
 }
 
-void ABrickFactory::RestartAutoCollectionTimer()
-{
-	UWorld* TimerWorld = GetWorld();
-	if (!TimerWorld)
-	{
-		return;
-	}
-
-	FTimerManager& TimerMgr = TimerWorld->GetTimerManager();
-	TimerMgr.ClearTimer(AutoCollectionTimerHandle);
-
-	if (!FactoryData.bAutoCollectionUnlocked)
-	{
-		return;
-	}
-
-	// 강화 곡선 바닥이 0.001초라 하한을 여기서 강제하지 않으면 초당 1000틱 타이머가 된다
-	const float Interval = FMath::Max(MinAutoCollectionInterval, GetUpgradeValue(EFactoryUpgradeType::AutoCollection));
-
-	TimerMgr.SetTimer(AutoCollectionTimerHandle, this, &ABrickFactory::AutoCollectResources, Interval, true);
-}
-
 bool ABrickFactory::IsAutoCollectionUnlocked() const
 {
 	return FactoryData.bAutoCollectionUnlocked;
 }
 
-int64 ABrickFactory::GetAutoCollectedAmount() const
+int32 ABrickFactory::GetAutoCollectionCapacity() const
 {
-	return FactoryData.AutoCollectedAmount;
+	const int32 Capacity = FMath::RoundToInt(GetUpgradeValue(EFactoryUpgradeType::AutoCollectionCapacity));
+	return Capacity > 0 ? Capacity : 100;
 }
 
-void ABrickFactory::CollectAutoResources()
+float ABrickFactory::GetOfflineBricksPerSecond() const
 {
-	if (FactoryData.AutoCollectedAmount <= 0)
+	// 자리를 비운 동안에도 잡부는 평소 속도로 일했다고 본다 — 적립 속도를 따로 강화하지 않는 이유.
+	float CurveCycle = GetUpgradeValue(EFactoryUpgradeType::HoldProductionSpeed);
+	if (CurveCycle <= 0.f)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] No auto resources to collect"));
-		return;
+		CurveCycle = BrickSpawnInterval;
 	}
 
-	// 실제 리소스 지급 (수동 수집이므로 저장 O)
-	if (UResourceItemManager* ResourceMgr = GetWorld()->GetGameInstance()->GetSubsystem<UResourceItemManager>())
-	{
-		ResourceMgr->StoreResource(EResourceType::Brick, FactoryData.AutoCollectedAmount, true);
-		UE_LOG(LogTemp, Log, TEXT("[BrickFactory] Collected %lld auto resources and saved"), FactoryData.AutoCollectedAmount);
-	}
+	const int32 Count = GetDesiredLaborerCount();
+	const int32 PerLaborerOutput = FMath::Max(1, FMath::RoundToInt(GetUpgradeValue(EFactoryUpgradeType::HoldProductionAmount)));
+	const float LegTime = GetLaborerLegSeconds();
+	const int32 PerTrip = FBrickLaborerRules::HarvestPerTrip(
+		PerLaborerOutput, LegTime, CurveCycle, /*SpeedMultiplier=*/1.f, IdleProductionScale);
 
-	FactoryData.AutoCollectedAmount = 0;
+	return FBrickLaborerRules::BricksPerSecond(PerTrip, Count, LegTime, 1.f);
 }
 
-void ABrickFactory::AutoCollectResources()
+void ABrickFactory::SettleOfflineBricks(float /*TotalGained*/, float OfflineSeconds)
 {
+	// 관찰용 — 액터가 스폰되기 전에 정산이 돌면 이 로그가 아예 안 찍힌다(오프라인 벽돌 유실 판정 단서)
+	UE_LOG(LogTemp, Verbose, TEXT("[BrickFactory] 오프라인 정산 수신 (액터 생존) %.0f초"), OfflineSeconds);
+
 	if (!FactoryData.bAutoCollectionUnlocked)
 	{
 		return;
 	}
 
-	// 최대 용량 확인
-	int32 MaxCapacity = FMath::RoundToInt(GetUpgradeValue(EFactoryUpgradeType::AutoCollectionCapacity));
-	if (MaxCapacity <= 0)
-	{
-		MaxCapacity = 100; // 기본 용량
-	}
-
-	if (FactoryData.AutoCollectedAmount >= MaxCapacity)
+	const int32 MaxGain = GetAutoCollectionCapacity();
+	const int64 Gained = FactoryOfflineGainPolicy::SettledBricks(
+		GetOfflineBricksPerSecond(), OfflineSeconds, MaxGain,
+		USaveLoadManager::MinOfflineSettleSeconds);
+	if (Gained <= 0)
 	{
 		return;
 	}
 
-	// 생산량만큼 자동 수집
-	int32 ProductionAmount = FMath::RoundToInt(GetUpgradeValue(EFactoryUpgradeType::HoldProductionAmount));
-	if (ProductionAmount <= 0)
+	UGameInstance* GI = GetGameInstance();
+	UResourceItemManager* ResourceMgr = GI ? GI->GetSubsystem<UResourceItemManager>() : nullptr;
+	if (!ResourceMgr)
 	{
-		ProductionAmount = 1;
+		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] 오프라인 벽돌 %lld개 지급 실패: ResourceItemManager 없음"), Gained);
+		return;
 	}
 
-	FactoryData.AutoCollectedAmount = FMath::Min(FactoryData.AutoCollectedAmount + ProductionAmount, MaxCapacity);
+	ResourceMgr->StoreResource(EResourceType::Brick, Gained, true);
 
-	// 가득 참 '전환' 1회 알림 (이미 가득이면 상단 early-return 이라 여기 도달 = 방금 가득)
-	if (FactoryData.AutoCollectedAmount >= MaxCapacity)
+	// 수령 시점이 아니라 정산 시점에 보고한다 — 수동 수령 단계가 없어졌으므로
+	if (UQuestSubsystem* QuestMgr = GI->GetSubsystem<UQuestSubsystem>())
 	{
-		if (UUIManagerSubsystem* UIMgr = GetWorld()->GetGameInstance()->GetSubsystem<UUIManagerSubsystem>())
-		{
-			UIMgr->ShowNotification(
-				NSLOCTEXT("Factory", "AutoCollectFull", "벽돌 공장 보관함이 가득 찼습니다"),
-				3.0f,
-				ENotificationType::Warning);
-		}
-		PlayBounce();
+		QuestMgr->ReportCounter(EQuestCounter::BrickCollect, Gained);
 	}
+
+	// 정산 모달이 벽돌 행을 그릴 수 있게 보고에 싣는다 (보류→UI 준비 후 1회 flush)
+	if (USaveLoadManager* SaveMgr = GI->GetSubsystem<USaveLoadManager>())
+	{
+		SaveMgr->AddPendingOfflineBrickGain(Gained);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[BrickFactory] 오프라인 %.0f초 · 초당 %.2f개 · 지급 %lld (상한 %d)"),
+		OfflineSeconds, GetOfflineBricksPerSecond(), Gained, MaxGain);
 }
 
 void ABrickFactory::UpdateProductionValues()
@@ -799,26 +1429,222 @@ void ABrickFactory::UpdateProductionValues()
 		EFactoryUpgradeType Type = Pair.Key;
 		FFactoryUpgradeData& Data = Pair.Value;
 
-		Data.CurrentValue = FFactoryUpgradeConfig::CalculateUpgradeValue(Type, Data.Level);
+		Data.CurrentValue = GetUpgradeValueAtLevel(Type, Data.Level);
 	}
 }
 
 FFactorySaveData ABrickFactory::GetFactoryData() const
 {
-	return FactoryData;
+	FFactorySaveData Saved = FactoryData;
+	Saved.PlacementTransform = bIsRelocating ? RelocationOriginalTransform : GetActorTransform();
+	return Saved;
 }
 
 void ABrickFactory::SetFactoryData(const FFactorySaveData& InData)
 {
 	FactoryData = InData;
+	if (!FactoryData.OwningPlotId.IsNone())
+	{
+		SetActorTransform(FactoryData.PlacementTransform);
+	}
 	UpdateProductionValues();
 
 	// 로드된 세이브가 이미 HQ 조건을 넘겼는데 잠겨 있으면 조용히 해금
+	if (UpgradeEffect) UpgradeEffect->Cancel();
+	RefreshFactoryAppearance(false);
 	EvaluateAutoCollectionUnlock(false);
 
-	RestartAutoCollectionTimer();
+	// 잡부 수는 저장하지 않는다 — 로드된 강화 레벨에서 매번 다시 세운다
+	RefreshLaborerCrew();
+	if (!FactoryData.OwningPlotId.IsNone() && GetWorld())
+	{
+		for (TActorIterator<AVacantPlotDressingManager> It(GetWorld()); It; ++It)
+		{
+			It->RefreshAllPlots();
+		}
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("[BrickFactory] Factory data loaded for %s"), *FactoryID.ToString());
+}
+
+void ABrickFactory::ReCalcBoxExtent() const
+{
+	if (!MainMeshComponent || !MainMeshComponent->GetStaticMesh() || !BoxComponent)
+	{
+		return;
+	}
+	const FBox MeshBounds = MainMeshComponent->GetStaticMesh()->GetBoundingBox();
+	const FBox RootBounds = MeshBounds.TransformBy(MainMeshComponent->GetRelativeTransform());
+	const FVector Padding(FMath::Max(0.f, BoundGap * 100.f));
+	const FVector2D ReservedHalfExtent = GetPlacementFootprintHalfExtent(false);
+	const FVector ReservedCenter = GetActorTransform().InverseTransformPosition(GetPlacementFootprintCenter());
+	const FVector BoxScale = BoxComponent->GetComponentScale().GetAbs();
+	BoxComponent->SetRelativeLocation(FVector(ReservedCenter.X, ReservedCenter.Y, RootBounds.GetCenter().Z));
+	BoxComponent->SetRelativeRotation(FRotator::ZeroRotator);
+	BoxComponent->SetBoxExtent(FVector(
+		ReservedHalfExtent.X / FMath::Max(UE_DOUBLE_SMALL_NUMBER, BoxScale.X),
+		ReservedHalfExtent.Y / FMath::Max(UE_DOUBLE_SMALL_NUMBER, BoxScale.Y),
+		(RootBounds.GetExtent().Z + Padding.Z) / FMath::Max(UE_DOUBLE_SMALL_NUMBER, BoxScale.Z)));
+	// 공유(아키타입) 바디셋업에서 갈라진 뒤 SetBoxExtent 는 물리 모양을 옛 크기로 다시 만든다 — 트레이스가 새 크기를 보게 재생성.
+	if (BoxComponent->IsPhysicsStateCreated())
+	{
+		BoxComponent->RecreatePhysicsState();
+	}
+	if (NavBlocker && NavBlocker->GetAttachParent())
+	{
+		NavBlocker->SetRelativeLocation(MeshBounds.GetCenter());
+		NavBlocker->SetRelativeRotation(FRotator::ZeroRotator);
+		NavBlocker->SetBoxExtent(MeshBounds.GetExtent() + Padding);
+	}
+	if (ReCalcBoxExtentDelegate) ReCalcBoxExtentDelegate->Broadcast();
+}
+
+void ABrickFactory::UpdateAppearanceTransform(float Pulse)
+{
+	if (!MainMeshComponent) return;
+	const float Scale = FactoryScale * Pulse;
+	// 외형의 로컬 원점이 치우쳐 있어도 지면의 예약 중심을 기준으로 확대/축소한다.
+	const FVector Anchor(PlacementFootprintOffset.X, PlacementFootprintOffset.Y, 0.f);
+	MainMeshComponent->SetRelativeLocation(Anchor * (1.f - Scale));
+	MainMeshComponent->SetRelativeScale3D(FVector(Scale));
+}
+
+void ABrickFactory::RefreshFactoryAppearance(bool bAnimate)
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	const UTableManagerSubsystem* TableMgr = GameInstance ? GameInstance->GetSubsystem<UTableManagerSubsystem>() : nullptr;
+	const int32 DesiredLevel = GetUpgradeLevel(EFactoryUpgradeType::FactoryExpansion);
+	const FFactoryAppearanceRow* Appearance = TableMgr ? TableMgr->FindFactoryAppearance(DesiredLevel) : nullptr;
+	if (!Appearance || !MainMeshComponent)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] Missing factory appearance at level %d"), DesiredLevel);
+		return;
+	}
+	if (bAnimate && UpgradeEffect && UpgradeEffect->IsPlaying())
+	{
+		// 한 연출의 교체 대상을 고정한다. 이후 구매는 종료 시 최신 레벨 하나로 합친다.
+		return;
+	}
+	UStaticMesh* TargetMesh = Appearance->Mesh.LoadSynchronous();
+	if (!TargetMesh) return;
+	if (bAnimate && bAppearanceInitialized && DesiredLevel == CurrentAppearanceLevel) return;
+
+	PendingAppearanceLevel = DesiredLevel;
+	PendingAppearanceMesh = TargetMesh;
+	if (bAnimate && bAppearanceInitialized && UpgradeEffect)
+	{
+		FBox WrapBounds = TargetMesh->GetBoundingBox();
+		if (UStaticMesh* CurrentMesh = MainMeshComponent->GetStaticMesh())
+		{
+			WrapBounds += CurrentMesh->GetBoundingBox();
+		}
+		if (UpgradeEffect->Play(MainMeshComponent, WrapBounds))
+		{
+			PlayUpgradeSound(TEXT("Factory_UpgradeWrap"));
+			return;
+		}
+	}
+	ApplyPendingFactoryAppearance();
+}
+
+void ABrickFactory::ApplyPendingFactoryAppearance()
+{
+	if (!PendingAppearanceMesh || !MainMeshComponent) return;
+	MainMeshComponent->SetStaticMesh(PendingAppearanceMesh);
+	MainMeshComponent->EmptyOverrideMaterials();
+	CurrentAppearanceLevel = PendingAppearanceLevel;
+	bAppearanceInitialized = true;
+	PendingAppearanceMesh = nullptr;
+	RebuildAppearanceSpawnPoints();
+	ReCalcBoxExtent();
+	for (ABrickLaborer* Laborer : Laborers)
+	{
+		if (!IsValid(Laborer)) continue;
+		Laborer->SetCycleDuration(GetLaborerLegSeconds());
+		Laborer->RefreshPath();
+	}
+	if (!Laborers.IsEmpty()) ApplyLaborerPace(bIsInteracting);
+	if (BodyMID)
+	{
+		SetupBodyNightEmissive();
+		BuildNightLights();
+		ApplyNightVisibility(bLightVisible);
+	}
+	if (UpgradeEffect && UpgradeEffect->IsPlaying())
+	{
+		PlayUpgradeSound(TEXT("Factory_UpgradeConceal"));
+	}
+}
+
+void ABrickFactory::RebuildAppearanceSpawnPoints()
+{
+	ClearSmokeVFX();
+	UStaticMesh* BodyMesh = MainMeshComponent ? MainMeshComponent->GetStaticMesh() : nullptr;
+	if (!BodyMesh) return;
+	TArray<FName> SocketNames;
+	for (const UStaticMeshSocket* MeshSocket : BodyMesh->Sockets)
+	{
+		if (MeshSocket && MeshSocket->SocketName.ToString().StartsWith(TEXT("BrickSpawnPoint")))
+		{
+			SocketNames.Add(MeshSocket->SocketName);
+		}
+	}
+	SocketNames.Sort(FNameLexicalLess());
+	SpawnPoints.Reset();
+	for (int32 Index = 0; Index < SocketNames.Num(); ++Index)
+	{
+		if (!AppearanceSpawnPoints.IsValidIndex(Index))
+		{
+			USceneComponent* Point = NewObject<USceneComponent>(this);
+			Point->SetupAttachment(MainMeshComponent);
+			Point->SetMobility(EComponentMobility::Movable);
+			Point->RegisterComponent();
+			AppearanceSpawnPoints.Add(Point);
+		}
+		USceneComponent* Point = AppearanceSpawnPoints[Index];
+		Point->AttachToComponent(MainMeshComponent, FAttachmentTransformRules::SnapToTargetNotIncludingScale, SocketNames[Index]);
+		Point->SetRelativeTransform(FTransform::Identity);
+		// 같은 상대 변환이어도 교체된 메시의 소켓 위치는 다시 계산해야 한다.
+		Point->UpdateComponentToWorld();
+		SpawnPoints.Add(Point);
+	}
+	if (SpawnPoints.IsEmpty())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[BrickFactory] No chimney sockets on %s"), *GetNameSafe(BodyMesh));
+	}
+}
+
+void ABrickFactory::HandleUpgradeRevealed()
+{
+	if (!SpawnPoints.IsEmpty())
+	{
+		LastSmokePulseTime = -1000.f;
+		PulseSmokeVFX();
+	}
+	PlayUpgradeSound(TEXT("Factory_UpgradeReveal"));
+}
+
+void ABrickFactory::HandleUpgradeEffectFinished()
+{
+	if (GetUpgradeLevel(EFactoryUpgradeType::FactoryExpansion) != CurrentAppearanceLevel)
+	{
+		RefreshFactoryAppearance(true);
+	}
+}
+
+void ABrickFactory::PlayUpgradeSound(FName SoundId)
+{
+	UGameInstance* GameInstance = GetGameInstance();
+	USoundManagerSubsystem* SoundMgr = GameInstance ? GameInstance->GetSubsystem<USoundManagerSubsystem>() : nullptr;
+	if (!SoundMgr) return;
+	bool bFound = false;
+	const FGameSFXTable SoundData = SoundMgr->GetGameSFXData(SoundId, bFound);
+	if (!bFound || SoundData.Sound.IsNull()) return;
+	if (USoundBase* Sound = SoundData.Sound.LoadSynchronous())
+	{
+		UGameplayStatics::PlaySoundAtLocation(GetWorld(), Sound, GetActorLocation(),
+			SoundMgr->GetFinalVolume(ESoundCategory::SFX, SoundData.VolumeMultiplier), SoundData.PitchMultiplier);
+	}
 }
 
 void ABrickFactory::PlayBounce()
@@ -853,7 +1679,7 @@ void ABrickFactory::Wooble_TimelineUpdate(float Value)
 	float Pulse = 1.0f + (SineWave * BounceIntensity);
 
 	// 모든 축에 동일하게 적용 (균등 확대/축소)
-	MainMeshComponent->SetRelativeScale3D(FVector(Pulse));
+	UpdateAppearanceTransform(Pulse);
 }
 
 void ABrickFactory::Wooble_TimelineFinished()
@@ -861,64 +1687,98 @@ void ABrickFactory::Wooble_TimelineFinished()
 	// Timeline 종료 시 Scale을 원래대로 복원
 	if (MainMeshComponent)
 	{
-		MainMeshComponent->SetRelativeScale3D(FVector(1.0f));
+		UpdateAppearanceTransform();
 	}
 	SetActorTickEnabled(false);
 }
 
+void ABrickFactory::TickHoldSmoke()
+{
+	if (!bIsInteracting || SpawnPoints.IsEmpty()) return;
+	PulseSmokeVFX();
+}
+
 void ABrickFactory::StartSmokeVFX()
 {
-	if (!BrickSmokeVFX)
-	{
-		return;
-	}
-
-	// 스폰 위치 결정
-	FVector SpawnLocation = GetActorLocation();
-	if (SpawnPoints.Num() > 0 && SpawnPoints[0])
-	{
-		SpawnLocation = SpawnPoints[0]->GetComponentLocation();
-	}
-
-	if (!CachedSmokeVFX)
-	{
-		CachedSmokeVFX = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
-			GetWorld(),
-			BrickSmokeVFX,
-			SpawnLocation,
-			FRotator::ZeroRotator,
-			FVector(1.0f),
-			false,
-			true,
-			ENCPoolMethod::None,
-			true
-		);
-
-		if (CachedSmokeVFX)
-		{
-			CachedSmokeVFX->SetFloatParameter(FName("Duration"), 1.0f);
-			CachedSmokeVFX->SetFloatParameter(FName("Scale"), 10.0f);
-		}
-	}
-	else
-	{
-		CachedSmokeVFX->SetWorldLocation(SpawnLocation);
-		CachedSmokeVFX->Activate(true);
-	}
-
-	StartSteamSound(SpawnLocation);
-	StartAmbienceSound(SpawnLocation);
+	LastSmokePulseTime = -1000.f;
+	TickHoldSmoke();
+	GetWorldTimerManager().SetTimer(HoldSmokeTimerHandle, this, &ABrickFactory::TickHoldSmoke,
+		FMath::Max(0.3f, HoldSmokeInterval), true);
+	const FVector SoundLocation = SpawnPoints.Num() > 0 && SpawnPoints[0]
+		? SpawnPoints[0]->GetComponentLocation() : GetActorLocation();
+	StartSteamSound(SoundLocation);
+	StartAmbienceSound(SoundLocation);
 }
 
 void ABrickFactory::StopSmokeVFX()
 {
-	if (CachedSmokeVFX)
+	GetWorldTimerManager().ClearTimer(HoldSmokeTimerHandle);
+	GetWorldTimerManager().ClearTimer(SmokePulseTimerHandle);
+	for (UNiagaraComponent* Smoke : CachedSmokeVFX)
 	{
-		CachedSmokeVFX->Deactivate();
+		if (IsValid(Smoke)) Smoke->Deactivate();
 	}
-
 	StopSteamSound();
 	StopAmbienceSound();
+}
+
+void ABrickFactory::StartBoostStreaks()
+{
+	if (BoostStreakMaterial.IsNull() || BoostStreakMesh.IsNull() || !MainMeshComponent) return;
+	UMaterialInterface* StreakMaterial = BoostStreakMaterial.LoadSynchronous();
+	if (!StreakMaterial) return;
+
+	GetWorldTimerManager().ClearTimer(BoostStreakHideTimerHandle);
+	if (!BoostStreakISM)
+	{
+		UStaticMesh* PlaneMesh = BoostStreakMesh.LoadSynchronous();
+		if (!PlaneMesh) return;
+		BoostStreakISM = NewObject<UInstancedStaticMeshComponent>(this, TEXT("BoostStreakISM"));
+		BoostStreakISM->SetupAttachment(RootComponent);
+		BoostStreakISM->SetMobility(EComponentMobility::Movable);
+		BoostStreakISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		BoostStreakISM->SetCanEverAffectNavigation(false);
+		BoostStreakISM->SetCastShadow(false);
+		BoostStreakISM->bUseAsOccluder = false;
+		BoostStreakISM->SetStaticMesh(PlaneMesh);
+		BoostStreakISM->RegisterComponent();
+		BoostStreakMID = UMaterialInstanceDynamic::Create(StreakMaterial, this);
+		BoostStreakISM->SetMaterial(0, BoostStreakMID);
+	}
+
+	// 본체 메시 경계만 사용한다. 굴뚝 스폰점/충돌 박스/발광 인스턴스는 범위에 섞지 않는다.
+	const FBoxSphereBounds MeshBounds = MainMeshComponent->Bounds;
+	const FVector HalfSize = MeshBounds.BoxExtent;
+	const FVector Center = MeshBounds.Origin;
+	const float Height = FMath::Max(100.f, BoostStreakTravelHeight);
+	const int32 Count = FMath::Clamp(BoostStreakCount, 4, 16);
+	BoostStreakISM->ClearInstances();
+	for (int32 Index = 0; Index < Count; ++Index)
+	{
+		const float Angle = 2.f * PI * (Index + 0.35f) / Count;
+		const FVector Radial(FMath::Cos(Angle), FMath::Sin(Angle), 0.f);
+		const FVector Tangent(-Radial.Y, Radial.X, 0.f);
+		const float EdgeScale = 1.f / FMath::Max(FMath::Abs(Radial.X), FMath::Abs(Radial.Y));
+		const FVector Position = Center + FVector(Radial.X * (HalfSize.X * EdgeScale + 100.f),
+			Radial.Y * (HalfSize.Y * EdgeScale + 100.f), -HalfSize.Z + 140.f + Height * 0.5f);
+		const FQuat Rotation = FRotationMatrix::MakeFromXY(Tangent, FVector::UpVector).ToQuat();
+		BoostStreakISM->AddInstance(FTransform(Rotation, Position,
+			FVector(FMath::Max(1.f, BoostStreakWidth) / 100.f, Height / 100.f, 1.f)), true);
+	}
+	BoostStreakMID->SetScalarParameterValue(TEXT("StartTime"), GetWorld()->GetTimeSeconds());
+	BoostStreakMID->SetScalarParameterValue(TEXT("StopTime"), -1.f);
+	BoostStreakISM->SetVisibility(true);
+}
+
+void ABrickFactory::StopBoostStreaks()
+{
+	if (!BoostStreakISM || !BoostStreakMID) return;
+	BoostStreakMID->SetScalarParameterValue(TEXT("StopTime"), GetWorld()->GetTimeSeconds());
+	GetWorldTimerManager().SetTimer(BoostStreakHideTimerHandle,
+		FTimerDelegate::CreateWeakLambda(this, [this]()
+		{
+			if (BoostStreakISM) BoostStreakISM->SetVisibility(false);
+		}), 0.24f, false);
 }
 
 void ABrickFactory::StartSteamSound(const FVector& Location)

@@ -14,7 +14,7 @@ class USkinInfoWidget;
 /**
  * Widget representing a single building skin card
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UBuildingSkinCardWidget : public UCommonButtonBase
 {
 	GENERATED_BODY()

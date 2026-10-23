@@ -3,13 +3,17 @@
 #include "UI/Panel/SettingsPanelWidget.h"
 
 #include "Components/Button.h"
+#include "Components/Border.h"
 #include "Components/EditableTextBox.h"
+#include "Components/Image.h"
 #include "Components/TextBlock.h"
 #include "Components/WidgetSwitcher.h"
+#include "CommonTextBlock.h"
 #include "Groups/CommonButtonGroupBase.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Materials/MaterialInstanceDynamic.h"
 
 #include "Data/GameAudioSettings.h"
 #include "Manager/PlayFabManagerSubsystem.h"
@@ -21,6 +25,7 @@
 #include "UI/Element/Buttons/ButtonWidget.h"
 #include "UI/Element/Buttons/CloseButtonWidget.h"
 #include "UI/Element/Buttons/IconWithButtonWidget.h"
+#include "UI/Element/Common/ModalFrameWidget.h"
 #include "UI/Element/Settings/SettingSegmentRowWidget.h"
 #include "UI/Element/Settings/SettingSliderRowWidget.h"
 #include "UI/Element/Settings/SettingToggleRowWidget.h"
@@ -28,14 +33,18 @@
 void USettingsPanelWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
+	if (ModalFrame)
+	{
+		ModalFrame->SetTitle(FText::FromString(TEXT("설정")));
+	}
 
 	if (BackgroundBtn)
 	{
 		BackgroundBtn->OnClicked.AddDynamic(this, &USettingsPanelWidget::OnBackgroundClicked);
 	}
-	if (UIE_CloseButton)
+	if (UCloseButtonWidget* PanelCloseButton = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
 	{
-		UIE_CloseButton->OnCloseClicked.AddDynamic(this, &USettingsPanelWidget::OnCloseClicked);
+		PanelCloseButton->OnCloseClicked.AddDynamic(this, &USettingsPanelWidget::OnCloseClicked);
 	}
 
 	InitTabs();
@@ -70,6 +79,7 @@ void USettingsPanelWidget::NativeConstruct()
 	if (QualityRow) QualityRow->OnSegmentChanged.AddUObject(this, &USettingsPanelWidget::HandleQualityChanged);
 	if (FpsRow) FpsRow->OnSegmentChanged.AddUObject(this, &USettingsPanelWidget::HandleFpsChanged);
 	if (ReduceMotionRow) ReduceMotionRow->OnToggleChanged.AddUObject(this, &USettingsPanelWidget::HandleReduceMotionToggled);
+	if (HandOpenBoxRow) HandOpenBoxRow->OnToggleChanged.AddUObject(this, &USettingsPanelWidget::HandleHandOpenBoxToggled);
 
 	// 계정 버튼 (CommonButtonBase 계열 = 네이티브 OnClicked())
 	if (NickChangeBtn) NickChangeBtn->OnClicked().AddUObject(this, &USettingsPanelWidget::HandleNickChangeClicked);
@@ -82,14 +92,17 @@ void USettingsPanelWidget::NativeConstruct()
 	{
 		FString Version;
 		GConfig->GetString(TEXT("/Script/EngineSettings.GeneralProjectSettings"), TEXT("ProjectVersion"), Version, GGameIni);
-		VersionText->SetText(FText::FromString(FString::Printf(TEXT("v%s"), *Version)));
+		VersionText->SetText(FText::FromString(FString::Printf(TEXT("버전 %s"), *Version)));
 	}
 }
 
 void USettingsPanelWidget::NativeDestruct()
 {
 	if (BackgroundBtn) BackgroundBtn->OnClicked.RemoveDynamic(this, &USettingsPanelWidget::OnBackgroundClicked);
-	if (UIE_CloseButton) UIE_CloseButton->OnCloseClicked.RemoveDynamic(this, &USettingsPanelWidget::OnCloseClicked);
+	if (UCloseButtonWidget* PanelCloseButton = ModalFrame ? ModalFrame->GetCloseButton() : nullptr)
+	{
+		PanelCloseButton->OnCloseClicked.RemoveDynamic(this, &USettingsPanelWidget::OnCloseClicked);
+	}
 	if (TabGroup) TabGroup->OnSelectedButtonBaseChanged.RemoveAll(this);
 
 	if (MasterRow) { MasterRow->OnValueChangedDelegate.RemoveAll(this); MasterRow->OnMuteToggledDelegate.RemoveAll(this); MasterRow->OnSliderReleased.RemoveAll(this); }
@@ -99,6 +112,7 @@ void USettingsPanelWidget::NativeDestruct()
 	if (QualityRow) QualityRow->OnSegmentChanged.RemoveAll(this);
 	if (FpsRow) FpsRow->OnSegmentChanged.RemoveAll(this);
 	if (ReduceMotionRow) ReduceMotionRow->OnToggleChanged.RemoveAll(this);
+	if (HandOpenBoxRow) HandOpenBoxRow->OnToggleChanged.RemoveAll(this);
 
 	if (NickChangeBtn) NickChangeBtn->OnClicked().RemoveAll(this);
 	if (GoogleLinkBtn) GoogleLinkBtn->OnClicked().RemoveAll(this);
@@ -157,14 +171,36 @@ void USettingsPanelWidget::InitTabs()
 	}
 	TabGroup->OnSelectedButtonBaseChanged.AddDynamic(this, &USettingsPanelWidget::HandleTabChanged);
 	TabGroup->SelectButtonAtIndex(0);
+	UpdateTabPlates(0);
 	if (ContentSwitcher)
 	{
 		ContentSwitcher->SetActiveWidgetIndex(0);
 	}
 }
 
+void USettingsPanelWidget::UpdateTabPlates(int32 SelectedIndex)
+{
+	UBorder* Plates[3] = { SoundTabPlate, GraphicsTabPlate, AccountTabPlate };
+	UIconWithButtonWidget* Tabs[3] = { SoundTab, GraphicsTab, AccountTab };
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		if (Plates[Index])
+		{
+			Plates[Index]->SetVisibility(Index == SelectedIndex ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+		}
+		if (Tabs[Index])
+		{
+			if (const UCommonTextStyle* TextStyle = Tabs[Index]->GetCurrentTextStyle())
+			{
+				Tabs[Index]->SetTextColor(TextStyle->Color);
+			}
+		}
+	}
+}
+
 void USettingsPanelWidget::HandleTabChanged(UCommonButtonBase* SelectedButton, int32 ButtonIndex)
 {
+	UpdateTabPlates(ButtonIndex);
 	if (ContentSwitcher)
 	{
 		ContentSwitcher->SetActiveWidgetIndex(ButtonIndex);
@@ -183,10 +219,10 @@ void USettingsPanelWidget::RefreshSoundTab()
 		return;
 	}
 	const FGameAudioSettings Audio = SoundMgr->GetAudioSettings();
-	if (MasterRow) MasterRow->ConfigureSlider(FText::FromString(TEXT("마스터")), Audio.MasterVolume, Audio.bMuted);
+	if (MasterRow) MasterRow->ConfigureSlider(FText::FromString(TEXT("전체")), Audio.MasterVolume, Audio.bMuted);
 	if (MusicRow)  MusicRow->ConfigureSlider(FText::FromString(TEXT("배경음악")), Audio.MusicVolume, Audio.bMusicMuted);
 	if (SFXRow)    SFXRow->ConfigureSlider(FText::FromString(TEXT("효과음")), Audio.SFXVolume, Audio.bSFXMuted);
-	if (UIRow)     UIRow->ConfigureSlider(FText::FromString(TEXT("UI음")), Audio.UIVolume, Audio.bUIMuted);
+	if (UIRow)     UIRow->ConfigureSlider(FText::FromString(TEXT("버튼 소리")), Audio.UIVolume, Audio.bUIMuted);
 	ApplyMasterDim();
 }
 
@@ -260,7 +296,7 @@ void USettingsPanelWidget::RefreshGraphicsTab()
 
 	if (QualityRow)
 	{
-		QualityRow->ConfigureSegments(FText::FromString(TEXT("품질")), FText::GetEmpty(),
+		QualityRow->ConfigureSegments(FText::FromString(TEXT("그래픽 품질")), FText::FromString(TEXT("낮추면 배터리를 덜 씁니다")),
 			{ FText::FromString(TEXT("낮음")), FText::FromString(TEXT("중간")), FText::FromString(TEXT("높음")) },
 			static_cast<int32>(SettingsMgr->GetQualityPreset()));
 	}
@@ -268,13 +304,18 @@ void USettingsPanelWidget::RefreshGraphicsTab()
 	{
 		const int32 Fps = SettingsMgr->GetFrameRateLimit();
 		const int32 FpsIndex = (Fps >= 120) ? 2 : (Fps >= 60 ? 1 : 0);
-		FpsRow->ConfigureSegments(FText::FromString(TEXT("최대 FPS")), FText::FromString(TEXT("120은 고주사율 기기에서만")),
+		FpsRow->ConfigureSegments(FText::FromString(TEXT("최대 FPS")), FText::FromString(TEXT("120은 고주사율 기기에서만 적용됩니다")),
 			{ FText::FromString(TEXT("30")), FText::FromString(TEXT("60")), FText::FromString(TEXT("120")) }, FpsIndex);
 	}
 	if (ReduceMotionRow)
 	{
-		ReduceMotionRow->ConfigureToggle(FText::FromString(TEXT("연출 감소")), FText::FromString(TEXT("화면 흔들림을 줄입니다")),
+		ReduceMotionRow->ConfigureToggle(FText::FromString(TEXT("연출 줄이기")), FText::FromString(TEXT("화면 흔들림과 움직임 연출을 줄입니다")),
 			SettingsMgr->IsReduceMotionEnabled());
+	}
+	if (HandOpenBoxRow)
+	{
+		HandOpenBoxRow->ConfigureToggle(FText::FromString(TEXT("상자 직접 열기")),
+			FText::FromString(TEXT("테이프를 따라 그어 상자를 엽니다")), SettingsMgr->IsHandOpenBox());
 	}
 }
 
@@ -318,23 +359,47 @@ void USettingsPanelWidget::HandleReduceMotionToggled(bool bOn)
 	}
 }
 
+void USettingsPanelWidget::HandleHandOpenBoxToggled(bool bOn)
+{
+	if (bRefreshing)
+	{
+		return;
+	}
+	if (USettingsManagerSubsystem* SettingsMgr = GetSettingsMgr())
+	{
+		SettingsMgr->SetHandOpenBox(bOn);
+		bSettingsDirty = true;
+	}
+}
+
 void USettingsPanelWidget::RefreshAccountTab()
 {
 	UPlayFabManagerSubsystem* PlayFabMgr = GetPlayFabMgr();
 	const bool bLoggedIn = PlayFabMgr && PlayFabMgr->IsLoggedIn();
+	const EPlayFabLoginType LoginType = bLoggedIn ? PlayFabMgr->GetUserInfo().LoginType : EPlayFabLoginType::Guest;
+	const bool bGoogle = bLoggedIn && LoginType == EPlayFabLoginType::Google;
 
 	if (StatusChipText)
 	{
 		FString Status = TEXT("오프라인");
-		if (bLoggedIn)
-		{
-			Status = (PlayFabMgr->GetUserInfo().LoginType == EPlayFabLoginType::Google) ? TEXT("구글") : TEXT("게스트");
-		}
+		if (bLoggedIn) Status = bGoogle ? TEXT("구글") : TEXT("게스트");
 		StatusChipText->SetText(FText::FromString(Status));
+	}
+	if (StatusDot)
+	{
+		StatusDot->SetColorAndOpacity(bLoggedIn
+			? (bGoogle ? FLinearColor::FromSRGBColor(FColor(0x5B, 0xC9, 0x7A)) : FLinearColor::FromSRGBColor(FColor(0x4A, 0x9B, 0xE8)))
+			: FLinearColor::FromSRGBColor(FColor(0x7D, 0x87, 0x97)));
 	}
 	if (NickNameText)
 	{
-		NickNameText->SetText(FText::FromString(bLoggedIn ? PlayFabMgr->GetUserInfo().DisplayName : TEXT("―")));
+		NickNameText->SetText(FText::FromString(bLoggedIn ? PlayFabMgr->GetUserInfo().DisplayName : TEXT("접속하지 않음")));
+	}
+	if (AccountNoteText)
+	{
+		AccountNoteText->SetText(FText::FromString(!bLoggedIn
+			? TEXT("서버에 연결되면 닉네임 변경과 로그아웃을 쓸 수 있습니다")
+			: (bGoogle ? TEXT("구글 계정에 저장되고 있습니다") : TEXT("게스트로 플레이하고 있습니다"))));
 	}
 	if (NickInput)
 	{
@@ -345,8 +410,19 @@ void USettingsPanelWidget::RefreshAccountTab()
 	if (LogoutBtn) LogoutBtn->SetIsEnabled(bLoggedIn);
 	if (GoogleLinkRow)
 	{
-		const bool bShowGoogleLink = bLoggedIn && PlayFabMgr->GetUserInfo().LoginType == EPlayFabLoginType::Guest;
+		const bool bShowGoogleLink = bLoggedIn && LoginType == EPlayFabLoginType::Guest;
 		GoogleLinkRow->SetVisibility(bShowGoogleLink ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+		if (AccountManageCard)
+		{
+			if (UMaterialInstanceDynamic* CardMaterial = AccountManageCard->GetDynamicMaterial())
+			{
+				const float CardHeight = bShowGoogleLink ? 444.0f : 296.0f;
+				CardMaterial->SetScalarParameterValue(TEXT("CornerRadius"), 56.0f / CardHeight);
+				CardMaterial->SetScalarParameterValue(TEXT("OuterThickness"), 8.0f / CardHeight);
+				CardMaterial->SetScalarParameterValue(TEXT("LipHeight"), 10.0f / CardHeight);
+				CardMaterial->SetScalarParameterValue(TEXT("BandHeightFrac"), 6.0f / CardHeight);
+			}
+		}
 	}
 }
 
@@ -387,7 +463,7 @@ void USettingsPanelWidget::HandleGoogleLinkClicked()
 	{
 		UIMgr->ShowAlertDialog(FText::FromString(TEXT("구글 계정 연동")),
 			FText::FromString(TEXT("로그인 화면에서 구글 계정으로 다시 로그인하면 연동됩니다")),
-			FSimpleDelegate());
+			FSimpleDelegate(), EConfirmDialogIcon::Info);
 	}
 }
 
@@ -403,7 +479,7 @@ void USettingsPanelWidget::HandleLogoutClicked()
 					PlayFabMgr->Logout();
 				}
 				RefreshAccountTab();
-			}));
+			}), FSimpleDelegate(), EConfirmDialogIcon::Warning);
 	}
 }
 
@@ -413,7 +489,8 @@ void USettingsPanelWidget::HandleResetClicked()
 	{
 		UIMgr->ShowConfirmDialog(FText::FromString(TEXT("데이터 초기화")),
 			FText::FromString(TEXT("모든 진행이 사라집니다 ― 되돌릴 수 없어요. 정말 초기화할까요?")),
-			FSimpleDelegate::CreateUObject(this, &USettingsPanelWidget::HandleResetConfirmed));
+			FSimpleDelegate::CreateUObject(this, &USettingsPanelWidget::HandleResetConfirmed),
+			FSimpleDelegate(), EConfirmDialogIcon::Warning);
 	}
 }
 
@@ -430,7 +507,7 @@ void USettingsPanelWidget::HandleResetConfirmed()
 	{
 		UIMgr->ShowAlertDialog(FText::FromString(TEXT("초기화 완료")),
 			FText::FromString(TEXT("게임을 종료합니다. 다시 실행하면 처음부터 시작됩니다")),
-			FSimpleDelegate::CreateUObject(this, &USettingsPanelWidget::HandleQuitConfirmed));
+			FSimpleDelegate::CreateUObject(this, &USettingsPanelWidget::HandleQuitConfirmed), EConfirmDialogIcon::Info);
 	}
 	else
 	{

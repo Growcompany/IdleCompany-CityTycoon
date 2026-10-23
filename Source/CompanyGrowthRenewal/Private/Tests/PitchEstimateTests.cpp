@@ -2,6 +2,7 @@
 #include "Enum/QualityGrade.h"
 #include "Data/StageProgressData.h"
 #include "Data/EmployeeTypes.h"
+#include "Data/FatigueConfig.h"
 #include "Entity/Officeworker/EmployeeBehaviorComponent.h"
 #include "Manager/OfficeStageProgressManager.h"
 #include "Manager/ProjectOperationManager.h"
@@ -27,12 +28,35 @@ static FEstimateWorkerInput MakeSoloWorker(int32 Level, int32 Slot, int32 Points
 
 bool FCGRExpectedQualityTest::RunTest(const FString& Parameters)
 {
+	const TArray<int32> SpawnStats = MakeStatProfile();
+	int32 SpawnTotal = 0;
+	for (const int32 Value : SpawnStats)
+	{
+		TestTrue(TEXT("초기 스탯은 최소 3"), Value >= 3);
+		SpawnTotal += Value;
+	}
+	TestEqual(TEXT("초기 스탯은 6종"), SpawnStats.Num(), static_cast<int32>(EEmployeeStatIndex::Count));
+	TestEqual(TEXT("초기 스탯 총량 25"), SpawnTotal, 25);
+
 	TArray<int32> Weights; Weights.Init(0, 6);
 	Weights[1] = 5;                       // 개발 직능만 활성
 
 	const int32 R1 = 60, R2 = 60, R3 = 60;
 	const float TargetBase = FStageProgressData::ComputeDisciplineTargetBase(R1, R2, R3);
 	const float Target = FStageProgressData::ComputeDisciplineTarget(5, 5, TargetBase);
+	{
+		// 주 직능이 활성 목록에 없어도 현재 프로젝트의 업무를 배분한다.
+		TArray<FEstimateWorkerInput> Roster;
+		Roster.Add(MakeSoloWorker(1, 0, 20));
+		const float ActiveAffinity = UOfficeStageProgressManager::DisciplineAffinity(0);
+		const float PerSec = UEmployeeTypeHelper::CalculateBaseOutput(1)
+			* UEmployeeBehaviorComponent::ScoreNormInterval * ActiveAffinity;
+		const FProjectOutlookEstimate Outlook = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, Target / PerSec, 1.f);
+		TestTrue(TEXT("주 직능 부재 시에도 예상 점수가 발생"), Outlook.ExpectedDisciplineScores[1] > 0.f);
+		TestTrue(TEXT("주 직능 부재 시 활성 직능으로 전량 배분"),
+			FMath::IsNearlyEqual(Outlook.ExpectedDisciplineScores[1], Target, 0.01f));
+	}
 
 	{
 		TArray<FEstimateWorkerInput> Empty;
@@ -99,6 +123,62 @@ bool FCGRExpectedQualityTest::RunTest(const FString& Parameters)
 		{
 			TestEqual(TEXT("50% 예상 점수 반환"), At50.ExpectedDisciplineScores[1] / Target, 0.50f, 0.001f);
 		}
+	}
+	{
+		UFatigueConfig* Config = NewObject<UFatigueConfig>();
+		TArray<FEstimateWorkerInput> Roster;
+		Roster.Add(MakeSoloWorker(1, 1, 10));
+		const float PerSec = UEmployeeTypeHelper::CalculateBaseOutput(1)
+			* UEmployeeBehaviorComponent::ScoreNormInterval
+			* UOfficeStageProgressManager::DisciplineAffinity(10);
+		const float NearGateDuration = Target * 0.5f / PerSec;
+		const auto NearGate = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, NearGateDuration, 1.f, Config);
+		TestTrue(TEXT("평균이 최소선인 단독 직원은 변동 때문에 출시 위험"), NearGate.bGateRisk);
+		TestTrue(TEXT("표시 점수도 게이트 판정과 같은 보수적 값"),
+			NearGate.ExpectedDisciplineScores[1] < Target * 0.5f);
+
+		const auto Fresh = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, 30.f, 1.f, Config);
+		Roster[0].InitialFatigue = 90.f;
+		const auto Tired = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, 30.f, 1.f, Config);
+		TestTrue(TEXT("초기 피로가 높으면 근무 시간과 점수가 줄어든다"),
+			Tired.ExpectedDisciplineScores[1] < Fresh.ExpectedDisciplineScores[1]);
+
+		Roster[0].InitialFatigue = 0.f;
+		Roster[0].EffectiveStamina = 140;
+		Roster[0].EffectiveComposure = 140;
+		const auto Resilient = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, 30.f, 1.f, Config);
+		TestTrue(TEXT("체력과 침착성이 높으면 기여 가능시간이 늘어난다"),
+			Resilient.ExpectedDisciplineScores[1] > Fresh.ExpectedDisciplineScores[1]);
+
+		Roster[0].CriticalChance = 0.3f;
+		const auto Critical = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, 30.f, 1.f, Config);
+		TestTrue(TEXT("크리 기대값은 직원 점수에 반영된다"),
+			Critical.ExpectedDisciplineScores[1] > Resilient.ExpectedDisciplineScores[1]);
+		const auto BaselineCritical = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, 30.f, 1.f);
+		Roster[0].CriticalMultiplier = EmployeeStatTuning::CriticalMultiplier(10, 0.5f);
+		const auto StrongerCritical = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, 30.f, 1.f);
+		TestTrue(TEXT("크리 성과 배율 증가는 예상 점수에도 반영된다"),
+			StrongerCritical.ExpectedDisciplineScores[1] > BaselineCritical.ExpectedDisciplineScores[1]);
+
+		Config->GainPerSec = 0.f;
+		Config->BoltChancePerSec = 0.f;
+		Roster[0].CriticalChance = 0.f;
+		Roster[0].OutputScale = 0.25f;
+		const auto Solo = FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, R1, R2, R3, 30.f, 1.f, Config);
+		TArray<FEstimateWorkerInput> FourWorkers;
+		for (int32 Index = 0; Index < 4; ++Index) { FourWorkers.Add(Roster[0]); }
+		const auto Team = FStageProgressData::EstimateProjectOutlook(
+			FourWorkers, Weights, R1, R2, R3, 30.f, 1.f, Config);
+		TestTrue(TEXT("같은 평균 산출을 여러 직원이 나누면 상대 변동이 작아진다"),
+			Team.ExpectedDisciplineScores[1] > Solo.ExpectedDisciplineScores[1]);
 	}
 	TestEqual(TEXT("49.9% 표시는 49%로 내림"),
 		FStageProgressData::ComputeDisciplinePercentDisplayValue(0.499f), 49);
@@ -378,14 +458,9 @@ bool FCGRLaunchRevenueAssemblyTest::RunTest(const FString& Parameters)
 	// 게임 산업 예시 — Base 50(프로젝트 5) / PeakMult 2.2 / B등급 ReviewLeverage 1.5 = 1.375 / 운영 15분
 	const float Base = 50.0f, PeakMult = 2.2f, QualityMult = 1.375f, OpSec = 900.0f;
 
-	// 항 목록을 리터럴로 못박는다 — 피크·트렌드·품질 중 어느 항이 빠져도 여기서 터진다
-	TestEqual(TEXT("피크 초당 = 규모 x 피크 x 트렌드 x 품질"),
-		UProjectOperationManager::ComputePeakRevenuePerSec(Base, PeakMult, 1.0f, QualityMult), 151.25f, 0.001f);
-
-	// 트렌드 항은 과거 추정부에만 있었다 — 결과 화면 조립식에서 빠지면 여기서 터진다
-	TestEqual(TEXT("트렌드 1.5배 = 총수익 1.5배"),
-		UProjectOperationManager::ComputeLaunchRevenue(Base, PeakMult, 1.5f, QualityMult, OpSec, 0.28f),
-		UProjectOperationManager::ComputeLaunchRevenue(Base, PeakMult, 1.0f, QualityMult, OpSec, 0.28f) * 1.5f, 1.0f);
+	// 항 목록을 리터럴로 못박는다 — 피크·품질 중 어느 항이 빠져도 여기서 터진다
+	TestEqual(TEXT("피크 초당 = 규모 x 피크 x 품질"),
+		UProjectOperationManager::ComputePeakRevenuePerSec(Base, PeakMult, QualityMult), 151.25f, 0.001f);
 
 	// 총수익의 의미 = "피크 초당 수익을 런타임과 같은 감쇠 곡선(0.5^(t/(T·HLF)))을 따라 T 만큼 적분한 값".
 	// 조립식을 다시 적지 않고 곡선을 직접 적분해 비교한다 — 감쇠나 운영시간이 빠지면 빨간불.
@@ -402,11 +477,11 @@ bool FCGRLaunchRevenueAssemblyTest::RunTest(const FString& Parameters)
 		return static_cast<float>(Sum * Seconds / N);
 	};
 
-	const float PeakRps = UProjectOperationManager::ComputePeakRevenuePerSec(Base, PeakMult, 1.0f, QualityMult);
+	const float PeakRps = UProjectOperationManager::ComputePeakRevenuePerSec(Base, PeakMult, QualityMult);
 	const float HalfLives[] = { 0.28f, 0.85f };
 	for (const float HLF : HalfLives)
 	{
-		const float Total = UProjectOperationManager::ComputeLaunchRevenue(Base, PeakMult, 1.0f, QualityMult, OpSec, HLF);
+		const float Total = UProjectOperationManager::ComputeLaunchRevenue(Base, PeakMult, QualityMult, OpSec, HLF);
 
 		TestEqual(*FString::Printf(TEXT("HLF %.2f 총수익 = 감쇠 곡선 적분"), HLF),
 			Total, IntegrateOperation(PeakRps, OpSec, HLF), PeakRps * OpSec * 0.001f);
@@ -415,6 +490,90 @@ bool FCGRLaunchRevenueAssemblyTest::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("HLF %.2f 총수익 < 피크x시간"), HLF), Total < PeakRps * OpSec * 0.99f);
 	}
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRWorkstationEstimateEffectsTest,
+	"CGR.Pitch.WorkstationEffects",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRWorkstationEstimateEffectsTest::RunTest(const FString& Parameters)
+{
+	UFatigueConfig* Config = NewObject<UFatigueConfig>();
+	Config->GainPerSec = 1.f;
+	Config->TiredThreshold = 0.f;
+	Config->SlackingThreshold = 100.f;
+	Config->BoltChancePerSec = 0.f;
+	Config->MaxFatiguePenalty = 0.8f;
+	TArray<FEstimateWorkerInput> Roster;
+	Roster.Add(MakeSoloWorker(1, 0, 20));
+	Roster[0].InitialFatigue = 75.f;
+	Roster[0].RandomFactorSecondMoment = 1.f;
+	const TArray<int32> Weights = { 1, 0, 0, 0, 0, 0 };
+	auto EstimateScore = [&]()
+	{
+		return FStageProgressData::EstimateProjectOutlook(Roster, Weights, 10, 10, 10, 10.f, 1.f, Config)
+			.ExpectedDisciplineScores[0];
+	};
+	const float Baseline = EstimateScore();
+	Roster[0].FatigueGainScale = 0.5f;
+	const float EnvironmentScore = EstimateScore();
+	TestTrue(TEXT("Lower fatigue accumulation increases the same worker's estimate"), EnvironmentScore > Baseline);
+	Roster[0].OutputScale = 2.f;
+	TestEqual(TEXT("Desk tools scale contribution once, independently of fatigue"),
+		EstimateScore(), EnvironmentScore * 2.f, 0.001f);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FCGRHardGateEstimateTest,
+	"CGR.Pitch.HardGateEstimate",
+	EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+
+bool FCGRHardGateEstimateTest::RunTest(const FString& Parameters)
+{
+	UFatigueConfig* Config = NewObject<UFatigueConfig>();
+	Config->GainPerSec = 2.f;
+	Config->TiredThreshold = 50.f;
+	Config->SlackingThreshold = 70.f;
+	Config->BoltChancePerSec = 0.15f;
+	Config->BoltDuration = 5.f;
+	TArray<FEstimateWorkerInput> Roster;
+	Roster.Add(MakeSoloWorker(1, 1, 10));
+	Roster[0].InitialFatigue = 68.f;
+	Roster[0].RandomFactorSecondMoment = 1.02f;
+	const TArray<int32> Weights = { 0, 5, 0, 0, 0, 0 };
+	auto Score = [&](float Scale, bool bHardGate)
+	{
+		return FStageProgressData::EstimateProjectOutlook(
+			Roster, Weights, 60, 60, 60, 15.f, Scale, Config, bHardGate)
+			.ExpectedDisciplineScores[1];
+	};
+	const float Normal = Score(1.f, false);
+	const float HardGate = Score(1.f, true);
+	TestTrue(TEXT("같은 15초 로스터에서 하드 게이트는 졸음·이탈 공백 없이 더 높은 전망"), HardGate > Normal);
+	Config->BoltChancePerSec = 0.f;
+	TestTrue(TEXT("이탈 가능성이 없어도 하드 게이트의 졸음 공백 제거가 반영"),
+		Score(1.f, true) > Score(1.f, false));
+	Config->BoltChancePerSec = 0.15f;
+	Roster[0].InitialFatigue = 20.f;
+	Config->GainPerSec = 0.f;
+	TestTrue(TEXT("졸음 가능성이 없어도 하드 게이트의 이탈 공백 제거가 반영"),
+		Score(1.f, true) > Score(1.f, false));
+
+	Roster[0].InitialFatigue = 68.f;
+	Config->GainPerSec = 0.f;
+	const float NoFatigueGain = Score(1.f, true);
+	TestTrue(TEXT("하드 게이트에서도 피로 누적에 따른 점수 감산은 유지"), NoFatigueGain > HardGate);
+
+	Roster[0].RandomFactorSecondMoment = 1.2f;
+	TestTrue(TEXT("하드 게이트에서도 히트 변동의 보수 감산은 유지"), Score(1.f, true) < NoFatigueGain);
+
+	const float Base = Score(1.f, true);
+	const float WithCommonScale = Score(1.25f, true);
+	TestEqual(TEXT("공통 산출 배수 1.25배는 전망 점수에 한 번 적용"),
+		WithCommonScale, Base * 1.25f, 0.001f);
 	return true;
 }
 

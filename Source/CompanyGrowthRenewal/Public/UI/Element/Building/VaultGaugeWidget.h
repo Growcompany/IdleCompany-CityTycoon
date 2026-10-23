@@ -12,9 +12,9 @@ class UImage;
 /**
  * 건물 위 금고 채움 게이지.
  * 순수 표시 위젯 — 자기 위치와 생명주기를 모른다(InGameLayerWidget 이 풀로 관리).
- * 담당 구간은 0~99% 이고 100% 는 기존 VaultFull 버블이 인계받는다.
+ * 채움은 운영 경과율(시간 축)이라 금고 잔액과 무관하다.
  */
-UCLASS()
+UCLASS(meta=(DisableNativeTick))
 class COMPANYGROWTHRENEWAL_API UVaultGaugeWidget : public UUserWidget
 {
 	GENERATED_BODY()

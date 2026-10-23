@@ -5,15 +5,15 @@
 enum class ETutorialMissionCompletionMode : uint8
 {
 	ImmediateAdvance,
-	FinalClaim
+	ManualClaim
 };
 
 struct FTutorialMissionCompletionRules
 {
-	static ETutorialMissionCompletionMode Resolve(bool bHasNextMission)
+	static ETutorialMissionCompletionMode Resolve(bool bManualClaim)
 	{
-		return bHasNextMission
-			? ETutorialMissionCompletionMode::ImmediateAdvance
-			: ETutorialMissionCompletionMode::FinalClaim;
+		return bManualClaim
+			? ETutorialMissionCompletionMode::ManualClaim
+			: ETutorialMissionCompletionMode::ImmediateAdvance;
 	}
 };
