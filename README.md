@@ -50,9 +50,9 @@
 
 | 사례 | 확인할 구현 |
 |---|---|
-| 건물 배치에 따른 도로 자동 연결 | [삼각형 절개·정점 보간](Source/CompanyGrowthRenewal/Private/Entity/Plot/CityPlotStreetSurface.cpp) |
-| 생산 진행 계산과 저장·불러오기 | [고정 스텝·난수·진행 상태](Source/CompanyGrowthRenewal/Private/Utils/ManufacturingWorkSimulator.cpp), [오프라인 중복 구간 제외](Source/CompanyGrowthRenewal/Private/Manager/ManufacturingDevelopmentManager.cpp) |
-| 맵 이동 시 데이터 유지와 객체 정리 | [월드 종료 시 촬영 작업 정리](Source/CompanyGrowthRenewal/Private/Manager/EmployeeManager.cpp) |
+| 건물 배치에 따른 도로 자동 연결 | [도로 메시 클리핑과 정점 보간](Source/CompanyGrowthRenewal/Private/Entity/Plot/CityPlotStreetSurface.cpp) |
+| 생산 시뮬레이션 시스템 | [고정 스텝·난수·진행 상태](Source/CompanyGrowthRenewal/Private/Utils/ManufacturingWorkSimulator.cpp), [오프라인 중복 구간 제외](Source/CompanyGrowthRenewal/Private/Manager/ManufacturingDevelopmentManager.cpp) |
+| Subsystem 기반 생명주기 관리 | [월드 종료 시 촬영 작업 정리](Source/CompanyGrowthRenewal/Private/Manager/EmployeeManager.cpp) |
 | GPU 최적화의 차량 보조 구현 | [화면 내 대수·활성 상한·ISM 갱신](Source/CompanyGrowthRenewal/Private/Entity/Ambient/TrafficManager.cpp) |
 | 여러 직원 채용 시 화면 멈춤 | [직원 생성 분산](Source/CompanyGrowthRenewal/Private/Office/OfficeRecruitmentFlowSubsystem.cpp), [사진 버퍼 이동·비동기 저장·요청 검사](Source/CompanyGrowthRenewal/Private/Entity/Officeworker/Officeworker.cpp) |
 | HISM 변환·복구 도구 | [변환·복구](Tools/CityOpt/hism_convert.py), [왕복 비교](Tools/CityOpt/verify_roundtrip.py) |
