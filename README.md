@@ -85,7 +85,7 @@
 
 [Cropout](https://www.unrealengine.com/blog/cropout-casual-rts-game-sample-project)은 Epic Games가 Unreal Engine의 기능과 구조를 직접 보여주기 위해 Blueprint로 제작·공개한 공식 크로스플랫폼 예제입니다. 엔진이 의도한 시스템 구성과 크로스플랫폼 구현 방식을 신뢰도 높게 학습할 수 있는 좋은 표본이라고 판단해 설계 기준으로 선택했습니다. 여기서 가져온 것은 코드나 콘텐츠가 아니라 Common UI, Enhanced Input, Save/Load, Blueprint Interface와 모바일·PC 패키징을 구성하는 **설계 기준과 사용 패턴**입니다.
 
-반면 **회사키우기에서 새로 쌓은 시스템**은 장기 수명 서비스의 역할 분리, 타입이 보장되는 DataTable SOT, CommonUI 3-Stack 라우터, PC·터치 공용 카메라 도메인, 배치 판정 SSOT와 얼굴 사진 촬영 FIFO 같은 결정적 파이프라인입니다. 단순 포팅이 아니라 게임 규모와 수명주기에 맞춰 C++로 분해하고 다시 설계했습니다.
+반면 **회사키우기에서 새로 쌓은 시스템**은 장기 수명 서비스의 역할 분리, 타입이 보장되는 DataTable SOT, CommonUI 3-Stack 라우터, PC·터치 공용 카메라 도메인, 배치 판정 SSOT, 얼굴 사진 촬영 요청을 큐에서 순서대로 처리하는 구조입니다. 단순 포팅이 아니라 게임 규모와 수명주기에 맞춰 C++로 분해하고 다시 설계했습니다.
 
 | Cropout에서 참고한 패턴 | CompanyGrowthRenewal에서 직접 재설계한 구조 | Evidence |
 |---|---|---|
@@ -93,7 +93,7 @@
 | Common UI 활용 | Main·Prompt·Bottom 3-Stack 라우터와 입력 모드 수명주기 중앙화 | [UIBase.cpp](Source/CompanyGrowthRenewal/Private/UI/UIBase.cpp), [UIManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/UIManagerSubsystem.cpp) |
 | Enhanced Input | PC 가속 이동과 모바일 터치 드래그를 분리하고 카메라 도메인 API는 공유 | [MovementInputHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/MovementInputHandler.cpp), [PlayerCamera.cpp](Source/CompanyGrowthRenewal/Private/Player/PlayerCamera.cpp) |
 | Blueprint 데이터 흐름 | 명시적 C++ 타입과 DataTable SOT·캐시·Loud Failure 파이프라인 구축 | [TableManagerSubsystem.cpp](Source/CompanyGrowthRenewal/Private/Manager/TableManagerSubsystem.cpp), [CSV sample](DataImport/Samples/DT_WidgetClass_Import.csv) |
-| Blueprint Interface로 책임을 나누는 방식 | 미리보기·확정이 공유하는 배치 판정 SSOT, 얼굴 사진 FIFO와 자동화 테스트로 결정적 파이프라인 구축 | [PlacementHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/PlacementHandler.cpp), [EmployeeManager.cpp](Source/CompanyGrowthRenewal/Private/Manager/EmployeeManager.cpp), [PlotPlacementRulesTests.cpp](Source/CompanyGrowthRenewal/Private/Tests/PlotPlacementRulesTests.cpp) |
+| Blueprint Interface로 책임을 나누는 방식 | 미리보기·확정이 공유하는 배치 판정 SSOT와 자동화 테스트<br>얼굴 사진 촬영 요청은 큐에서 순서대로 처리 | [PlacementHandler.cpp](Source/CompanyGrowthRenewal/Private/Player/Components/PlacementHandler.cpp), [EmployeeManager.cpp](Source/CompanyGrowthRenewal/Private/Manager/EmployeeManager.cpp), [PlotPlacementRulesTests.cpp](Source/CompanyGrowthRenewal/Private/Tests/PlotPlacementRulesTests.cpp) |
 
 > Cropout은 구조 학습 기준이며 이 저장소는 독립 프로젝트입니다. Epic Games와 제휴하거나 공식 승인을 받은 저장소가 아니며, Cropout 프로젝트 파일의 코드와 게임 콘텐츠는 포함하지 않습니다.
 
